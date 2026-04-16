@@ -1,0 +1,299 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model auth_group {
+  id                     Int                      @id @default(autoincrement())
+  name                   String                   @unique @db.VarChar(150)
+  auth_group_permissions auth_group_permissions[]
+  auth_user_groups       auth_user_groups[]
+
+  @@index([name], map: "auth_group_name_a6ea08ec_like")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model auth_group_permissions {
+  id              Int             @id @default(autoincrement())
+  group_id        Int
+  permission_id   Int
+  auth_permission auth_permission @relation(fields: [permission_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_group_permissio_permission_id_84c5c92e_fk_auth_perm")
+  auth_group      auth_group      @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_group_permissions_group_id_b120cbf9_fk_auth_group_id")
+
+  @@unique([group_id, permission_id], map: "auth_group_permissions_group_id_permission_id_0cd325b0_uniq")
+  @@index([group_id], map: "auth_group_permissions_group_id_b120cbf9")
+  @@index([permission_id], map: "auth_group_permissions_permission_id_84c5c92e")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model auth_permission {
+  id                         Int                          @id @default(autoincrement())
+  name                       String                       @db.VarChar(255)
+  content_type_id            Int
+  codename                   String                       @db.VarChar(100)
+  auth_group_permissions     auth_group_permissions[]
+  django_content_type        django_content_type          @relation(fields: [content_type_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_permission_content_type_id_2f476e4b_fk_django_co")
+  auth_user_user_permissions auth_user_user_permissions[]
+
+  @@unique([content_type_id, codename], map: "auth_permission_content_type_id_codename_01ab375a_uniq")
+  @@index([content_type_id], map: "auth_permission_content_type_id_2f476e4b")
+}
+
+model auth_user {
+  id                         Int                          @id @default(autoincrement())
+  password                   String                       @db.VarChar(128)
+  last_login                 DateTime?                    @db.Timestamptz(6)
+  is_superuser               Boolean
+  username                   String                       @unique @db.VarChar(150)
+  first_name                 String                       @db.VarChar(30)
+  last_name                  String                       @db.VarChar(150)
+  email                      String                       @db.VarChar(254)
+  is_staff                   Boolean
+  is_active                  Boolean
+  date_joined                DateTime                     @db.Timestamptz(6)
+  password_reset_token       String?                      @db.VarChar(100)
+  auth_user_groups           auth_user_groups[]
+  auth_user_user_permissions auth_user_user_permissions[]
+  authtoken_token            authtoken_token?
+  fondo_api_userprofile      fondo_api_userprofile?
+
+  @@index([username], map: "auth_user_username_6821ab7c_like")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model auth_user_groups {
+  id         Int        @id @default(autoincrement())
+  user_id    Int
+  group_id   Int
+  auth_group auth_group @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_user_groups_group_id_97559544_fk_auth_group_id")
+  auth_user  auth_user  @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_user_groups_user_id_6a12ed8b_fk_auth_user_id")
+
+  @@unique([user_id, group_id], map: "auth_user_groups_user_id_group_id_94350c0c_uniq")
+  @@index([group_id], map: "auth_user_groups_group_id_97559544")
+  @@index([user_id], map: "auth_user_groups_user_id_6a12ed8b")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model auth_user_user_permissions {
+  id              Int             @id @default(autoincrement())
+  user_id         Int
+  permission_id   Int
+  auth_permission auth_permission @relation(fields: [permission_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_user_user_permi_permission_id_1fbb5f2c_fk_auth_perm")
+  auth_user       auth_user       @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_user_user_permissions_user_id_a95ead1b_fk_auth_user_id")
+
+  @@unique([user_id, permission_id], map: "auth_user_user_permissions_user_id_permission_id_14a6b632_uniq")
+  @@index([permission_id], map: "auth_user_user_permissions_permission_id_1fbb5f2c")
+  @@index([user_id], map: "auth_user_user_permissions_user_id_a95ead1b")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model authtoken_token {
+  key       String    @id @db.VarChar(40)
+  created   DateTime  @db.Timestamptz(6)
+  user_id   Int       @unique
+  auth_user auth_user @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "authtoken_token_user_id_35299eff_fk_auth_user_id")
+
+  @@index([key], map: "authtoken_token_key_10f0b77e_like")
+}
+
+model django_content_type {
+  id              Int               @id @default(autoincrement())
+  app_label       String            @db.VarChar(100)
+  model           String            @db.VarChar(100)
+  auth_permission auth_permission[]
+
+  @@unique([app_label, model], map: "django_content_type_app_label_model_76bd3d3b_uniq")
+}
+
+model django_migrations {
+  id      Int      @id @default(autoincrement())
+  app     String   @db.VarChar(255)
+  name    String   @db.VarChar(255)
+  applied DateTime @db.Timestamptz(6)
+}
+
+model django_session {
+  session_key  String   @id @db.VarChar(40)
+  session_data String
+  expire_date  DateTime @db.Timestamptz(6)
+
+  @@index([expire_date], map: "django_session_expire_date_a5c62663")
+  @@index([session_key], map: "django_session_session_key_c0390e0f_like")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model fondo_api_activity {
+  id                     Int                      @id @default(autoincrement())
+  name                   String
+  value                  BigInt
+  date                   DateTime                 @db.Date
+  year_id                Int
+  fondo_api_activityyear fondo_api_activityyear   @relation(fields: [year_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_activity_year_id_aed3b367_fk_fondo_api")
+  fondo_api_activityuser fondo_api_activityuser[]
+
+  @@index([year_id], map: "fondo_api_activity_year_id_aed3b367")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model fondo_api_activityuser {
+  id                    Int                   @id @default(autoincrement())
+  activity_id           Int
+  user_id               Int
+  state                 Int
+  fondo_api_activity    fondo_api_activity    @relation(fields: [activity_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_activityus_activity_id_d8912768_fk_fondo_api")
+  fondo_api_userprofile fondo_api_userprofile @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_activityus_user_id_b53bb1a7_fk_fondo_api")
+
+  @@index([activity_id], map: "fondo_api_activityuser_activity_id_d8912768")
+  @@index([user_id], map: "fondo_api_activityuser_user_id_b53bb1a7")
+}
+
+model fondo_api_activityyear {
+  id                 Int                  @id @default(autoincrement())
+  year               BigInt               @unique
+  enable             Boolean
+  fondo_api_activity fondo_api_activity[]
+}
+
+model fondo_api_file {
+  id           Int      @id @default(autoincrement())
+  type         Int
+  display_name String   @unique
+  created_at   DateTime @db.Timestamptz(6)
+
+  @@index([display_name], map: "fondo_api_file_display_name_4fdf1fd2_like")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model fondo_api_loan {
+  id                    Int                    @id @default(autoincrement())
+  value                 BigInt
+  timelimit             Int
+  disbursement_date     DateTime               @db.Date
+  payment               Int
+  created_at            DateTime               @db.Timestamptz(6)
+  fee                   Int
+  comments              String?
+  state                 Int
+  rate                  Decimal                @db.Decimal(5, 3)
+  user_id               Int
+  prev_loan_id          Int?
+  refinanced_loan       BigInt?
+  disbursement_value    BigInt?
+  fondo_api_loan        fondo_api_loan?        @relation("fondo_api_loanTofondo_api_loan", fields: [prev_loan_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_loan_prev_loan_id_9235a32d_fk_fondo_api_loan_id")
+  other_fondo_api_loan  fondo_api_loan[]       @relation("fondo_api_loanTofondo_api_loan")
+  fondo_api_userprofile fondo_api_userprofile  @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_loan_user_id_f4df893f_fk_fondo_api")
+  fondo_api_loandetail  fondo_api_loandetail[]
+
+  @@index([prev_loan_id], map: "fondo_api_loan_prev_loan_id_9235a32d")
+  @@index([user_id], map: "fondo_api_loan_user_id_f4df893f")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model fondo_api_loandetail {
+  id              Int            @id @default(autoincrement())
+  total_payment   BigInt
+  minimum_payment BigInt
+  payday_limit    DateTime       @db.Date
+  interests       BigInt
+  capital_balance BigInt
+  from_date       DateTime       @db.Date
+  loan_id         Int
+  fondo_api_loan  fondo_api_loan @relation(fields: [loan_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_loandetail_loan_id_6a9fa8c0_fk_fondo_api_loan_id")
+
+  @@index([loan_id], map: "fondo_api_loandetail_loan_id_6a9fa8c0")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model fondo_api_notificationsubscriptions {
+  id                    Int                   @id @default(autoincrement())
+  subscription          Unsupported("hstore")
+  user_id               Int
+  fondo_api_userprofile fondo_api_userprofile @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_notificati_user_id_5954476e_fk_fondo_api")
+
+  @@index([user_id], map: "fondo_api_notificationsubscriptions_user_id_5954476e")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model fondo_api_power {
+  id                                                                        Int                   @id @default(autoincrement())
+  meeting_date                                                              DateTime              @db.Date
+  state                                                                     Int
+  requestee_id                                                              Int
+  requester_id                                                              Int
+  fondo_api_userprofile_fondo_api_power_requestee_idTofondo_api_userprofile fondo_api_userprofile @relation("fondo_api_power_requestee_idTofondo_api_userprofile", fields: [requestee_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_power_requestee_id_e5f04cf8_fk_fondo_api")
+  fondo_api_userprofile_fondo_api_power_requester_idTofondo_api_userprofile fondo_api_userprofile @relation("fondo_api_power_requester_idTofondo_api_userprofile", fields: [requester_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_power_requester_id_59064a2c_fk_fondo_api")
+
+  @@index([requestee_id], map: "fondo_api_power_requestee_id_e5f04cf8")
+  @@index([requester_id], map: "fondo_api_power_requester_id_59064a2c")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model fondo_api_savingaccount {
+  id                    Int                   @id @default(autoincrement())
+  created_at            DateTime              @db.Timestamptz(6)
+  end_date              DateTime              @db.Date
+  state                 Int
+  value                 BigInt
+  user_id               Int
+  fondo_api_userprofile fondo_api_userprofile @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_savingacco_user_id_b7105f36_fk_fondo_api")
+
+  @@index([user_id], map: "fondo_api_savingaccount_user_id_b7105f36")
+}
+
+model fondo_api_schedulertask {
+  id        Int                   @id @default(autoincrement())
+  type      Int
+  run_date  DateTime              @db.Timestamptz(6)
+  payload   Unsupported("hstore")
+  processed Boolean
+  repeat    Int
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model fondo_api_userfinance {
+  id                    Int                   @id @default(autoincrement())
+  contributions         BigInt
+  balance_contributions BigInt
+  total_quota           BigInt
+  utilized_quota        BigInt
+  available_quota       BigInt
+  last_modified         DateTime              @db.Date
+  user_id               Int
+  fondo_api_userprofile fondo_api_userprofile @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_userfinanc_user_id_9645b2bd_fk_fondo_api")
+
+  @@index([user_id], map: "fondo_api_userfinance_user_id_9645b2bd")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model fondo_api_userpreference {
+  id                    Int                   @id @default(autoincrement())
+  notifications         Boolean
+  user_id               Int
+  primary_color         String                @db.VarChar(15)
+  secondary_color       String                @db.VarChar(15)
+  fondo_api_userprofile fondo_api_userprofile @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_userprefer_user_id_c39c1264_fk_fondo_api")
+
+  @@index([user_id], map: "fondo_api_userpreference_user_id_c39c1264")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model fondo_api_userprofile {
+  user_ptr_id                                                         Int                                   @id
+  identification                                                      BigInt                                @unique
+  role                                                                Int
+  key_activation                                                      String?                               @db.VarChar(100)
+  birthdate                                                           DateTime?                             @db.Date
+  fondo_api_activityuser                                              fondo_api_activityuser[]
+  fondo_api_loan                                                      fondo_api_loan[]
+  fondo_api_notificationsubscriptions                                 fondo_api_notificationsubscriptions[]
+  fondo_api_power_fondo_api_power_requestee_idTofondo_api_userprofile fondo_api_power[]                     @relation("fondo_api_power_requestee_idTofondo_api_userprofile")
+  fondo_api_power_fondo_api_power_requester_idTofondo_api_userprofile fondo_api_power[]                     @relation("fondo_api_power_requester_idTofondo_api_userprofile")
+  fondo_api_savingaccount                                             fondo_api_savingaccount[]
+  fondo_api_userfinance                                               fondo_api_userfinance[]
+  fondo_api_userpreference                                            fondo_api_userpreference[]
+  auth_user                                                           auth_user                             @relation(fields: [user_ptr_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_userprofile_user_ptr_id_9438f85d_fk_auth_user_id")
+}
