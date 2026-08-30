@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-08-30 | v0.12 | **Phases 0 and 1 reviewed — both Approved-with-conditions, no blocking findings.** 8 conditions tracked in §7. Cross-cutting rule 5 **corrected** (Django `DateField(auto_now)` is process-local, not tz-aware). Two new rules: BigInt→JSON (17 columns; first Phase 3 response would 500) and the date-formatting/localtime asymmetry. D18 registered for content-type divergences. Fixed a self-contradiction in §9. |
 | 2026-08-30 | v0.11 | business-analyst Phase 3 note folded in (verdict: **Concerns**). D1 clarified on two points that would each have broken every ordinary member save. **D14–D17 registered**; D16/D17 need operator input. Two live v1 defects verified and recorded: personal edits to the two shared-email accounts **409 today**, and **4 of 15 members cannot reset their password**. |
 | 2026-08-30 | v0.10 | **Standing review gate made explicit** (§7): `nestjs-reviewer` runs at the end of every phase and writes `docs/review-phase-<n>.md`; no phase closes without a verdict. Phases 0 and 1 under review now, retroactively. |
 | 2026-08-30 | v0.9 | **Phase 1 complete and verified** (`feat/phase-1-auth`, `151314f`). ⚠️ **Corrected a false premise: `username != email` for 2 of 15 live users, and Django authenticates on `username`** — the plan's mapping would have locked them out. DRF auth bodies derived and pinned (Phase 1's open item closed). Two new cross-cutting rules (405-vs-404, DRF framework error shape). D13 registered. Role-matrix criterion corrected to 280 cells. |
@@ -595,8 +596,23 @@ Verified in every phase's parity report, not just the phase that introduces them
 3. **Default deny.** Any route without an explicit role rule is denied.
 4. **Money is integer whole units.** No floats on a money path. Rounding uses the Phase 0
    half-even helper.
-5. **Timestamps.** `auto_now` / `auto_now_add` are application-set in v1, not DB defaults —
-   v2 must set them, in `America/Bogota` semantics.
+5. **Timestamps.** `auto_now` / `auto_now_add` are application-set in v1, not DB defaults — v2
+   must set them. ⚠️ **CORRECTED (v0.12): the timezone half was wrong.** Django 2.2's
+   `DateTimeField.pre_save` uses `timezone.now()` (tz-aware), but **`DateField.pre_save` uses
+   `datetime.date.today()`** — *process-local*, ignoring `settings.TIME_ZONE` entirely. That
+   governs `UserFinance.last_modified` and `LoanDetail.from_date`. Before Phase 3, check the
+   deployed container's `TZ`: if it is UTC, v1 has been writing UTC dates all along and v2 must
+   reproduce that, not "fix" it to Bogotá.
+5b. **Money is `BigInt` in Prisma — 17 columns — and `JSON.stringify(1n)` throws.** The first
+   Phase 3 response returning a money field will 500 without a serialization strategy. The reflex
+   fix (`BigInt.prototype.toJSON = toString`) is **wrong**: it renders `"1000"` where DRF renders
+   the bare number `1000`. Decide this once, globally, before Phase 3 — a per-DTO fix will drift.
+5c. **Date formatting is not uniform in v1 — do not assume it is.** `LoanSerializer.get_created_at`
+   calls `timezone.localtime` first (`serializers.py:88`); `UserFinanceSerializer.get_last_modified`
+   does not (`:29`). A `formatDateEs()` that silently reads a `DateTime` as UTC is correct for
+   `@db.Date` and wrong for `timestamptz`, and the type system does not distinguish them — so it
+   yields the **next day's date for ~21% of every day**, passing in CI and failing in production
+   against the byte-identical email criteria. Make the two cases distinct at the type level.
 6. **Shared DB is a dev/parity concern only** (production is a hard switch). During parity
    testing v2 runs **no** schema migrations, and only one scheduler runs at a time.
 7. **hstore values are strings.** Never write a native JSON object into an hstore column —
@@ -646,6 +662,7 @@ column; none of these are mine to decide unilaterally, because each changes prod
 | **D7** | A payment reminder whose `run_date` has passed is **never sent** — the 5-day reminder is skipped entirely whenever the monthly file lands within 5 days of the deadline. | **Send immediately** on the next scheduler run instead of skipping (Q8). | P7 | ✅ **Decided — change** |
 | **D8** | Bulk loan upload returns a bare `200` with no body. | **Return the list of auto-closed loans.** No cap on how many may be closed (Q3). ⚠️ Response-shape change — `manual-tester` must expect it. | P4 | ✅ **Decided — change** |
 | **D9** | Re-approving an already-approved or closed loan is allowed and corrupts the record. | **Enforce legal state transitions** `0→1`, `0→2`, `1→3`, `1→2`; reject anything else (Q14). | P4 | ✅ **Decided — fix** |
+| **D18** | Request-parsing divergences found in Phase 1 review, unregistered until now: `text/plain` → v1 **415**, v2 400. `multipart/form-data` → v1 **200**, v2 400. Malformed JSON → v1 `{"detail":"JSON parse error - …"}`, v2 unverified. | ⚠️ **The multipart row is load-bearing** — Phases 3 and 4 both ship multipart TSV upload endpoints, so a 400 there breaks the bulk finance update and the bulk loan upload. Fix multipart and malformed-JSON to match v1; register `text/plain` 415→400 as accepted if not worth the machinery. | P1 fix / P3 verify | ⏳ **Needs fix** |
 | **D14** | `PATCH /api/user/-1` and `DELETE /api/user/-1` pass `-1` through and 404; only `GET` substitutes `request.user.id`. | **Split by verb** (BA). GET keeps "me". PATCH **adopts** "me" — v1 404s unconditionally, so no working client can depend on it; the change is inert but stops telling a member they don't exist. DELETE **rejects the sentinel**: `fondodev` has exactly **one** ADMIN, and self-soft-delete is unrecoverable through the API (`key_activation` is null for all 15 users, so `activate_user` can never restore them). | P3 | ✅ **Decided — fix** |
 | **D15** | `__update_user_personal` does `user.username = obj['email']`, rotating the name the member logs in with. | **Stop writing `username` on personal updates.** Login names become stable. See the runbook item below — the live behavior is *worse and narrower* than "silent rename". | P3 | ✅ **Decided — fix** |
 | **D16** | `identification` is writable by any caller on a `personal` update. | **Make it ADMIN-only.** It is the join key of the treasurer's monthly TSV and a miss is only logged (`services/user.py:144`), so a member editing their own cédula **silently freezes their own contributions and quota** until someone notices. ⏳ **Needs operator confirmation.** | P3 | ⏳ **Open** |
@@ -777,13 +794,32 @@ the Babel four-digit grouping — were both cases where a plausible-looking assu
 until someone read the source or the live data. That is exactly what a review pass is for, and it
 is cheapest at the end of the phase that introduced it.
 
+### Open review conditions
+
+Tracked to closure, not carried forward silently. Source:
+[`docs/review-phase-0-1.md`](docs/review-phase-0-1.md).
+
+| # | Condition | From | Due |
+|---|---|---|---|
+| C1 | `formatDateEs()` must distinguish `@db.Date` from `timestamptz` at the type level (rule 5c). | P0 · S1 | before P2 gate |
+| C2 | Global BigInt→JSON strategy rendering bare numbers, not strings (rule 5b). | P0 · S2 | before P3 gate |
+| C3 | Add a `relativedelta` month-end primitive. **Phase 3's birthday task needs it, long before Phase 7 runs** — month-end arithmetic on the 29th–31st is where clone dates drift. | P0 · plan gap | before P3 gate |
+| C4 | Verify the deployed container's `TZ` and record whether v1's `DateField` dates are UTC or Bogotá (rule 5). | P0 · S6 | before P3 gate |
+| C5 | Fix multipart and malformed-JSON request parsing to match v1 (**D18**). | P1 · S3 | before P3 gate |
+| C6 | `userPatchAllowlist` builds its allowlist from `attempt.fields`, making the "positive allowlist" a tautology — it cannot reject an unexpected field. | P1 · S4 | before P3 gate |
+| C7 | `FieldAllowlist.none().assert([])` does not throw, so a non-privileged `finance` write with an empty changed-set is **the silent no-op D1 explicitly forbids** — and under the decided `changedFields` reading that is the *common* case, not an edge case. | P1 · S5 | before P3 gate |
+| C8 | Resolve the rule collision the reviewer escalated: an empty `finance` section on an ordinary member save is **403** under D1's literal reading but a **no-op** under "authorise off `body.type`". Two decided rules, same request, different answers. | P1 · escalated | before P3 gate |
+
+C8 is the one to settle first — it is a contradiction between two rules this plan already calls
+decided, and Phase 3 cannot implement `PATCH /api/user/<id>` until it is resolved.
+
 **Phase status board**
 
 | Phase | Status | Dev | Tester | Reviewer | Analyst |
 |---|---|---|---|---|---|
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
-| 0 Foundations & Prisma baseline | ✅ Complete (`b3effab`) | ✅ | n/a | 🔨 **in review** | n/a |
-| 1 Auth + roles | ✅ Complete (`151314f`) | ✅ | ⬜ | 🔨 **in review** | ⬜ |
+| 0 Foundations & Prisma baseline | ✅ Complete (`b3effab`) | ✅ | n/a | ✅ **Approved w/ conditions** (C1–C4) | n/a |
+| 1 Auth + roles | ✅ Complete (`151314f`) | ✅ | ⬜ | ✅ **Approved w/ conditions** (C5–C8) | ⬜ |
 | 2 Mail + notifications | ⬜ Blocked on P1 | — | — | — | — |
 | 3 Users + finance | ⬜ Blocked on P2 | — | — | — | — |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
@@ -860,8 +896,8 @@ by the §5 register. Operator answered 13 of 24 questions on 2026-08-30.
 | **Q26** | **D16** — should `identification` be ADMIN-only? It is the join key of the treasurer's monthly TSV; a member editing their own cédula silently freezes their contributions and quota. Recommend yes. | P3 |
 | **Q27** | **D17** — when two members share an email, who gets the password-reset link? Reset the account whose `username` equals the email, refuse ambiguous addresses, or something else? | P3 |
 
-All 25 operator questions are answered. The only open inference is the TREASURER self-service
-cell in the D1 table (§5), flagged there.
+Q1–Q25 are answered; **Q26 and Q27 are open** and block Phase 3. The only open *inference* is the
+TREASURER self-service cell in the D1 table (§5), flagged there.
 
 ### Runbook items carried from Phase 3 findings
 
