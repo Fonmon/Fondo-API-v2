@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-08-30 | v0.8 | **Q25a resolved — D1 fully specified.** Privileges are additive on top of universal self-service. **Phase 1 unblocked and started.** |
 | 2026-08-30 | v0.7 | Q10, Q13, Q18–Q25 answered. **Phase 6 unblocked** — CAP rules now specified. D3 **withdrawn** (v1 was right); D5 decided; **D12 added** (CAP auto-close, new functionality — makes P6 depend on P7). Cutover calendar constraint **corrected and narrowed** after re-reading `create_year` — only the bulk-upload cycle genuinely constrains timing. |
 | 2026-08-30 | v0.6 | **Phase 0 complete and verified** (`feat/phase-0-foundations`, `b3effab`). Eleven corrections from implementation folded back: DB-level FK facts (deferrable, no cascade), hstore write-side + key-order rules, DRF error-body gap in Phase 1, D11 registered, Prisma 7 / NestJS 12 tooling notes added as §10. |
 | 2026-08-30 | v0.5 | **v1 is frozen** — no changes to the Django codebase for any reason (new constraint, §1). Q6 and Q12 reconfirmed as deliberate accepts. Phase 0 started. |
@@ -587,7 +588,7 @@ column; none of these are mine to decide unilaterally, because each changes prod
 
 | # | v1 behavior | Change in v2 | Phase | Status |
 |---|---|---|---|---|
-| **D1** | `PATCH /api/user/<id>` is role ≤ 3 with **no ownership check**, and `__update_user_personal` writes `user.role` from the request body (`services/user.py:232`) — any member can make themselves ADMIN or set their own `total_quota`. | **Restrict** (Q15). ADMIN → any user, any section. TREASURER → `finance` section only, any user. MEMBER → **self only**, `personal` (excluding `role`) + `preferences`; never `finance`. `role` is writable by ADMIN alone. | P1 | ✅ **Decided — fix** |
+| **D1** | `PATCH /api/user/<id>` is role ≤ 3 with **no ownership check**, and `__update_user_personal` writes `user.role` from the request body (`services/user.py:232`) — any member can make themselves ADMIN or set their own `total_quota`. | **Restrict** (Q15, Q25, Q25a). Rule below. | P1 decide / P3 implement | ✅ **Decided — fix** |
 | **D2** | Approving a power request has no check that the caller is the requestee. | **Restrict** to the requestee (Q17). | P3 | ✅ **Decided — fix** |
 | ~~**D3**~~ | ~~`SavingAccountView.PUT` is `[0,2]` with no ownership check; PRESIDENT uniquely excluded.~~ | **Withdrawn — v1 is correct.** Only ADMIN and TREASURER may act on CAPs and they legitimately manage any member's (Q22), so no ownership check is wanted; the PRESIDENT exclusion is **deliberate** (Q23). Port v1 unchanged. | P6 | ✅ **Withdrawn** |
 | **D4** | `timelimit > 36` silently clamped to 36; `timelimit = 0` accepted, then `DivisionByZero` at approval. | **Reject with `400`** (Q9) — both bounds. Enforce `1 ≤ timelimit ≤ 36`; no silent clamp. | P4 | ✅ **Decided — fix** |
@@ -599,6 +600,27 @@ column; none of these are mine to decide unilaterally, because each changes prod
 | **D12** | CAP auto-close was never implemented — `services/saving_account.py` carries a `# TODO: schedule task for closing CAP`. Closing is manual-only today. | **Implement it** (Q20): a CAP closes automatically on `end_date`. New functionality, not a port. Needs a `SchedulerTask` type — **so Phase 6 depends on Phase 7** (already sequenced that way). No member notification (Q22). | P6 | ✅ **Decided — build** |
 | **D11** | `UserFinance.user` and `UserPreference.user` are plain FKs, not OneToOne — the same latent defect registered as D6 for `LoanDetail`. A duplicate row makes the user's finance endpoints 500 permanently. | Unique constraint on `user_id` for both; upsert not insert. | P3 | ⏳ **Needs decision** |
 | **D10** | Loan read (`GET /api/loan/<id>`, `paymentProjection`) is open to any member by id. | **Restrict** to the loan owner plus roles `[0,1,2]` (Q16). | P4 | ✅ **Decided — fix** |
+
+### D1 — the authorization rule for `PATCH /api/user/<id>`
+
+**Principle: universal self-service, with privileges added on top.** Every role may edit its own
+`personal` (excluding `role`) and `preferences`. Elevated rights are additive:
+
+| Role | Own profile | Other users | `role` field | `finance` section |
+|---|---|---|---|---|
+| **0 ADMIN** | ✅ | ✅ any user, any section | ✅ **only ADMIN** | ✅ any user |
+| **1 PRESIDENT** | ✅ personal + preferences | ❌ | ❌ | ❌ |
+| **2 TREASURER** | ✅ personal + preferences | `finance` only | ❌ | ✅ any user |
+| **3 MEMBER** | ✅ personal + preferences | ❌ | ❌ | ❌ |
+
+- PRESIDENT gets **no elevated rights** here (Q25) but keeps self-service (Q25a) — the literal
+  reading would have made role 1 less capable than role 3.
+- ⚠️ **Inference, flagged:** Q15 said "treasurer only can modify finance information." Applying
+  the same principle that resolved Q25a, TREASURER **also keeps self-service** on their own
+  personal + preferences. Without that they could not change their own email address. Say so if
+  that is wrong — it is the one cell in this table the operator did not state directly.
+- `role` is writable by ADMIN alone, on any user. This is the escalation path being closed.
+- A `finance` write by a non-privileged caller is **403**, not a silent no-op.
 
 **Explicitly confirmed as intended — port faithfully, do not "fix":**
 
@@ -669,7 +691,7 @@ A phase closes only when all four are green. Any ✗ re-opens the phase and revi
 |---|---|---|---|---|---|
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
 | 0 Foundations & Prisma baseline | ✅ **Complete** (`b3effab`) | ✅ | n/a | ⬜ | n/a |
-| 1 Auth + roles | 🟡 **Ready** — blocked only on Q25 | — | — | — | — |
+| 1 Auth + roles | 🔨 **In progress** | 🔨 | — | — | — |
 | 2 Mail + notifications | ⬜ Blocked on P1 | — | — | — | — |
 | 3 Users + finance | ⬜ Blocked on P2 | — | — | — | — |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
@@ -743,9 +765,10 @@ by the §5 register. Operator answered 13 of 24 questions on 2026-08-30.
 
 | Q | Topic | Blocks |
 |---|---|---|
-| **Q25a** | Does "president cannot PATCH users" mean *no elevated rights* (still edits own profile, like any member) or *no `PATCH /api/user/<id>` at all, including self*? The literal reading makes PRESIDENT strictly less capable than MEMBER. | **P1 — last blocker on D1** |
+| — | ✅ **Nothing is blocking.** Q25a resolved: no elevated rights, self-service retained. | — |
 
-Everything else is answered. **Phase 6 is unblocked.**
+All 25 operator questions are answered. The only open inference is the TREASURER self-service
+cell in the D1 table (§5), flagged there.
 
 ### Cutover timing — corrected (Q11)
 
