@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-08-30 | v0.11 | business-analyst Phase 3 note folded in (verdict: **Concerns**). D1 clarified on two points that would each have broken every ordinary member save. **D14–D17 registered**; D16/D17 need operator input. Two live v1 defects verified and recorded: personal edits to the two shared-email accounts **409 today**, and **4 of 15 members cannot reset their password**. |
 | 2026-08-30 | v0.10 | **Standing review gate made explicit** (§7): `nestjs-reviewer` runs at the end of every phase and writes `docs/review-phase-<n>.md`; no phase closes without a verdict. Phases 0 and 1 under review now, retroactively. |
 | 2026-08-30 | v0.9 | **Phase 1 complete and verified** (`feat/phase-1-auth`, `151314f`). ⚠️ **Corrected a false premise: `username != email` for 2 of 15 live users, and Django authenticates on `username`** — the plan's mapping would have locked them out. DRF auth bodies derived and pinned (Phase 1's open item closed). Two new cross-cutting rules (405-vs-404, DRF framework error shape). D13 registered. Role-matrix criterion corrected to 280 cells. |
 | 2026-08-30 | v0.8 | **Q25a resolved — D1 fully specified.** Privileges are additive on top of universal self-service. **Phase 1 unblocked and started.** |
@@ -320,10 +321,15 @@ emit on write paths.
      `request.user.id`; `.patch` and `.delete` pass `-1` straight through and 404. Looks like an
      oversight rather than a rule. `resolveUserId()` makes the choice explicit so it cannot be
      inherited by accident — decide deliberately.
-- ⚠️ **`__update_user_personal` sets `user.username = obj['email']`.** Combined with the
-  corrected username/email finding (Phase 1), editing either of the two users whose `username`
-  differs from their `email` **silently changes their login name**. Decide whether v2 preserves
-  that or leaves `username` alone.
+- ⚠️ **The two shared-email accounts — verified live, and the hazard is not what it looked like.**
+  `fondodev` has **two pairs of users sharing an email address**: ids 7 & 14
+  (`criss9413@hotmail.com`) and ids 10 & 13 (`mhjc123@hotmail.com`). Ids 13 and 14 have
+  birthdates in **2011 and 2020** — children enrolled under a parent's address. Because
+  `auth_user.username` carries a UNIQUE index (`auth_user_username_key`),
+  `user.username = obj['email']` does not silently rename them: it raises `IntegrityError`, so
+  **any personal edit to Sebastián or Ainhoa returns a bare 409 today**. The silent login-name
+  rotation only occurs if one of them is later given a fresh, unique email. D15 fixes the write;
+  the two rows still need reconciling — see the runbook item in §9.
 - `update_user` dispatch on `obj['type']` → `personal` / `finance` / `preferences`, returning
   200/404/409. Finance writes **only changed fields** and recomputes
   `available_quota = total_quota - utilized_quota`.
@@ -640,6 +646,10 @@ column; none of these are mine to decide unilaterally, because each changes prod
 | **D7** | A payment reminder whose `run_date` has passed is **never sent** — the 5-day reminder is skipped entirely whenever the monthly file lands within 5 days of the deadline. | **Send immediately** on the next scheduler run instead of skipping (Q8). | P7 | ✅ **Decided — change** |
 | **D8** | Bulk loan upload returns a bare `200` with no body. | **Return the list of auto-closed loans.** No cap on how many may be closed (Q3). ⚠️ Response-shape change — `manual-tester` must expect it. | P4 | ✅ **Decided — change** |
 | **D9** | Re-approving an already-approved or closed loan is allowed and corrupts the record. | **Enforce legal state transitions** `0→1`, `0→2`, `1→3`, `1→2`; reject anything else (Q14). | P4 | ✅ **Decided — fix** |
+| **D14** | `PATCH /api/user/-1` and `DELETE /api/user/-1` pass `-1` through and 404; only `GET` substitutes `request.user.id`. | **Split by verb** (BA). GET keeps "me". PATCH **adopts** "me" — v1 404s unconditionally, so no working client can depend on it; the change is inert but stops telling a member they don't exist. DELETE **rejects the sentinel**: `fondodev` has exactly **one** ADMIN, and self-soft-delete is unrecoverable through the API (`key_activation` is null for all 15 users, so `activate_user` can never restore them). | P3 | ✅ **Decided — fix** |
+| **D15** | `__update_user_personal` does `user.username = obj['email']`, rotating the name the member logs in with. | **Stop writing `username` on personal updates.** Login names become stable. See the runbook item below — the live behavior is *worse and narrower* than "silent rename". | P3 | ✅ **Decided — fix** |
+| **D16** | `identification` is writable by any caller on a `personal` update. | **Make it ADMIN-only.** It is the join key of the treasurer's monthly TSV and a miss is only logged (`services/user.py:144`), so a member editing their own cédula **silently freezes their own contributions and quota** until someone notices. ⏳ **Needs operator confirmation.** | P3 | ⏳ **Open** |
+| **D17** | `get_user_by_email` (`services/user.py:84`) uses `.get()` inside a bare `except`, so a duplicated email raises `MultipleObjectsReturned` → returns `None` → **no reset email is sent**, while `PasswordResetView` still redirects to the success page. | **Verified live: users 7, 10, 13 and 14 — 4 of 15 members — cannot reset their password and are told it worked.** v2 must handle multiplicity deliberately. ⏳ **Needs operator input** on the rule: reset the account whose `username` equals the email, refuse ambiguous addresses, or something else. | P3 | ⏳ **Open** |
 | **D13** | An unknown URL returns Django's **HTML** 404 page (`<h1>Not Found</h1>…`), not JSON. | v2 returns JSON `{message: …}`. Pre-existing since Phase 0 but was unregistered — `manual-tester` would otherwise file it. Accepted: no client depends on an HTML 404. | P0 | ✅ **Accepted** |
 | **D12** | CAP auto-close was never implemented — `services/saving_account.py` carries a `# TODO: schedule task for closing CAP`. Closing is manual-only today. | **Implement it** (Q20): a CAP closes automatically on `end_date`. New functionality, not a port. Needs a `SchedulerTask` type — **so Phase 6 depends on Phase 7** (already sequenced that way). No member notification (Q22). | P6 | ✅ **Decided — build** |
 | **D11** | `UserFinance.user` and `UserPreference.user` are plain FKs, not OneToOne — the same latent defect registered as D6 for `LoanDetail`. A duplicate row makes the user's finance endpoints 500 permanently. | Unique constraint on `user_id` for both; upsert not insert. | P3 | ⏳ **Needs decision** |
@@ -665,6 +675,21 @@ column; none of these are mine to decide unilaterally, because each changes prod
   that is wrong — it is the one cell in this table the operator did not state directly.
 - `role` is writable by ADMIN alone, on any user. This is the escalation path being closed.
 - A `finance` write by a non-privileged caller is **403**, not a silent no-op.
+
+**Two clarifications that each would otherwise break every ordinary member save** (BA, `docs/ba-phase-3-decisions.md`):
+
+1. ✅ **The `role` check compares values, it does not check presence.** v1's client echoes the
+   whole `personal` object back from `GET /api/user/<id>` — which includes `role` — so a
+   "`role` key present and caller is not ADMIN → 403" reading would 403 **every save by all 14
+   non-admin members**: 100% false positives, a signal nobody would keep. Compare the submitted
+   value against the stored one and 403 only on an actual **change**. A 403 then means a real
+   escalation attempt and is worth logging. Accepted side effect: a stale client submitting an
+   out-of-date `role` gets a 403 — correct, since the alternative is silently demoting a freshly
+   elected treasurer.
+2. ✅ **Authorization keys off `body.type`, not off which sections are present.** `update_user`
+   dispatches on `obj['type']` (`services/user.py:100`) and ignores the rest. Every v1 test
+   fixture posts `personal` **and** `finance` in the same body, so a presence-based finance check
+   would 403 every member profile save. Gate on the declared `type`.
 
 **Explicitly confirmed as intended — port faithfully, do not "fix":**
 
@@ -832,10 +857,22 @@ by the §5 register. Operator answered 13 of 24 questions on 2026-08-30.
 
 | Q | Topic | Blocks |
 |---|---|---|
-| — | ✅ **Nothing is blocking.** Q25a resolved: no elevated rights, self-service retained. | — |
+| **Q26** | **D16** — should `identification` be ADMIN-only? It is the join key of the treasurer's monthly TSV; a member editing their own cédula silently freezes their contributions and quota. Recommend yes. | P3 |
+| **Q27** | **D17** — when two members share an email, who gets the password-reset link? Reset the account whose `username` equals the email, refuse ambiguous addresses, or something else? | P3 |
 
 All 25 operator questions are answered. The only open inference is the TREASURER self-service
 cell in the D1 table (§5), flagged there.
+
+### Runbook items carried from Phase 3 findings
+
+1. **Do not edit the profiles of user 13 (`sebastian.montanez`) or 14 (`ainhoa.montanez`) in
+   frozen v1.** Any personal edit 409s (shared email + UNIQUE username). Reconcile or formally
+   record those two rows before cutover — deciding whether a child member gets their own email
+   address, or whether the fund keeps a parent's address with a distinct username. Telling the
+   members is not sufficient: Ainhoa is five.
+2. **Four members cannot reset their password** (D17: ids 7, 10, 13, 14) and are shown the
+   success page. Until D17 ships in v2, those resets have to be done manually. Worth telling the
+   treasurer now rather than at cutover.
 
 ### Cutover timing — corrected (Q11)
 
