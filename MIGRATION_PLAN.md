@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-08-30 | v0.7 | Q10, Q13, Q18–Q25 answered. **Phase 6 unblocked** — CAP rules now specified. D3 **withdrawn** (v1 was right); D5 decided; **D12 added** (CAP auto-close, new functionality — makes P6 depend on P7). Cutover calendar constraint **corrected and narrowed** after re-reading `create_year` — only the bulk-upload cycle genuinely constrains timing. |
 | 2026-08-30 | v0.6 | **Phase 0 complete and verified** (`feat/phase-0-foundations`, `b3effab`). Eleven corrections from implementation folded back: DB-level FK facts (deferrable, no cascade), hstore write-side + key-order rules, DRF error-body gap in Phase 1, D11 registered, Prisma 7 / NestJS 12 tooling notes added as §10. |
 | 2026-08-30 | v0.5 | **v1 is frozen** — no changes to the Django codebase for any reason (new constraint, §1). Q6 and Q12 reconfirmed as deliberate accepts. Phase 0 started. |
 | 2026-08-30 | v0.4 | Operator answers folded in (Q1–Q9, Q12, Q14–Q17). **Phases 1 and 4 unblocked.** Dev DB reloaded to `0019` — Phase 0 prerequisite cleared. D1 refined to a concrete field-level rule; D4 changed from *validate* to *reject 400*; four new deviations (D7–D10) registered for behavior the operator asked to change. Phase 6 still blocked (Q19–Q24); Q10/Q11/Q18 still open. |
@@ -413,18 +414,32 @@ identical previous-year `enable` flip; both `patch=` modes identical.
 - `UserFinanceSerializer.total_savingaccounts` sums **active** accounts — a Phase 3 response
   field this phase's writes feed. Re-verify the Phase 3 parity report after this lands.
 
-**What the source does establish** (§9.3): `create_account` sets only `end_date` + `user`, so a
-CAP starts **empty and ACTIVE**; the `# TODO: schedule task for closing CAP` was never
-implemented, so **closing is manual-only**; `value` on `PUT` is a **plain replacement**, not a
-deposit; and `total_savingaccounts` (`serializers.py:32`) is **display-only — CAP balances do
-not affect loan quota at all** (the only writers of the quota fields are in `services/user.py`).
-That last point contradicts a natural reading and should be stated explicitly in the v2 code.
+**Business rules — now specified by the operator (Q19–Q24), no longer inferred:**
+
+- A CAP is a **fixed-term deposit that earns no interest and no return** (Q19). The fund only
+  tracks it. Nothing accrues; there is no rate anywhere in this module.
+- `value` on `PUT` is the **new total balance**, a plain replacement — not a deposit to add
+  (Q21). This matches v1.
+- **Only ADMIN and TREASURER may act on CAPs** (Q22); PRESIDENT is deliberately excluded
+  (Q23). v1's `[0,2]` rule is correct as written — see the withdrawn D3.
+- **No member notification** on close or revalue (Q22).
+- **CAP balances are purely informational** (Q24): `total_savingaccounts`
+  (`serializers.py:32`) is display-only and affects **neither `total_quota` nor
+  `contributions`**. State this explicitly in the v2 code — it contradicts the natural reading
+  and is the kind of thing a future maintainer will "fix" by accident.
+- **CAPs close automatically on `end_date`** (Q20) — see **D12**. This is the one piece of new
+  functionality in the phase; v1 has the `# TODO` and never built it. It requires a scheduler
+  task type, which is why this phase runs **after** Phase 7.
 
 **Risks**
 - ⚠️ **v1 has no tests for this module at all.** No `test_saving_account_views.py` exists.
-- ⚠️ `update_account` has **no ownership check**, and the `[0,2]` rule uniquely **excludes the
-  PRESIDENT** (role 1) — the only route in the system that does. Likely unintentional; §5 D3.
-- ⚠️ Cannot be parity-tested until the dev DB is migrated past 0017 (see Phase 0).
+- ⚠️ **D12 is new functionality, so it has no v1 behavior to be parity-checked against.**
+  Everything else in this phase is a port; the auto-close must be specified and tested on its
+  own terms. Confirm the intended edge cases with the operator when it is built: what happens to
+  a CAP whose `end_date` is already in the past when the feature ships, and whether closing is
+  driven at the 10:00 or 14:00 scheduler run (or both).
+- ⚠️ Still the module with **zero inherited tests** — the rules above are the spec now, so write
+  the suite from them rather than from v1's behavior alone.
 
 **Parity criteria:** identical rows on create/update; identical list envelope and filtering;
 `total_savingaccounts` identical in the user finance response after each mutation.
@@ -574,13 +589,14 @@ column; none of these are mine to decide unilaterally, because each changes prod
 |---|---|---|---|---|
 | **D1** | `PATCH /api/user/<id>` is role ≤ 3 with **no ownership check**, and `__update_user_personal` writes `user.role` from the request body (`services/user.py:232`) — any member can make themselves ADMIN or set their own `total_quota`. | **Restrict** (Q15). ADMIN → any user, any section. TREASURER → `finance` section only, any user. MEMBER → **self only**, `personal` (excluding `role`) + `preferences`; never `finance`. `role` is writable by ADMIN alone. | P1 | ✅ **Decided — fix** |
 | **D2** | Approving a power request has no check that the caller is the requestee. | **Restrict** to the requestee (Q17). | P3 | ✅ **Decided — fix** |
-| **D3** | `SavingAccountView.PUT` is `[0,2]` with no ownership check; PRESIDENT uniquely excluded. | Add the ownership check. **PRESIDENT exclusion still open (Q23).** | P6 | ⏳ Partial |
+| ~~**D3**~~ | ~~`SavingAccountView.PUT` is `[0,2]` with no ownership check; PRESIDENT uniquely excluded.~~ | **Withdrawn — v1 is correct.** Only ADMIN and TREASURER may act on CAPs and they legitimately manage any member's (Q22), so no ownership check is wanted; the PRESIDENT exclusion is **deliberate** (Q23). Port v1 unchanged. | P6 | ✅ **Withdrawn** |
 | **D4** | `timelimit > 36` silently clamped to 36; `timelimit = 0` accepted, then `DivisionByZero` at approval. | **Reject with `400`** (Q9) — both bounds. Enforce `1 ≤ timelimit ≤ 36`; no silent clamp. | P4 | ✅ **Decided — fix** |
-| **D5** | Power-approval email puts every member in `ToAddresses` with empty `Bcc`. | Move to `Bcc` — recommended. **Open (Q18).** | P3 | ⏳ Open |
+| **D5** | Power-approval email puts every member in `ToAddresses` with empty `Bcc`. | **Move to `Bcc`** (Q18). Recipient list stays every member (Q10) — only the disclosure is fixed. | P3 | ✅ **Decided — fix** |
 | **D6** | `LoanDetail.loan` is a plain FK; re-approving a closed loan creates a second row and 500s that loan permanently. | Unique `loan_id`, upsert not insert. Now **belt-and-braces** behind D10, which blocks the transition at the source. | P4 | ✅ **Decided — fix** |
 | **D7** | A payment reminder whose `run_date` has passed is **never sent** — the 5-day reminder is skipped entirely whenever the monthly file lands within 5 days of the deadline. | **Send immediately** on the next scheduler run instead of skipping (Q8). | P7 | ✅ **Decided — change** |
 | **D8** | Bulk loan upload returns a bare `200` with no body. | **Return the list of auto-closed loans.** No cap on how many may be closed (Q3). ⚠️ Response-shape change — `manual-tester` must expect it. | P4 | ✅ **Decided — change** |
 | **D9** | Re-approving an already-approved or closed loan is allowed and corrupts the record. | **Enforce legal state transitions** `0→1`, `0→2`, `1→3`, `1→2`; reject anything else (Q14). | P4 | ✅ **Decided — fix** |
+| **D12** | CAP auto-close was never implemented — `services/saving_account.py` carries a `# TODO: schedule task for closing CAP`. Closing is manual-only today. | **Implement it** (Q20): a CAP closes automatically on `end_date`. New functionality, not a port. Needs a `SchedulerTask` type — **so Phase 6 depends on Phase 7** (already sequenced that way). No member notification (Q22). | P6 | ✅ **Decided — build** |
 | **D11** | `UserFinance.user` and `UserPreference.user` are plain FKs, not OneToOne — the same latent defect registered as D6 for `LoanDetail`. A duplicate row makes the user's finance endpoints 500 permanently. | Unique constraint on `user_id` for both; upsert not insert. | P3 | ⏳ **Needs decision** |
 | **D10** | Loan read (`GET /api/loan/<id>`, `paymentProjection`) is open to any member by id. | **Restrict** to the loan owner plus roles `[0,1,2]` (Q16). | P4 | ✅ **Decided — fix** |
 
@@ -708,21 +724,53 @@ by the §5 register. Operator answered 13 of 24 questions on 2026-08-30.
 | Q17 | Power approval | **Restrict** to requestee | **D2** |
 | Q13 | Alexa users | Moot — skill retired | Closed |
 
+### Answered 2026-08-30 (second round)
+
+| Q | Topic | Answer | Effect |
+|---|---|---|---|
+| Q10 | Power letter recipients | **All members** | Confirms v1 |
+| Q13 | Alexa users | None — safe to remove | Closed |
+| Q18 | `To:` → `Bcc:` | **Yes** | **D5** decided |
+| Q19 | What a CAP is | Fixed-term deposit, **no interest or earnings** | P6 spec |
+| Q20 | When a CAP closes | **Automatically on `end_date`** | **D12** — new build |
+| Q21 | `value` on `PUT` | New total balance | Confirms v1 |
+| Q22 | Who may act on CAPs | **ADMIN + TREASURER only**, no notifications | Confirms v1; **D3 withdrawn** |
+| Q23 | PRESIDENT and CAPs | **Not allowed** — deliberate | **D3 withdrawn** |
+| Q24 | CAP ↔ quota | Purely informative | Confirms v1 |
+| Q25 | PRESIDENT and `PATCH /api/user` | Not allowed — ⚠️ *scope being confirmed* | **D1** |
+
 ### Still open
 
 | Q | Topic | Blocks |
 |---|---|---|
-| **Q25** ⭐ *new* | **Q15 settled ADMIN and TREASURER but not PRESIDENT (role 1).** This plan assumes PRESIDENT gets member-level rights on `PATCH /api/user/<id>` (self, personal + preferences, no finance, no role). Confirm or correct. | **P1 — D1 cannot be implemented without it** |
-| Q10 | Should the power-of-attorney letter go to every member, or only requester + requestee? | P3 |
-| Q18 | May those recipients move `To:` → `Bcc:`? (D5) | P3 |
-| Q19–Q24 | **CAP rules** — what a CAP is economically, when it closes, whether `value` is a balance or a deposit, member visibility, the PRESIDENT exclusion (D3), quota interaction | **P6 — no spec to port** |
-| Q11 | Next assembly date(s); the treasurer's usual upload day | P9 runbook |
+| **Q25a** | Does "president cannot PATCH users" mean *no elevated rights* (still edits own profile, like any member) or *no `PATCH /api/user/<id>` at all, including self*? The literal reading makes PRESIDENT strictly less capable than MEMBER. | **P1 — last blocker on D1** |
 
-### Cutover timing constraints (Phase 9 runbook)
+Everything else is answered. **Phase 6 is unblocked.**
 
-Cut over immediately **after** a verified monthly bulk upload; **never** in the last or first two
-weeks of a calendar year (`ActivityService.create_year` keys off `date.today().year` with no
-re-enable path); check the assembly calendar before scheduling Phase 3.
+### Cutover timing — corrected (Q11)
+
+The operator pushed back on the calendar constraint, and re-reading the code they are **mostly
+right**. Correcting the earlier guidance:
+
+- ❌ **Withdrawn: "never cut over near a year boundary."** `ActivityService.create_year` is not
+  automatic — it fires only on an explicit `POST /api/activity/year` (role ≤ 1). It reads
+  `date.today().year`, disables the most recent other year, and is guarded by a unique
+  constraint. The real caveat is much smaller: **there is no re-enable path through the API**, so
+  if someone presses the year-rollover button mid-cutover and it goes wrong, fixing it needs
+  manual SQL. That is "don't press that button during the switch", not a blackout window.
+- ✅ **Kept, and it is the one that matters: cut over shortly after a verified monthly bulk
+  upload.** Not for data-safety reasons — for **runway**. The bulk TSV upload is the riskiest
+  operation in the system (fund-wide auto-close, D8/D9). Cutting over just after a good upload
+  puts roughly a month between the switch and the first time v2 runs that path for real, which
+  is time to rehearse it against a copy. Cutting over the day before an upload means v2's most
+  dangerous code path runs in production before anyone has watched it work.
+- ℹ️ **Minor:** password-reset links issued by v1 stop working at the switch (D-note, Phase 3).
+  Django's default timeout is 3 days, so at worst a few members re-request.
+- ℹ️ Scheduled `SchedulerTask` rows are **data in the shared DB**, not in-flight process state, so
+  v2 picks up pending payment reminders across the switch with no special handling.
+
+**Net: you can cut over on any date.** Prefer the week after a monthly upload; avoid running the
+year rollover during the switch itself.
 
 ---
 
