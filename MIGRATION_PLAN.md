@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-08-30 | v0.9 | **Phase 1 complete and verified** (`feat/phase-1-auth`, `151314f`). ⚠️ **Corrected a false premise: `username != email` for 2 of 15 live users, and Django authenticates on `username`** — the plan's mapping would have locked them out. DRF auth bodies derived and pinned (Phase 1's open item closed). Two new cross-cutting rules (405-vs-404, DRF framework error shape). D13 registered. Role-matrix criterion corrected to 280 cells. |
 | 2026-08-30 | v0.8 | **Q25a resolved — D1 fully specified.** Privileges are additive on top of universal self-service. **Phase 1 unblocked and started.** |
 | 2026-08-30 | v0.7 | Q10, Q13, Q18–Q25 answered. **Phase 6 unblocked** — CAP rules now specified. D3 **withdrawn** (v1 was right); D5 decided; **D12 added** (CAP auto-close, new functionality — makes P6 depend on P7). Cutover calendar constraint **corrected and narrowed** after re-reading `create_year` — only the bulk-upload cycle genuinely constrains timing. |
 | 2026-08-30 | v0.6 | **Phase 0 complete and verified** (`feat/phase-0-foundations`, `b3effab`). Eleven corrections from implementation folded back: DB-level FK facts (deferrable, no cascade), hstore write-side + key-order rules, DRF error-body gap in Phase 1, D11 registered, Prisma 7 / NestJS 12 tooling notes added as §10. |
@@ -193,7 +194,15 @@ rule matches.
   live in `auth_user`. While v1 still runs in dev/parity, v2 also **writes** that format on
   activation and reset. Rehash-on-login to argon2 is a post-cutover cleanup item, not now.
 - **`UserProfile(User)` identity mapping** — `auth_user` + `fondo_api_userprofile` on
-  `user_ptr_id`. `USERNAME_FIELD = 'email'`, but `username` is still populated (`username = email`).
+  `user_ptr_id`.
+- ⚠️ **CORRECTED (v0.9) — do not trust CONTEXT.md here.** The plan previously said
+  `USERNAME_FIELD = 'email'` and `username = email` everywhere. **Both halves are misleading.**
+  `AUTH_USER_MODEL` is commented out (`api/settings/base.py:101`), so Django's `ModelBackend`
+  uses `User.USERNAME_FIELD == 'username'`; `UserProfile.USERNAME_FIELD = 'email'` **never
+  participates in authentication**. And while v1 *writes* `username = email` on create,
+  **2 of the 15 users in `fondodev` have `username != email`** (verified). Login resolves
+  **`auth_user.username`**. A v2 that looked up `email` would lock those members out of their
+  own fund.
 - **Roles guard** reproducing `APIRolePermission` (`fondo_api/permissions.py`) exactly:
   - int rule N → allow if `role <= N` (0=ADMIN, 1=PRESIDENT, 2=TREASURER, 3=MEMBER)
   - list rule → allow if `role in list`
@@ -217,13 +226,22 @@ A decision deferred here gets silently baked in.
 **Parity criteria**
 - The same token string authenticates against both APIs.
 - Valid/invalid login returns identical status and body.
-- ⚠️ **Pin the auth-failure body before this phase closes.** DRF's 401/403 responses are
-  `{"detail": …}`, **not** the `{"message": …}` shape used everywhere else — and v1 has **zero**
-  tests asserting them, so the exact strings are unknown. `manual-tester` must capture the real
-  401/403 bodies from v1 and add them to the criteria. The Phase 0 exception filter deliberately
-  does not guess.
-- **Full role matrix:** 14 view classes × each method in `list_permissions` × 4 roles →
-  identical allow/deny. Plus an authenticated request to a rule-less route → 403 in both.
+- ✅ **Resolved.** All auth-failure bodies are derived and pinned in
+  [`docs/phase-1-drf-auth-bodies.md`](docs/phase-1-drf-auth-bodies.md) — from the
+  `djangorestframework==3.11.2` sdist *and* an independent container running v1's real settings
+  and unmodified `permissions.py`. `manual-tester` cites that document rather than re-capturing.
+- ✅ **The 401-vs-403 ambiguity is not real for this project.**
+  `TokenAuthentication.authenticate_header()` returns a truthy `'Token'`, so DRF's coerce-to-403
+  branch is dead code here. **Every authentication failure is 401** with `WWW-Authenticate: Token`;
+  only `APIRolePermission` denials are 403. Stated here so nobody re-derives it.
+- ⚠️ Two ordering facts that are easy to get backwards: a missing or wrong-scheme header is **not**
+  an authentication error (DRF returns `None`, and `IsAuthenticated` produces a *different* body
+  later); and `APIView.initial()` authenticates **before** checking permissions, so a bad token
+  401s **even on a public route** — `POST /api-token-auth` with a garbage token never reaches login.
+- **Full role matrix: 14 view classes × 5 methods × 4 roles = 280 cells.** Test *all five*
+  methods, not only those declared in `list_permissions` — the **undeclared** ones are exactly
+  where the default-deny fallthrough lives, and testing only declared methods never exercises
+  it. (`DELETE /api/loan` is 403 even for ADMIN.)
 
 ---
 
@@ -290,6 +308,21 @@ emit on write paths.
   `UserPreference`; `key_activation` = 25 random bytes hex; activation email. **If the mail
   send returns falsy, roll the whole transaction back** and return `'Invalid email'`. Unique
   violation → `'Identification/email already exists'`.
+- **⚠️ Two decisions Phase 1 surfaced and deliberately did not make:**
+  1. **D1's `role` check — "field present" or "field changed"?** v1's client posts the whole
+     `personal` object on every PATCH, `role` included. A literal "`role` key present and caller
+     is not ADMIN → 403" would break a member editing their own name. Phase 1 shipped both
+     readings as tested primitives (`field-allowlist.ts` and `changedFields()`) and chose
+     neither. **Recommendation: the `changedFields` reading** — compare against the stored value
+     and only 403 on an actual change. Put this to business-analyst before implementing.
+  2. **`PATCH /api/user/-1` does not mean "me" in v1.** Only `UserDetailView.get` substitutes
+     `request.user.id`; `.patch` and `.delete` pass `-1` straight through and 404. Looks like an
+     oversight rather than a rule. `resolveUserId()` makes the choice explicit so it cannot be
+     inherited by accident — decide deliberately.
+- ⚠️ **`__update_user_personal` sets `user.username = obj['email']`.** Combined with the
+  corrected username/email finding (Phase 1), editing either of the two users whose `username`
+  differs from their `email` **silently changes their login name**. Decide whether v2 preserves
+  that or leaves `username` alone.
 - `update_user` dispatch on `obj['type']` → `personal` / `finance` / `preferences`, returning
   200/404/409. Finance writes **only changed fields** and recomputes
   `available_quota = total_quota - utilized_quota`.
@@ -546,8 +579,10 @@ migrations.
 Verified in every phase's parity report, not just the phase that introduces them.
 
 1. **Response shape.** Pagination is always `{ list, num_pages, count }`; a page beyond the
-   last returns an **empty list, same envelope, HTTP 200**. Errors are `{ message: "<string>" }`
-   with v1's exact strings, in Spanish where v1 is Spanish.
+   last returns an **empty list, same envelope, HTTP 200**. **v1's *view*-level errors** are
+   `{ message: "<string>" }` with v1's exact strings, in Spanish where v1 is Spanish — but
+   **DRF's *framework*-level errors are `{"detail": …}`**, and that includes **405**, not just
+   401/403. Two different envelopes; see `docs/phase-1-drf-auth-bodies.md`.
 2. **Status codes.** v1's specific choices (`406`, `409` where a modern API would use `400`
    or `422`) are **preserved**. Do not modernize.
 3. **Default deny.** Any route without an explicit role rule is denied.
@@ -568,6 +603,13 @@ Verified in every phase's parity report, not just the phase that introduces them
     must delete children explicitly inside the transaction** or hard deletes raise FK violations.
     The live case is `DELETE /api/activity/<id>` (Phase 5), which must remove `ActivityUser` rows
     first. Most other v1 deletes are soft (`is_active = false`), which masks this.
+12. ⚠️ **Nest 404s where DRF 405s.** Django resolves the URL and *then* DRF raises
+    `MethodNotAllowed`; Express has no route for an unmapped method at all. **Every controller in
+    Phases 3–8 needs an `@All()` fallback** (`DrfException.methodNotAllowed()` is the reusable
+    piece) or it will 404 where v1 405s. Note the `Allow` header lists *implemented* handlers — a
+    different set from *permitted* ones.
+13. **`OPTIONS` on a guarded v1 view is authenticated and permission-checked**, and returns DRF's
+    browsable-API metadata document when allowed. Registered as deviation P1-D2.
 11. ⚠️ **All 21 FKs are `DEFERRABLE INITIALLY DEFERRED`** and Prisma cannot express it; the
     baseline SQL is hand-patched. Keep the patch on any future baseline regeneration — without it
     CI databases enforce FKs at statement time while production enforces at commit, so multi-table
@@ -597,6 +639,7 @@ column; none of these are mine to decide unilaterally, because each changes prod
 | **D7** | A payment reminder whose `run_date` has passed is **never sent** — the 5-day reminder is skipped entirely whenever the monthly file lands within 5 days of the deadline. | **Send immediately** on the next scheduler run instead of skipping (Q8). | P7 | ✅ **Decided — change** |
 | **D8** | Bulk loan upload returns a bare `200` with no body. | **Return the list of auto-closed loans.** No cap on how many may be closed (Q3). ⚠️ Response-shape change — `manual-tester` must expect it. | P4 | ✅ **Decided — change** |
 | **D9** | Re-approving an already-approved or closed loan is allowed and corrupts the record. | **Enforce legal state transitions** `0→1`, `0→2`, `1→3`, `1→2`; reject anything else (Q14). | P4 | ✅ **Decided — fix** |
+| **D13** | An unknown URL returns Django's **HTML** 404 page (`<h1>Not Found</h1>…`), not JSON. | v2 returns JSON `{message: …}`. Pre-existing since Phase 0 but was unregistered — `manual-tester` would otherwise file it. Accepted: no client depends on an HTML 404. | P0 | ✅ **Accepted** |
 | **D12** | CAP auto-close was never implemented — `services/saving_account.py` carries a `# TODO: schedule task for closing CAP`. Closing is manual-only today. | **Implement it** (Q20): a CAP closes automatically on `end_date`. New functionality, not a port. Needs a `SchedulerTask` type — **so Phase 6 depends on Phase 7** (already sequenced that way). No member notification (Q22). | P6 | ✅ **Decided — build** |
 | **D11** | `UserFinance.user` and `UserPreference.user` are plain FKs, not OneToOne — the same latent defect registered as D6 for `LoanDetail`. A duplicate row makes the user's finance endpoints 500 permanently. | Unique constraint on `user_id` for both; upsert not insert. | P3 | ⏳ **Needs decision** |
 | **D10** | Loan read (`GET /api/loan/<id>`, `paymentProjection`) is open to any member by id. | **Restrict** to the loan owner plus roles `[0,1,2]` (Q16). | P4 | ✅ **Decided — fix** |
@@ -691,7 +734,7 @@ A phase closes only when all four are green. Any ✗ re-opens the phase and revi
 |---|---|---|---|---|---|
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
 | 0 Foundations & Prisma baseline | ✅ **Complete** (`b3effab`) | ✅ | n/a | ⬜ | n/a |
-| 1 Auth + roles | 🔨 **In progress** | 🔨 | — | — | — |
+| 1 Auth + roles | ✅ **Complete** (`151314f`) | ✅ | ⬜ | ⬜ | ⬜ |
 | 2 Mail + notifications | ⬜ Blocked on P1 | — | — | — | — |
 | 3 Users + finance | ⬜ Blocked on P2 | — | — | — | — |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
