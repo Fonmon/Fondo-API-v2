@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-08-30 | v0.10 | **Standing review gate made explicit** (§7): `nestjs-reviewer` runs at the end of every phase and writes `docs/review-phase-<n>.md`; no phase closes without a verdict. Phases 0 and 1 under review now, retroactively. |
 | 2026-08-30 | v0.9 | **Phase 1 complete and verified** (`feat/phase-1-auth`, `151314f`). ⚠️ **Corrected a false premise: `username != email` for 2 of 15 live users, and Django authenticates on `username`** — the plan's mapping would have locked them out. DRF auth bodies derived and pinned (Phase 1's open item closed). Two new cross-cutting rules (405-vs-404, DRF framework error shape). D13 registered. Role-matrix criterion corrected to 280 cells. |
 | 2026-08-30 | v0.8 | **Q25a resolved — D1 fully specified.** Privileges are additive on top of universal self-service. **Phase 1 unblocked and started.** |
 | 2026-08-30 | v0.7 | Q10, Q13, Q18–Q25 answered. **Phase 6 unblocked** — CAP rules now specified. D3 **withdrawn** (v1 was right); D5 decided; **D12 added** (CAP auto-close, new functionality — makes P6 depend on P7). Cutover calendar constraint **corrected and narrowed** after re-reading `create_year` — only the bulk-upload cycle genuinely constrains timing. |
@@ -724,17 +725,40 @@ A phase closes only when all four are green. Any ✗ re-opens the phase and revi
 |---|---|---|
 | 1 | `nestjs-developer` | Endpoints, services, DTOs implemented; unit + integration tests ported and green; lint and typecheck clean. |
 | 2 | `manual-tester` | Parity report **PASS** against v1 on the shared dev DB — responses, status codes, DB side effects, SES/SQS payloads, scheduler rows. |
-| 3 | `nestjs-reviewer` | Code review approved, **and** the parity report reviewed for missing business scenarios. Also enforces the §2 rule that hstore raw SQL stays inside the two repositories. |
+| 3 | `nestjs-reviewer` | Code review approved, **and** the parity report reviewed for missing business scenarios. Also enforces the §2 rule that hstore raw SQL stays inside the two repositories. **Standing requirement — see below.** |
 | 4 | `business-analyst` | Phase alignment note = **Aligned**. |
 | 5 | *user* | Every §5 deviation owned by this phase is **decided** (port or fix) and recorded. An undecided deviation blocks the gate; an unregistered behavioral diff is a parity **failure**. |
+
+### The review gate is standing, not optional
+
+**Every phase ends with a `nestjs-reviewer` pass.** No phase closes without one, including phases
+that look mechanical. The reviewer:
+
+- writes `docs/review-phase-<n>.md`, findings ordered blocking / should-fix / consider, each with
+  `file:line`, what is wrong, why it matters, and what to do;
+- ends with an explicit verdict: **Approved**, **Approved-with-conditions**, or
+  **Changes-required**;
+- reviews the `manual-tester` parity report as well as the code, looking for business scenarios
+  missing from both;
+- enforces §2's rule that raw SQL touching `hstore` appears **only** inside
+  `NotificationSubscriptionRepository` and `SchedulerTaskRepository`.
+
+A **Changes-required** verdict re-opens the phase. Conditions attached to an
+**Approved-with-conditions** verdict are tracked to closure before the next phase's gate, not
+silently carried forward.
+
+Rationale: the two corrections that mattered most so far — the `username != email` lockout and
+the Babel four-digit grouping — were both cases where a plausible-looking assumption survived
+until someone read the source or the live data. That is exactly what a review pass is for, and it
+is cheapest at the end of the phase that introduced it.
 
 **Phase status board**
 
 | Phase | Status | Dev | Tester | Reviewer | Analyst |
 |---|---|---|---|---|---|
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
-| 0 Foundations & Prisma baseline | ✅ **Complete** (`b3effab`) | ✅ | n/a | ⬜ | n/a |
-| 1 Auth + roles | ✅ **Complete** (`151314f`) | ✅ | ⬜ | ⬜ | ⬜ |
+| 0 Foundations & Prisma baseline | ✅ Complete (`b3effab`) | ✅ | n/a | 🔨 **in review** | n/a |
+| 1 Auth + roles | ✅ Complete (`151314f`) | ✅ | ⬜ | 🔨 **in review** | ⬜ |
 | 2 Mail + notifications | ⬜ Blocked on P1 | — | — | — | — |
 | 3 Users + finance | ⬜ Blocked on P2 | — | — | — | — |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
