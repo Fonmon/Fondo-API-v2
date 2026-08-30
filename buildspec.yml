@@ -1,0 +1,51 @@
+version: 0.2
+env:
+  shell: bash
+  parameter-store:
+    DOCKER_PASSWORD: /fonmon/DOCKER_PASSWORD
+  variables:
+    # Throwaway PostgreSQL for the test run. v1 used the same container-per-build shape.
+    POSTGRES_DATABASE: "fondo_api_test"
+    POSTGRES_USER: "postgres"
+    POSTGRES_HOST: "localhost"
+    POSTGRES_PASSWORD: "pwd"
+    POSTGRES_PORT: "5432"
+    # Prisma reads DATABASE_URL; the e2e suite reads TEST_DATABASE_URL.
+    DATABASE_URL: "postgresql://postgres:pwd@localhost:5432/fondo_api_test?schema=public"
+    TEST_DATABASE_URL: "postgresql://postgres:pwd@localhost:5432/fondo_api_test?schema=public"
+    NODE_ENV: "test"
+    ENVIRONMENT: "test"
+    # Same values v1's buildspec used, so ported email assertions keep passing.
+    DEFAULT_FROM_EMAIL: "Fondo Montanez <no-reply@fonmon.minagle.com>"
+    AWS_REGION: "us-east-2"
+    HOST_URL_APP: "http://localhost:3000"
+phases:
+  install:
+    on-failure: ABORT
+    runtime-versions:
+      nodejs: 24
+    commands:
+      # - docker login -u minmiguelm -p $DOCKER_PASSWORD
+      - docker pull postgres
+      - docker run -d -p $POSTGRES_PORT:$POSTGRES_PORT --name fondo_db -e POSTGRES_PASSWORD=$POSTGRES_PASSWORD -e POSTGRES_USER=$POSTGRES_USER -e POSTGRES_DB=$POSTGRES_DATABASE postgres
+      - npm ci
+  pre_build:
+    commands:
+      # Wait for the container to accept connections before touching it.
+      - timeout 60 bash -c 'until docker exec fondo_db pg_isready -U $POSTGRES_USER -d $POSTGRES_DATABASE; do sleep 1; done'
+      # hstore is required by fondo_api_notificationsubscriptions.subscription and
+      # fondo_api_schedulertask.payload. The baseline migration also creates it, but the
+      # explicit step keeps v1's shape and fails loudly if the role cannot install it.
+      # Drop this once Phase 9 converts both columns to jsonb.
+      - docker exec -t fondo_db psql -c "CREATE EXTENSION IF NOT EXISTS hstore;" -U $POSTGRES_USER -d $POSTGRES_DATABASE
+      - npx prisma migrate deploy
+  build:
+    commands:
+      # v1 had no lint step; v2 gates on lint + typecheck as well as both test suites.
+      - npm run lint
+      - npm run typecheck
+      - npm test
+      - npm run test:e2e
+  post_build:
+    commands:
+      - bash scripts/trigger-deploy.sh

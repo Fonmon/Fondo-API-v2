@@ -1,0 +1,5 @@
+dist
+coverage
+generated
+node_modules
+prisma/migrations
