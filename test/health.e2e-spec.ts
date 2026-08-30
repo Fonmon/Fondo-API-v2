@@ -27,9 +27,8 @@ describe('Phase 0 application boot', () => {
     expect(response.body).toEqual({ status: 'ok', database: 'up' });
   });
 
-  it('ships no business endpoints in Phase 0', async () => {
-    // Auth, users, loans, activities, saving accounts, files and notifications are
-    // Phases 1-8. Nothing but /health may answer.
+  it('ships no business endpoints yet', async () => {
+    // Users, loans, activities, saving accounts, files and notifications are Phases 2-8.
     for (const path of [
       '/api/loan',
       '/api/user',
@@ -37,11 +36,16 @@ describe('Phase 0 application boot', () => {
       '/api/saving-account',
       '/api/file',
       '/api/admin',
-      '/api-token-auth',
       '/api/notification/subscribe',
     ]) {
       await request(app.getHttpServer()).get(path).expect(404);
     }
+  });
+
+  it('exposes exactly one Phase 1 route: POST /api-token-auth', async () => {
+    // Phase 1 added it, so it is no longer a 404. A GET is DRF's 405, not a 404, because
+    // the URL resolves and only the method is wrong (`AuthController.methodNotAllowed`).
+    await request(app.getHttpServer()).get('/api-token-auth').expect(405);
   });
 
   it('renders an unknown route through the parity exception filter', async () => {

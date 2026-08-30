@@ -7,8 +7,28 @@ NestJS + Prisma rewrite of the Fondo Montañez Django/DRF service.
 - **Spec of v1 behavior:** `CONTEXT.md` in the v1 repo. Where it disagrees with the v1
   source, the source wins.
 
-Current state: **Phase 0 complete** — scaffold, Prisma baseline, config, cross-cutting
-utilities. No business endpoints yet; `GET /health` is the only route.
+Current state: **Phase 1 complete** — DRF token authentication, Django password hashing, the
+role matrix and the §5 D1 authorisation primitives on top of Phase 0's scaffold, Prisma
+baseline, config and cross-cutting utilities.
+
+Routes so far: `POST /api-token-auth` and `GET /health`.
+
+## Authorisation, in one paragraph
+
+Two global guards mirror DRF's request pipeline. `TokenAuthGuard` is
+`rest_framework.authentication.TokenAuthentication`: it reads `Authorization: Token <key>`
+(the scheme is `Token`, **not** `Bearer`) against the existing `authtoken_token` table.
+`RolesGuard` is `IsAuthenticated` + `fondo_api.permissions.APIRolePermission`, driven by
+[`src/auth/permissions/permission-matrix.ts`](src/auth/permissions/permission-matrix.ts) — a
+verbatim port of v1's `list_permissions`, keyed by v1 view-class name.
+
+**Everything is denied by default.** A controller reaches the matrix by carrying
+`@V1View('LoanView')`; without it the route is unreachable, not open. Routes that v1 declares
+with `permission_classes = []` carry `@Public()`, and there are only three of them in the
+whole application. Adding a route means adding its rule.
+
+The exact DRF `401`/`403`/`400`/`405` bodies — which v1 has no tests for — are derived and
+documented in [`docs/phase-1-drf-auth-bodies.md`](docs/phase-1-drf-auth-bodies.md).
 
 ## Requirements
 

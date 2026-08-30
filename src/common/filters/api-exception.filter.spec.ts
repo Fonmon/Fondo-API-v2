@@ -7,12 +7,14 @@ import {
 } from '@nestjs/common';
 import { ApiExceptionFilter } from './api-exception.filter';
 import { ApiException } from '../http/api.exception';
+import { DrfException } from '../http/drf.exception';
 
 interface CapturedResponse {
   status: number | undefined;
   contentType: string | undefined;
   jsonBody: unknown;
   rawBody: string | undefined;
+  headers: Record<string, string>;
 }
 
 function makeHost(): { host: ArgumentsHost; captured: CapturedResponse } {
@@ -21,6 +23,7 @@ function makeHost(): { host: ArgumentsHost; captured: CapturedResponse } {
     contentType: undefined,
     jsonBody: undefined,
     rawBody: undefined,
+    headers: {},
   };
   const response = {
     status(code: number) {
@@ -37,6 +40,10 @@ function makeHost(): { host: ArgumentsHost; captured: CapturedResponse } {
     },
     json(body: unknown) {
       captured.jsonBody = body;
+      return this;
+    },
+    setHeader(name: string, value: string) {
+      captured.headers[name] = value;
       return this;
     },
   };
@@ -144,5 +151,72 @@ describe('ApiExceptionFilter', () => {
       filter.catch('something odd', host);
       expect(captured.status).toBe(500);
     });
+  });
+});
+
+describe('ApiExceptionFilter — DRF envelopes (Phase 1)', () => {
+  let filter: ApiExceptionFilter;
+
+  beforeEach(() => {
+    filter = new ApiExceptionFilter();
+  });
+
+  it('renders NotAuthenticated as 401 {"detail"} with a Token challenge', () => {
+    const { host, captured } = makeHost();
+    filter.catch(DrfException.notAuthenticated(), host);
+    expect(captured.status).toBe(401);
+    expect(captured.jsonBody).toEqual({
+      detail: 'Authentication credentials were not provided.',
+    });
+    expect(captured.headers).toEqual({ 'WWW-Authenticate': 'Token' });
+  });
+
+  it('renders AuthenticationFailed with the message the authenticator raised', () => {
+    const { host, captured } = makeHost();
+    filter.catch(DrfException.authenticationFailed('Invalid token.'), host);
+    expect(captured.status).toBe(401);
+    expect(captured.jsonBody).toEqual({ detail: 'Invalid token.' });
+    expect(captured.headers).toEqual({ 'WWW-Authenticate': 'Token' });
+  });
+
+  it('renders PermissionDenied as 403 with no challenge header', () => {
+    const { host, captured } = makeHost();
+    filter.catch(DrfException.permissionDenied(), host);
+    expect(captured.status).toBe(403);
+    expect(captured.jsonBody).toEqual({
+      detail: 'You do not have permission to perform this action.',
+    });
+    expect(captured.headers).toEqual({});
+  });
+
+  it('renders a serializer ValidationError dict without a `detail` wrapper', () => {
+    const { host, captured } = makeHost();
+    filter.catch(
+      DrfException.validationError({
+        username: ['This field is required.'],
+        password: ['This field is required.'],
+      }),
+      host,
+    );
+    expect(captured.status).toBe(400);
+    expect(captured.jsonBody).toEqual({
+      username: ['This field is required.'],
+      password: ['This field is required.'],
+    });
+    expect(Object.keys(captured.jsonBody as object)).toEqual(['username', 'password']);
+  });
+
+  it('renders MethodNotAllowed with the Allow header', () => {
+    const { host, captured } = makeHost();
+    filter.catch(DrfException.methodNotAllowed('GET', 'POST, OPTIONS'), host);
+    expect(captured.status).toBe(405);
+    expect(captured.jsonBody).toEqual({ detail: 'Method "GET" not allowed.' });
+    expect(captured.headers).toEqual({ Allow: 'POST, OPTIONS' });
+  });
+
+  it("does not coerce a DRF body into v1's {message} shape", () => {
+    const { host, captured } = makeHost();
+    filter.catch(DrfException.permissionDenied(), host);
+    expect(captured.jsonBody).not.toHaveProperty('message');
   });
 });

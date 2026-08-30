@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { ApiException, type MessageBody } from '../http/api.exception';
+import { DrfException } from '../http/drf.exception';
 
 /**
  * Global exception filter that renders errors the way v1's DRF views do.
@@ -16,6 +17,9 @@ import { ApiException, type MessageBody } from '../http/api.exception';
  *
  *  1. {@link ApiException} — the deliberate parity path. Renders its body verbatim, or a
  *     zero-byte body when it carries none.
+ *  1b. {@link DrfException} — the other parity path. DRF's own error envelope
+ *     (`{"detail": ...}` or a serializer's `{field: [msg]}` dict) plus the
+ *     `WWW-Authenticate: Token` header it attaches to 401s.
  *  2. Any other `HttpException` (thrown by Nest itself: guards, pipes, the 404 handler).
  *     Normalised to v1's `{'message': '<string>'}` shape so a stray Nest default such as
  *     `{"statusCode":400,"message":["..."],"error":"Bad Request"}` can never leak.
@@ -23,11 +27,11 @@ import { ApiException, type MessageBody } from '../http/api.exception';
  *     DRF/Django 500 here, which is an unhandled crash rather than a contract; v2 does not
  *     try to reproduce Django's debug page.
  *
- * ⚠️ The bodies DRF produces for authentication (`401`) and permission (`403`) failures are
- * `{"detail": "..."}`, not `{"message": "..."}`. v1 has **no test asserting them**, so the
- * exact strings must be captured from the running v1 service during Phase 1 and raised via
- * `ApiException.withMessage`-style helpers then. Until then this filter deliberately does
- * not guess.
+ * ✅ Resolved in Phase 1: the bodies DRF produces for authentication (`401`) and permission
+ * (`403`) failures are `{"detail": "..."}`, not `{"message": "..."}`. The exact strings were
+ * derived by running the pinned `Django==2.2.27` / `djangorestframework==3.11.2` stack under
+ * v1's `REST_FRAMEWORK` settings and are raised via {@link DrfException}. See
+ * `docs/phase-1-drf-auth-bodies.md`.
  */
 @Catch()
 export class ApiExceptionFilter implements ExceptionFilter {
@@ -40,6 +44,14 @@ export class ApiExceptionFilter implements ExceptionFilter {
 
     if (exception instanceof ApiException) {
       this.send(response, exception.getStatus(), exception.body);
+      return;
+    }
+
+    if (exception instanceof DrfException) {
+      for (const [name, value] of Object.entries(exception.drfHeaders)) {
+        response.setHeader(name, value);
+      }
+      response.status(exception.getStatus()).json(exception.drfBody);
       return;
     }
 
