@@ -97,6 +97,16 @@ export class AppModule implements NestModule {
    * Requests run down the list; responses run back up it, which is what
    * `onBeforeHeaders`/`skipBeforeHeadersHooks` reproduce — 7 and 8 decorate everything the
    * layers below them return, and nothing decorates 3's redirect.
+   *
+   * ## Mounted at `/`, not at a wildcard
+   *
+   * `forRoutes('/')` makes Nest call `app.use('/', ...)`, which Express treats as "every
+   * request, trim nothing". Under a wildcard mount (`'{*path}'`) Express strips the matched
+   * prefix from `req.url` for the duration of the middleware and restores it by *prepending*
+   * the removed prefix on `next()` — so `DjangoUrlResolverMiddleware`'s rewrite of `req.url`
+   * to the decoded `PATH_INFO` (finding N3) would be spliced onto the raw target instead of
+   * replacing it. Both mounts run on every request; only this one lets a middleware re-target
+   * the router.
    */
   configure(consumer: MiddlewareConsumer): void {
     consumer
@@ -107,6 +117,6 @@ export class AppModule implements NestModule {
         DjangoUrlResolverMiddleware,
         DrfRequestParsingMiddleware,
       )
-      .forRoutes('{*path}');
+      .forRoutes('/');
   }
 }

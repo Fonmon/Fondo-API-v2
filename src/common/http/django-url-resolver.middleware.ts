@@ -8,20 +8,27 @@ import {
   resolveDjangoUrl,
   type DjangoUrlPattern,
 } from './django-url-conf';
+import { escapeUriPath } from './django-uri-encoding';
 import { splitQuery } from './request-target';
 
 /**
  * Resolves the request against {@link DJANGO_URL_CONF} **before the guards**, exactly where
  * Django resolves it — review condition **C9**, parity findings **F2** and **P2-D5**.
  *
- * Two responsibilities, both of them Django's:
+ * Three responsibilities, all of them Django's:
  *
  * 1. **`URLResolver.resolve`.** No pattern matches → 404, with no guard, no controller and no
  *    body parsing. This is what makes `POST /API/notification/subscribe` a 404 instead of a
  *    200-with-a-row (F2), `POST /api/notification/sub1` a 404 *before* authentication instead
  *    of a 401 (P2-D5), and `DELETE /api/user/5/` an inert 404 rather than a live soft delete
  *    once Phase 3 lands (S7).
- * 2. **DRF's `default_response_headers`.** The matched view's `Allow` and `Vary: Accept` are
+ * 2. **Dispatch on `PATH_INFO`, not on the request target** — finding **N3**, condition
+ *    **C17**. Django routes on the decoded path, so `POST /api%2Dtoken%2Dauth` reaches
+ *    `ObtainAuthToken` and `POST /api/%6Eotification/subscribe` reaches `NotificationView`.
+ *    Express's router matches *literal* segments against the raw target (it only decodes
+ *    captured params), so both were 404s in v2 — resolved by this table and then dropped by
+ *    the router. {@link normaliseRequestTarget} closes that gap for every phase at once.
+ * 3. **DRF's `default_response_headers`.** The matched view's `Allow` and `Vary: Accept` are
  *    attached here rather than in a controller, because in v1 they are on the 401 and 403 the
  *    *guards* produce, long before a handler runs (F4).
  *
@@ -43,7 +50,7 @@ export class DjangoUrlResolverMiddleware implements NestMiddleware {
   ) {}
 
   use(request: Request, response: Response, next: NextFunction): void {
-    const [rawPath] = splitQuery(request.originalUrl);
+    const [rawPath, rawQuery] = splitQuery(request.originalUrl);
     const pathInfo = decodePathInfo(rawPath);
     const matched = resolveDjangoUrl(pathInfo, this.urlConf);
 
@@ -52,6 +59,7 @@ export class DjangoUrlResolverMiddleware implements NestMiddleware {
       return;
     }
 
+    normaliseRequestTarget(request, pathInfo, rawQuery);
     this.applyDrfViewHeaders(response, matched);
     next();
   }
@@ -88,6 +96,32 @@ export class DjangoUrlResolverMiddleware implements NestMiddleware {
         removeVaryField(finished, 'Accept');
       }
     });
+  }
+}
+
+/**
+ * Hands Nest's router the path Django dispatches on — `PATH_INFO`, decoded — instead of the
+ * raw request target (finding **N3**).
+ *
+ * Re-encoded with `escape_uri_path` rather than inlined raw, because Express decodes captured
+ * params with `decodeURIComponent`: a decoded segment must go back on the wire as a URL for
+ * the router's own decoding to be a no-op. For every target that resolves against v1's table
+ * the two forms are identical anyway — the patterns admit only `[0-9A-Za-z_-]`, so a resolving
+ * `PATH_INFO` has nothing to escape — but a future pattern with a looser character class would
+ * otherwise hand the router a `%`, a `?` or a `#` in a segment.
+ *
+ * `originalUrl` keeps the raw target for logging; only `url`, which the router reads, moves.
+ * The query string is passed through untouched: Django hands `QUERY_STRING` to `QueryDict`
+ * still encoded, exactly as Express hands `req.url`'s query to its own parser.
+ *
+ * ⚠️ This works only because `AppModule` mounts its middleware at `/`. Under any other mount
+ * path Express trims the matched prefix from `req.url` and restores it by *prepending* the
+ * removed prefix on `next()`, which would splice the rewritten path onto the raw one.
+ */
+function normaliseRequestTarget(request: Request, pathInfo: string, rawQuery: string): void {
+  const target = escapeUriPath(pathInfo) + (rawQuery === '' ? '' : `?${rawQuery}`);
+  if (request.url !== target) {
+    request.url = target;
   }
 }
 

@@ -314,7 +314,7 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Round 2 — N1 / N2: the order and the encoding of the URL layer
+  // Round 2 — N1 / N2 / N3: the order and the encoding of the URL layer
   // ---------------------------------------------------------------------------
 
   describe('N1 — APPEND_SLASH fires above corsheaders, resolution below it (C15)', () => {
@@ -385,6 +385,51 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
       const response = await request(server()).post('/password_reset?a=%C3%B1&b=1');
 
       expect(response.headers.location).toBe('/password_reset/?a=%C3%B1&b=1');
+    });
+  });
+
+  describe('N3 — percent-encoded literal segments reach the view, as in Django (C17)', () => {
+    it('serves POST /api%2Dtoken%2Dauth — Django dispatches on the decoded PATH_INFO', async () => {
+      const response = await request(server())
+        .post('/api%2Dtoken%2Dauth')
+        .send({ username: 'a', password: 'b' });
+
+      // v1: 400 {"non_field_errors":["Unable to log in with provided credentials."]}
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        non_field_errors: ['Unable to log in with provided credentials.'],
+      });
+    });
+
+    it('subscribes through POST /api/%6Eotification/subscribe and writes the row', async () => {
+      const response = await request(server())
+        .post('/api/%6Eotification/subscribe')
+        .set(authHeader(memberToken))
+        .send(V1_TEST_SUBSCRIPTION);
+
+      expect(response.status).toBe(200);
+      expect(await countSubscriptions()).toBe(1);
+    });
+
+    it('401s the same encoded path unauthenticated — the guards still run', async () => {
+      await request(server()).post('/%61pi/notification/subscribe').expect(401);
+      expect(await countSubscriptions()).toBe(0);
+    });
+
+    it('does not widen the surface: decoding cannot smuggle a path v1 404s', async () => {
+      // `%41PI` decodes to `API`, which the case-sensitive table refuses (F2 still holds).
+      const response = await request(server())
+        .post('/%41PI/notification/subscribe')
+        .set(authHeader(memberToken))
+        .send(V1_TEST_SUBSCRIPTION);
+
+      expect(response.status).toBe(404);
+      expect(response.body).toEqual({ message: 'Not Found' });
+      expect(await countSubscriptions()).toBe(0);
+    });
+
+    it('still 404s an encoded separator — %2F decodes to a path with an extra segment', async () => {
+      await request(server()).post('/api/notification/sub%2Fscribe').expect(404);
     });
   });
 
