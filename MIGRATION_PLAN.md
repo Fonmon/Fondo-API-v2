@@ -973,7 +973,7 @@ set, as defence in depth rather than as the primary control.
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
 | 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab` + C1–C4) | ✅ | n/a | ✅ **APPROVED** | n/a |
 | 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
-| 2 Mail + notifications | 🔴 **parity FAIL r2 → back to dev** | ✅ | ❌ **FAIL** (N1, N2) | ⬜ | ⬜ |
+| 2 Mail + notifications | 🔨 N1–N3 fixed (`37b9485`) → **re-test r3** | ✅ | 🔨 round 3 | ⬜ | ⬜ |
 | 3 Users + finance | ⬜ Blocked on P2 | — | — | — | — |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
 | 7 Scheduler *(resequenced)* | ⬜ Blocked on P4 | — | — | — | — |
