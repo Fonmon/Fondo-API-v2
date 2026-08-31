@@ -36,9 +36,13 @@ async function bootstrap(): Promise<void> {
   // request-parsing middleware in its place. See `src/bootstrap.ts`.
   const app = await NestFactory.create(AppModule, NEST_APPLICATION_OPTIONS);
 
-  // v1 sets `CORS_ORIGIN_ALLOW_ALL = True` (api/settings/base.py). Tightening it to an
-  // allowlist is on the post-cutover backlog, not this migration.
-  app.enableCors();
+  // ⚠️ No `app.enableCors()`. The `cors` package answers **every** `OPTIONS` with a 204
+  // from middleware — before the router, the guards and the `@All()` fallback — so a bare
+  // `OPTIONS /api/notification/subscribe` was 204 for anyone where v1 is 401/403 (finding
+  // F1, condition C14). v1's `corsheaders` short-circuits only a *genuine* preflight, and
+  // `DjangoCorsMiddleware` ports that asymmetry. It is registered in `AppModule` so the e2e
+  // suites exercise it too — this bug survived a green build precisely because nothing
+  // installed here is visible to them.
   app.enableShutdownHooks();
 
   const config = app.get(AppConfigService);
