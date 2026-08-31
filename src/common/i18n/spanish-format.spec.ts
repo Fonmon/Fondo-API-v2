@@ -1,7 +1,14 @@
 import { formatDateEs, formatDecimalEs, formatMoneyEs } from './spanish-format';
+import { fromDateColumn } from '../utils/date.util';
+import { toBogotaDate } from '../utils/timezone.util';
 
-const d = (year: number, month: number, day: number): Date =>
-  new Date(Date.UTC(year, month - 1, day));
+/** A `@db.Date` column value, the way Prisma hands it back: a `Date` at UTC midnight. */
+const d = (
+  year: number,
+  month: number,
+  day: number,
+): { year: number; month: number; day: number } =>
+  fromDateColumn(new Date(Date.UTC(year, month - 1, day)));
 
 /**
  * Golden strings. Two sources, in priority order:
@@ -50,6 +57,32 @@ describe('formatDateEs — babel.dates.format_date(value, locale="es")', () => {
 
   it('accepts plain-date objects', () => {
     expect(formatDateEs({ year: 2021, month: 9, day: 26 })).toBe('26 sept. 2021');
+  });
+
+  /**
+   * Reviewer finding S1 / plan rule 5c. The two v1 code paths disagree by a calendar day for
+   * ~21% of every day, and every other fixture in this file is at UTC midnight, where they
+   * agree — so the difference is pinned here explicitly.
+   *
+   * v1:
+   *   LoanSerializer.get_created_at    -> format_date(timezone.localtime(obj.created_at))
+   *   UserFinanceSerializer.last_modified -> format_date(obj.last_modified)   [DateField]
+   */
+  it('renders a timestamptz by its Bogota day, and a date column by its stored day', () => {
+    // 2018-03-28 23:30 -05:00 == 2018-03-29 04:30 UTC.
+    const instant = new Date('2018-03-29T04:30:00.000Z');
+
+    expect(formatDateEs(toBogotaDate(instant))).toBe('28 mar. 2018');
+    // The same instant read as if it were a `@db.Date` value: the next day. This is the bug
+    // the narrowed signature makes unrepresentable at a `timestamptz` call site.
+    expect(formatDateEs(fromDateColumn(instant))).toBe('29 mar. 2018');
+  });
+
+  it('refuses a raw Date at runtime, naming both conversions', () => {
+    expect(() => formatDateEs(new Date('2018-03-29T04:30:00.000Z') as never)).toThrow(TypeError);
+    expect(() => formatDateEs(new Date('2018-03-29T04:30:00.000Z') as never)).toThrow(
+      /fromDateColumn\(value\) for an @db\.Date column, toBogotaDate\(value\) for a timestamptz/,
+    );
   });
 });
 

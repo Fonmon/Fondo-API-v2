@@ -25,21 +25,45 @@ function isPlainDate(value: DateLike): value is PlainDate {
 }
 
 /**
- * Reads the calendar parts of a `Date` in **UTC**.
+ * Reads the calendar parts of a `Date` that came out of a **`@db.Date` column**.
  *
  * Prisma returns `@db.Date` columns as a `Date` pinned to UTC midnight, so UTC parts are
  * the stored calendar date. Using local getters here would shift the date by a day for any
  * process running west of Greenwich — including `America/Bogota`.
+ *
+ * ⚠️ **This is the wrong function for a `timestamptz`.** Reviewer finding S1 / plan rule 5c:
+ * v1 is not uniform about this, and picking the wrong side is invisible in CI.
+ *
+ * | v1 field | Prisma type | v1 serializer | v2 call |
+ * |---|---|---|---|
+ * | `UserFinance.last_modified`, `LoanDetail.from_date`, `Power.meeting_date` | `DateTime @db.Date` | `format_date(obj.last_modified)` — no conversion (`serializers.py:29`) | `formatDateEs(fromDateColumn(row.last_modified))` |
+ * | `Loan.created_at`, `SavingAccount.created_at`, `SchedulerTask.run_date` | `DateTime @db.Timestamptz` | `format_date(timezone.localtime(obj.created_at))` (`serializers.py:88`) | `formatDateEs(toBogotaDate(row.created_at))` |
+ *
+ * Reading a `timestamptz` with this function yields the **next day's** calendar date for
+ * every instant between 19:00 and 23:59 Bogota — roughly 21% of the day.
  */
-export function toPlainDate(value: DateLike): PlainDate {
-  if (isPlainDate(value)) {
-    return { year: value.year, month: value.month, day: value.day };
-  }
+export function fromDateColumn(value: Date): PlainDate {
   return {
     year: value.getUTCFullYear(),
     month: value.getUTCMonth() + 1,
     day: value.getUTCDate(),
   };
+}
+
+/**
+ * Normalises a `PlainDate | Date` for the day-count helpers below.
+ *
+ * A `Date` is interpreted as a {@link fromDateColumn} value, which is correct for every
+ * v1 caller of `days360`: `LoanDetail.from_date` and `payday_limit` are both `DateField`s
+ * (`models.py:71`, `services/loan.py:299`).
+ *
+ * ⚠️ Not exported as a formatting entry point on purpose — see {@link fromDateColumn}.
+ */
+export function toPlainDate(value: DateLike): PlainDate {
+  if (isPlainDate(value)) {
+    return { year: value.year, month: value.month, day: value.day };
+  }
+  return fromDateColumn(value);
 }
 
 /** Number of days in the given month. `month` is 1-12. */

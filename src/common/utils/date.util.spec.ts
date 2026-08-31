@@ -1,4 +1,4 @@
-import { days360, daysInMonth, isLastDay, toPlainDate } from './date.util';
+import { days360, daysInMonth, fromDateColumn, isLastDay, toPlainDate } from './date.util';
 
 const d = (year: number, month: number, day: number): Date =>
   new Date(Date.UTC(year, month - 1, day));
@@ -125,6 +125,45 @@ describe('toPlainDate', () => {
       year: 2018,
       month: 3,
       day: 28,
+    });
+  });
+
+  it('passes a PlainDate through unchanged', () => {
+    expect(toPlainDate({ year: 2018, month: 3, day: 28 })).toEqual({
+      year: 2018,
+      month: 3,
+      day: 28,
+    });
+  });
+});
+
+describe('fromDateColumn (reviewer S1 — the @db.Date half of plan rule 5c)', () => {
+  it('returns the stored calendar day of a Prisma @db.Date value', () => {
+    expect(fromDateColumn(new Date('2018-03-28T00:00:00.000Z'))).toEqual({
+      year: 2018,
+      month: 3,
+      day: 28,
+    });
+  });
+
+  it('is independent of the process time zone', () => {
+    // The whole point: `getUTCDate` rather than `getDate`, so a server in America/Bogota
+    // does not read 2018-03-27 out of a row that stores 2018-03-28.
+    const previousTz = process.env.TZ;
+    try {
+      process.env.TZ = 'America/Bogota';
+      expect(fromDateColumn(new Date('2018-03-28T00:00:00.000Z')).day).toBe(28);
+    } finally {
+      process.env.TZ = previousTz;
+    }
+  });
+
+  it('read against a timestamptz it reports the UTC day, which is why callers must choose', () => {
+    // 2018-03-28 23:30 Bogota. `toBogotaDate` gives the 28th; this gives the 29th.
+    expect(fromDateColumn(new Date('2018-03-29T04:30:00.000Z'))).toEqual({
+      year: 2018,
+      month: 3,
+      day: 29,
     });
   });
 });

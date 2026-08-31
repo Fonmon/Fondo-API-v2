@@ -1,6 +1,6 @@
 import { Decimal, toDecimal, type DecimalInput } from '../utils/decimal';
 import { roundHalfDownDecimal } from '../utils/rounding.util';
-import { toPlainDate, type DateLike } from '../utils/date.util';
+import type { PlainDate } from '../utils/date.util';
 
 /**
  * Byte-exact reimplementation of the Babel calls v1 uses to render Spanish dates and money.
@@ -56,10 +56,39 @@ const MAX_FRACTION_DIGITS = 3;
  * The `es` `medium` skeleton is `d MMM y`: day without a leading zero, abbreviated month,
  * full year.
  *
- * @example formatDateEs(new Date(Date.UTC(2021, 8, 26))) // '26 sept. 2021'
+ * ## Only takes a {@link PlainDate} — deliberately (reviewer S1, plan rule 5c)
+ *
+ * v1 does **not** format dates uniformly, and the difference is a calendar day:
+ *
+ * ```python
+ * # serializers.py:88-90 — LoanSerializer.get_created_at   (timestamptz)
+ * created_at = timezone.localtime(obj.created_at)          # -> America/Bogota first
+ * return format_date(created_at, locale=settings.LANGUAGE_LOCALE)
+ *
+ * # serializers.py:29-30 — UserFinanceSerializer.get_last_modified   (DateField)
+ * return format_date(obj.last_modified, ...)               # no conversion at all
+ * ```
+ *
+ * Accepting a `Date` here would let a caller format a `timestamptz` as its **UTC** calendar
+ * date, which is the next day for every instant between 19:00 and 23:59 Bogota (~21% of the
+ * day) — green in CI, wrong in production, and asserted byte-for-byte in Phase 2/4 email HTML.
+ * So the conversion is forced to the call site, where the column's type is known:
+ *
+ *  * `@db.Date` column  → `formatDateEs(fromDateColumn(row.last_modified))`
+ *  * `timestamptz`      → `formatDateEs(toBogotaDate(row.created_at))`
+ *
+ * @example formatDateEs({ year: 2021, month: 9, day: 26 }) // '26 sept. 2021'
  */
-export function formatDateEs(value: DateLike): string {
-  const { year, month, day } = toPlainDate(value);
+export function formatDateEs(value: PlainDate): string {
+  if (value instanceof Date) {
+    // Unreachable from TypeScript; guards JS callers and `as` casts, because the failure
+    // mode of the wrong conversion is a silently shifted date rather than an error.
+    throw new TypeError(
+      'formatDateEs expects a PlainDate, not a Date. Convert first: fromDateColumn(value) ' +
+        'for an @db.Date column, toBogotaDate(value) for a timestamptz.',
+    );
+  }
+  const { year, month, day } = value;
   const monthName = SPANISH_ABBREVIATED_MONTHS[month - 1];
   if (monthName === undefined) {
     throw new RangeError(`formatDateEs received an out-of-range month: ${month}`);
