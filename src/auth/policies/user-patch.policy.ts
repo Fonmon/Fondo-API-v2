@@ -26,6 +26,82 @@ export type UserSection = 'personal' | 'finance' | 'preferences';
  */
 export const ROLE_FIELD = 'role';
 
+/** The field `__update_user_finance` joins the treasurer's monthly TSV on (D16 / Q26). */
+export const IDENTIFICATION_FIELD = 'identification';
+
+/**
+ * The writable field set of each section, transcribed from `services/user.py`.
+ *
+ * ```python
+ * # :223-241  __update_user_personal
+ * user.first_name = obj['first_name']
+ * user.last_name  = obj['last_name']
+ * user.email      = obj['email']
+ * user.username   = obj['email']          # <- D15: v2 does NOT write username
+ * user.identification = obj['identification']
+ * user.role       = obj['role']
+ * if 'birthdate' in obj: user.birthdate = obj['birthdate']
+ *
+ * # :208-221  __update_user_preferences
+ * notifications, primary_color, secondary_color
+ *
+ * # :243-261  __update_user_finance
+ * contributions, balance_contributions, total_quota, utilized_quota
+ * # available_quota is *derived* (total_quota - utilized_quota), never taken from the body
+ * ```
+ *
+ * These sets are what makes {@link FieldAllowlist} genuinely positive (review finding S4):
+ * the allowlist is built from **this** table intersected with the caller's rights, never
+ * from the caller's own payload, so a field nobody thought about — `is_active`,
+ * `key_activation`, `user_ptr_id`, `available_quota` — is rejected rather than accepted.
+ *
+ * ⚠️ `username` is deliberately absent: D15 stops v2 rewriting the login name from `email`.
+ */
+export const PERSONAL_FIELDS: ReadonlySet<string> = new Set([
+  'first_name',
+  'last_name',
+  'email',
+  IDENTIFICATION_FIELD,
+  ROLE_FIELD,
+  'birthdate',
+]);
+
+export const PREFERENCES_FIELDS: ReadonlySet<string> = new Set([
+  'notifications',
+  'primary_color',
+  'secondary_color',
+]);
+
+export const FINANCE_FIELDS: ReadonlySet<string> = new Set([
+  'contributions',
+  'balance_contributions',
+  'total_quota',
+  'utilized_quota',
+]);
+
+export const SECTION_FIELDS: Readonly<Record<UserSection, ReadonlySet<string>>> = Object.freeze({
+  personal: PERSONAL_FIELDS,
+  preferences: PREFERENCES_FIELDS,
+  finance: FINANCE_FIELDS,
+});
+
+/**
+ * Fields that need a role beyond "may write this section at all", keyed by field name.
+ *
+ * `role` is ADMIN-only — the escalation D1 closes.
+ *
+ * ⏳ `identification` is **not** listed yet. D16 recommends making it ADMIN-only (it is the
+ * join key of the treasurer's monthly TSV, and a miss is only logged —
+ * `services/user.py:144` — so a member editing their own cédula silently freezes their own
+ * contributions and quota), but that is **Q26, still open with the operator**. When it is
+ * answered, add `[IDENTIFICATION_FIELD]: [Role.ADMIN]` (or `[Role.ADMIN, Role.TREASURER]`)
+ * here — `userPatchAllowlist` takes the map as a parameter so both readings are already
+ * tested.
+ */
+export const PRIVILEGED_FIELDS: Readonly<Record<string, readonly Role[]>> = Object.freeze({
+  [ROLE_FIELD]: [Role.ADMIN],
+});
+
 /**
  * §5 D1 — `PATCH /api/user/<id>` authorisation. **Not wired to a route yet:** the endpoint
  * lands in Phase 3. This module is the decision, unit-tested, so Phase 3 implements it
@@ -85,38 +161,38 @@ export function assertUserPatchAllowed(attempt: UserPatchAttempt): void {
 }
 
 /**
- * The allowlist for a given caller/target/section, exposed separately so Phase 3 can also
- * use it to build responses and so the table above can be tested exhaustively.
+ * The fields `attempt.actor` may write in `attempt.section` of `attempt.targetUserId`.
  *
- * `WRITABLE.<section>` is the set of non-`role` fields; the policy does not enumerate the
- * concrete personal/finance/preference column names, because those belong to Phase 3's DTOs
- * and duplicating them here would create two lists to keep in sync. Instead a permitted
- * section yields an allowlist that accepts everything *except* the fields this module
- * explicitly restricts.
+ * ⚠️ **Independent of `attempt.fields`** — that is the fix for review finding S4. The
+ * previous version returned `FieldAllowlist.from(attempt.fields)`, i.e. the caller's own
+ * payload, which made the "positive allowlist" a tautology: it could reject `role` and whole
+ * sections, but a field nobody thought about (`is_active`, `key_activation`, `user_ptr_id`)
+ * was *accepted*. The set now comes from {@link SECTION_FIELDS}, transcribed from
+ * `services/user.py`, intersected with the caller's rights.
+ *
+ * @param privileged fields needing a role beyond section access. Defaults to
+ *   {@link PRIVILEGED_FIELDS}; parameterised so D16 (`identification`, Q26) can be switched
+ *   on without touching this function.
  */
-export function userPatchAllowlist(attempt: UserPatchAttempt): FieldAllowlist {
+export function userPatchAllowlist(
+  attempt: UserPatchAttempt,
+  privileged: Readonly<Record<string, readonly Role[]>> = PRIVILEGED_FIELDS,
+): FieldAllowlist {
   const role = attempt.actor.profile?.role;
+  // No `fondo_api_userprofile` row: same default-deny as `APIRolePermission`.
   if (role === undefined) {
-    // No `fondo_api_userprofile` row: same default-deny as `APIRolePermission`.
+    return FieldAllowlist.none();
+  }
+  // Section access is decided in exactly one place; see `canWriteSection`.
+  if (!canWriteSection(attempt.actor, attempt.targetUserId, attempt.section)) {
     return FieldAllowlist.none();
   }
 
-  const own = isSelf(attempt.actor, attempt.targetUserId);
-
-  if (attempt.section === 'finance') {
-    // Privileged section: ownership is irrelevant in both directions.
-    return PRIVILEGED_FINANCE_ROLES.includes(role)
-      ? FieldAllowlist.from(attempt.fields)
-      : FieldAllowlist.none();
-  }
-
-  // `personal` / `preferences`: self-service for everyone, plus ADMIN acting on anyone.
-  if (!own && role !== Role.ADMIN) {
-    return FieldAllowlist.none();
-  }
-
-  const permitted = attempt.fields.filter((field) => field !== ROLE_FIELD || role === Role.ADMIN);
-  return FieldAllowlist.from(permitted);
+  const writable = [...SECTION_FIELDS[attempt.section]].filter((field) => {
+    const requiredRoles = privileged[field];
+    return requiredRoles === undefined || requiredRoles.includes(role);
+  });
+  return FieldAllowlist.from(writable);
 }
 
 /**
