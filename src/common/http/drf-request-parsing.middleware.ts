@@ -129,6 +129,8 @@ export class DrfRequestParsingMiddleware implements NestMiddleware {
     selected.run.call(this, request, response, (error?: unknown) => {
       if (error !== undefined && error !== null) {
         state.parseErrorDetail = this.describe(error, request, selected.kind);
+      } else if (selected.kind !== 'json') {
+        collapseMultiValueFields(request);
       }
       next();
     });
@@ -180,6 +182,41 @@ export class DrfRequestParsingMiddleware implements NestMiddleware {
       return `Multipart form parse error - ${message}`;
     }
     return 'Malformed request.';
+  }
+}
+
+/**
+ * `QueryDict` semantics for a repeated field — parity finding **F3**.
+ *
+ * DRF's `request.data` for a form or multipart body is a `QueryDict`, i.e. a
+ * `MultiValueDict`: it keeps every value, but `data['x']` and `data.items()` both yield the
+ * **last** one. That is what reaches the database — `HStoreField.get_prep_value` iterates
+ * `value.items()` — so `endpoint=a&endpoint=b` stores `b` in v1.
+ *
+ * `express.urlencoded` and multer's `appendField` both build a JavaScript **array** for a
+ * repeated key, which v2 then stored as the Python repr `"['a', 'b']"`. Collapsing to the
+ * last value reproduces `QueryDict.__getitem__` for every consumer.
+ *
+ * The list-preserving half of `MultiValueDict` (`getlist`) is deliberately not reproduced:
+ * **no v1 view calls it** (grepped across `fondo_api/`, tests excluded), so no behaviour
+ * depends on the discarded values. If a Phase 3-8 handler ever needs them, this is the
+ * single place that has to change.
+ *
+ * JSON bodies are untouched: CPython's `json.loads` and `JSON.parse` already agree that a
+ * duplicated object key keeps the last value.
+ */
+function collapseMultiValueFields(request: Request): void {
+  const body: unknown = request.body;
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    return;
+  }
+
+  const fields = body as Record<string, unknown>;
+  for (const key of Object.keys(fields)) {
+    const value = fields[key];
+    if (Array.isArray(value) && value.length > 0) {
+      fields[key] = value[value.length - 1];
+    }
   }
 }
 
