@@ -14,10 +14,35 @@ import type { AuthenticatedUser } from '../types/authenticated-user';
  * ```
  *
  * ⚠️ Note the fall-through: **any** unrecognised `type` is treated as `preferences`. That is
- * v1's behavior and Phase 3 owns the decision of whether to keep it; the policy below is
- * indexed by resolved section, so it is unaffected either way.
+ * v1's behavior; {@link resolveSection} reproduces it, and Phase 3 owns the decision of
+ * whether to keep it.
  */
 export type UserSection = 'personal' | 'finance' | 'preferences';
+
+/**
+ * `update_user`'s dispatch, and **the whole of authorisation level 1** (§7 "C8 resolved",
+ * rule 2).
+ *
+ * v1 applies exactly the section named by `type` and **ignores every other key in the body**.
+ * Its client posts `personal` *and* `finance` in the same request every time
+ * (`fondo_api/tests/test_user_views.py:49-113`), so authorising on "the body contains a
+ * `finance` key" instead of on `body.type` would 403 every ordinary member profile save —
+ * 14 of 15 users, on day one of cutover.
+ *
+ * Taking the section from this function rather than from the body's shape is what makes that
+ * mistake unrepresentable: the policy is only ever handed the dispatched section.
+ */
+export function resolveSection(type: unknown): UserSection {
+  if (type === 'personal') {
+    return 'personal';
+  }
+  if (type === 'finance') {
+    return 'finance';
+  }
+  // v1's fall-through: `return self.__update_user_preferences(...)` for anything else,
+  // including a missing `type`.
+  return 'preferences';
+}
 
 /**
  * The only field in the `personal` section that is not universally self-writable.
@@ -136,13 +161,16 @@ export interface UserPatchAttempt {
   readonly targetUserId: number;
   readonly section: UserSection;
   /**
-   * The fields the caller is attempting to write.
+   * The fields the caller is actually **changing** in {@link UserPatchAttempt.section}.
    *
-   * ⚠️ **Phase 3 must decide how this set is computed and say so in its deviation note.**
-   * v1's client sends the whole `personal` object on every PATCH, `role` included, so
-   * "every key present in the body" would 403 a member editing their own phone number.
-   * "Only keys whose value differs from the stored row" keeps existing clients working.
-   * {@link changedFields} implements the second reading; the policy itself is agnostic.
+   * ✅ **Decided** (§5 D1 clarification 1, §7 "C8 resolved" rule 3): this is
+   * `changedFields(submitted, stored)`, not "every key present in the body". v1's client
+   * echoes the whole `personal` object back on every PATCH, `role` included, so a presence
+   * check would 403 every save by all 14 non-admin members.
+   *
+   * It gates **fields within** the section only. Whether the caller may write the section at
+   * all is decided from `body.type` and never from this set — see
+   * {@link assertUserPatchAllowed}.
    */
   readonly fields: readonly string[];
 }
@@ -154,10 +182,29 @@ const PRIVILEGED_FINANCE_ROLES: readonly Role[] = [Role.ADMIN, Role.TREASURER];
  * Decides whether `actor` may write `fields` of `section` on `targetUserId`.
  * Throws DRF's `403 {"detail": "You do not have permission to perform this action."}`
  * — the same body `APIRolePermission` produces — on any violation.
+ *
+ * ## Two levels, in this order (§7 "C8 resolved")
+ *
+ * 1. **The section gate.** `assertSectionWritable` decides "may this caller touch this
+ *    section at all", from `body.type` + role + ownership. It does not look at any field, so
+ *    a declared `finance` write by a MEMBER is a **403 whether the finance object is empty,
+ *    unchanged, or absent**. This is the authoritative control, and it is the reason C7's
+ *    empty-allowlist rule is defence in depth rather than the mechanism.
+ * 2. **The field gate.** The allowlist — the section's fields (from `services/user.py`)
+ *    intersected with the caller's rights — is asserted against the fields actually being
+ *    changed. It rejects unknown fields (C6) and privileged ones: `role` always,
+ *    `identification` once Q26 is answered (D16). **403 only on a real change**, because
+ *    `attempt.fields` is expected to come from {@link changedFields}: v1's client echoes back
+ *    the whole `personal` object, `role` included, so a presence check would 403 every save.
+ *
+ * A section the caller did **not** declare never reaches either level — see
+ * {@link resolveSection}.
  */
 export function assertUserPatchAllowed(attempt: UserPatchAttempt): void {
-  const allowlist = userPatchAllowlist(attempt);
-  allowlist.assert(attempt.fields);
+  // Level 1 — independent of `fields`, so an empty or unchanged section still 403s.
+  assertSectionWritable(attempt.actor, attempt.targetUserId, attempt.section);
+  // Level 2 — what may be changed inside a section the caller may write.
+  userPatchAllowlist(attempt).assert(attempt.fields);
 }
 
 /**
@@ -196,17 +243,64 @@ export function userPatchAllowlist(
 }
 
 /**
- * The fields of `submitted` whose value differs from `stored`, using `Object.is` on the
- * primitive values v1's user payloads carry (strings, numbers, booleans, `null`).
+ * The fields of `submitted` whose value differs from `stored`.
  *
- * Offered for the "tolerate an unchanged `role` key" reading of {@link UserPatchAttempt.fields}.
- * It is **not** applied automatically — Phase 3 chooses.
+ * This is the reading §5 D1 clarification 1 decided: the `role` check compares **values**, it
+ * does not check presence. v1's client echoes the whole `personal` object back from
+ * `GET /api/user/<id>` — `role` included — so a presence check would 403 every save by all
+ * 14 non-admin members.
+ *
+ * ⚠️ **Comparison is type-normalised**, because the two sides come from different places and
+ * `Object.is` would call every one of these a change (reviewer §4.1):
+ *
+ * | Field | Submitted (JSON body) | Stored (Prisma row) |
+ * |---|---|---|
+ * | `identification` | `1098765432` or `"1098765432"` | `1098765432n` (BigInt) |
+ * | `role` | `3` or `"3"` | `3` |
+ * | `birthdate` | `"1990-05-03"` | `Date` at UTC midnight (`@db.Date`) |
+ *
+ * Phantom "changes" here are not cosmetic: under the rule above they turn into 403s on
+ * ordinary saves, which is exactly the failure D1 clarification 1 exists to prevent.
  */
 export function changedFields(
   submitted: Readonly<Record<string, unknown>>,
   stored: Readonly<Record<string, unknown>>,
 ): string[] {
-  return Object.keys(submitted).filter((key) => !Object.is(submitted[key], stored[key]));
+  return Object.keys(submitted).filter((key) => !valuesMatch(submitted[key], stored[key]));
+}
+
+/** True when the two values are the same after normalising across the JSON/Prisma boundary. */
+function valuesMatch(submitted: unknown, stored: unknown): boolean {
+  if (Object.is(submitted, stored)) {
+    return true;
+  }
+  // `null` and `undefined` are the same absence as far as a PATCH body is concerned.
+  if (submitted == null || stored == null) {
+    return submitted == null && stored == null;
+  }
+  return normalise(submitted) === normalise(stored);
+}
+
+/** A comparable string form: BigInt/number/numeric-string collapse, `Date` becomes a date. */
+function normalise(value: unknown): string {
+  if (value instanceof Date) {
+    // `@db.Date` columns come back as UTC midnight; the body sends 'YYYY-MM-DD'.
+    return value.toISOString().slice(0, 10);
+  }
+  if (typeof value === 'bigint' || typeof value === 'number') {
+    return value.toString();
+  }
+  if (typeof value === 'string') {
+    // A numeric string compares equal to the number it denotes ("3" vs 3), which is what a
+    // form-encoded or loosely-typed client sends. A date string is left alone and matches
+    // the `Date` branch above.
+    const asNumber = Number(value);
+    return value.trim() !== '' && Number.isFinite(asNumber) ? asNumber.toString() : value;
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'true' : 'false';
+  }
+  return JSON.stringify(value) ?? String(value);
 }
 
 /**

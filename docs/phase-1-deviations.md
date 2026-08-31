@@ -85,12 +85,24 @@ object on every `PATCH`, `role` included, because `__update_user_personal` reads
 `obj['role']` unconditionally. So a literal "the `role` key is present and you are not ADMIN
 → 403" would reject a member editing their own phone number.
 
-`user-patch.policy.ts` takes the set of fields being written as an explicit input and ships
-`changedFields(submitted, stored)` for the "only keys whose value differs" reading. It does
-**not** choose. **Phase 3 must decide and record the choice**; both readings are unit-tested.
-My recommendation is the `changedFields` reading — it closes the escalation (a member cannot
-*change* their role) without breaking the existing front end — but it is a product decision
-about an error message, so it belongs to the operator, not to me.
+✅ **Decided** (plan v0.11 §5 D1 clarification 1, ratified by the C8 resolution in §7): the
+**`changedFields` reading**. A 403 fires only when the submitted value differs from the stored
+one, so echoing an unchanged `role` is fine and a real escalation attempt is a rare,
+high-signal event worth logging. `assertUserPatchAllowed` now composes the two levels
+explicitly, so which mechanism is authoritative is no longer a matter of reading order:
+
+1. **`body.type` gates the section** (`resolveSection` → `assertSectionWritable`). A declared
+   `finance` write by a MEMBER is a 403 whether the finance object is empty, unchanged or
+   absent, and this decision never looks at a field.
+2. **A section the caller did not declare is ignored.** With `type: 'personal'`, a `finance`
+   key in the body is dropped by v1 and by v2 — never a 403. This is what keeps every
+   member's ordinary save working, since v1's client posts both sections every time.
+3. **`changedFields` gates privileged fields *inside* the dispatched section** — `role` today,
+   `identification` once Q26 is answered (D16).
+
+`changedFields` normalises across the JSON/Prisma boundary (`bigint` vs `number`, `Date` vs
+`'YYYY-MM-DD'`, numeric strings), because an unnormalised comparison reports every such field
+as changed and would turn rule 3 into a 403 on ordinary saves.
 
 ### 2.5 `PATCH /api/user/-1` does not mean "me" in v1
 

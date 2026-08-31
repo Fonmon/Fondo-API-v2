@@ -4,6 +4,7 @@ import type { AuthenticatedUser } from '../types/authenticated-user';
 import {
   FINANCE_FIELDS,
   ROLE_FIELD,
+  resolveSection,
   assertSectionWritable,
   assertUserPatchAllowed,
   canWriteSection,
@@ -351,6 +352,124 @@ describe('§5 D1 — PATCH /api/user/<id> authorisation policy', () => {
     });
   });
 
+  /**
+   * §7 "C8 resolved" — the two rules operate at different levels and are applied in order.
+   */
+  describe('C8 — body.type gates the section, changedFields gates the field', () => {
+    describe('rule 1: the section gate ignores the field set entirely', () => {
+      it.each([[[]], [['contributions']], [['contributions', 'total_quota']]])(
+        'a MEMBER declaring type=finance is 403 with fields %j',
+        (fields) => {
+          // "A `finance` write by a non-privileged caller is 403, not a silent no-op"
+          // (§5 D1) — including the empty change-set, which is the *common* case, because
+          // v1's client posts an unchanged `finance` block on every profile save.
+          expect(() =>
+            assertUserPatchAllowed({
+              actor: actor(Role.MEMBER),
+              targetUserId: ME,
+              section: 'finance',
+              fields,
+            }),
+          ).toThrow(DrfException);
+        },
+      );
+
+      it('403s a PRESIDENT declaring type=finance on their own row', () => {
+        expect(() =>
+          assertUserPatchAllowed({
+            actor: actor(Role.PRESIDENT),
+            targetUserId: ME,
+            section: 'finance',
+            fields: [],
+          }),
+        ).toThrow(DrfException);
+      });
+
+      it('lets a TREASURER declare an unchanged finance write', () => {
+        expect(() =>
+          assertUserPatchAllowed({
+            actor: actor(Role.TREASURER),
+            targetUserId: SOMEONE_ELSE,
+            section: 'finance',
+            fields: [],
+          }),
+        ).not.toThrow();
+      });
+
+      it('lets a MEMBER save their own personal section with nothing changed', () => {
+        expect(() =>
+          assertUserPatchAllowed({
+            actor: actor(Role.MEMBER),
+            targetUserId: ME,
+            section: 'personal',
+            fields: [],
+          }),
+        ).not.toThrow();
+      });
+    });
+
+    describe('rule 2: an undeclared section is ignored, never a 403', () => {
+      it('resolves the section from `type`, exactly as update_user dispatches', () => {
+        expect(resolveSection('personal')).toBe('personal');
+        expect(resolveSection('finance')).toBe('finance');
+        // v1's fall-through: anything else lands on preferences.
+        expect(resolveSection('preferences')).toBe('preferences');
+        expect(resolveSection('nonsense')).toBe('preferences');
+        expect(resolveSection(undefined)).toBe('preferences');
+        expect(resolveSection(null)).toBe('preferences');
+        expect(resolveSection(42)).toBe('preferences');
+      });
+
+      it("ignores a finance block in a member's ordinary personal save", () => {
+        // The v1 body shape: `{type: 'personal', personal: {...}, finance: {...}}`
+        // (test_user_views.py:49-113). Authorising on the presence of `finance` would 403
+        // 14 of 15 members on day one.
+        const body = {
+          type: 'personal',
+          personal: { first_name: 'Ana', role: Role.MEMBER },
+          finance: { total_quota: 999_999 },
+        };
+        const section = resolveSection(body.type);
+        expect(section).toBe('personal');
+
+        expect(() =>
+          assertUserPatchAllowed({
+            actor: actor(Role.MEMBER),
+            targetUserId: ME,
+            section,
+            fields: changedFields(body.personal, { first_name: 'Old', role: Role.MEMBER }),
+          }),
+        ).not.toThrow();
+      });
+    });
+
+    describe('rule 3: privileged fields inside the dispatched section', () => {
+      it('403s only on a real change of `role`', () => {
+        const stored = { first_name: 'Old', role: Role.MEMBER };
+        const echoed = { first_name: 'New', role: Role.MEMBER };
+        const escalating = { first_name: 'New', role: Role.ADMIN };
+
+        expect(() =>
+          assertUserPatchAllowed({
+            actor: actor(Role.MEMBER),
+            targetUserId: ME,
+            section: 'personal',
+            fields: changedFields(echoed, stored),
+          }),
+        ).not.toThrow();
+
+        expect(() =>
+          assertUserPatchAllowed({
+            actor: actor(Role.MEMBER),
+            targetUserId: ME,
+            section: 'personal',
+            fields: changedFields(escalating, stored),
+          }),
+        ).toThrow(DrfException);
+      });
+    });
+  });
+
   describe('changedFields helper', () => {
     it('reports only keys whose value differs', () => {
       expect(
@@ -377,6 +496,55 @@ describe('§5 D1 — PATCH /api/user/<id> authorisation policy', () => {
           fields: changedFields(submitted, stored),
         }),
       ).not.toThrow();
+    });
+
+    /** Reviewer §4.1 — the two sides come from different places and must be normalised. */
+    describe('normalises across the JSON body / Prisma row boundary', () => {
+      it('treats a bigint column and the number in the body as equal', () => {
+        expect(
+          changedFields({ identification: 1098765432 }, { identification: 1098765432n }),
+        ).toEqual([]);
+        expect(
+          changedFields({ identification: 1098765433 }, { identification: 1098765432n }),
+        ).toEqual(['identification']);
+      });
+
+      it('treats a @db.Date row and the ISO string in the body as equal', () => {
+        const stored = { birthdate: new Date('1990-05-03T00:00:00.000Z') };
+        expect(changedFields({ birthdate: '1990-05-03' }, stored)).toEqual([]);
+        expect(changedFields({ birthdate: '1990-05-04' }, stored)).toEqual(['birthdate']);
+      });
+
+      it('treats a numeric string and a number as equal (form-encoded clients)', () => {
+        expect(changedFields({ role: '3' }, { role: 3 })).toEqual([]);
+        expect(changedFields({ role: '0' }, { role: 3 })).toEqual(['role']);
+      });
+
+      it('treats null and undefined as the same absence', () => {
+        expect(changedFields({ birthdate: null }, {})).toEqual([]);
+        expect(changedFields({ birthdate: null }, { birthdate: '1990-05-03' })).toEqual([
+          'birthdate',
+        ]);
+        expect(changedFields({ birthdate: '1990-05-03' }, { birthdate: null })).toEqual([
+          'birthdate',
+        ]);
+      });
+
+      it('does not 403 a member whose client echoes a bigint identification as a number', () => {
+        // Without normalisation this is a phantom change on every single save, and under
+        // D16 it would become a 403 the moment Q26 is answered.
+        expect(() =>
+          assertUserPatchAllowed({
+            actor: actor(Role.MEMBER),
+            targetUserId: ME,
+            section: 'personal',
+            fields: changedFields(
+              { first_name: 'Ana', identification: 99999, role: Role.MEMBER },
+              { first_name: 'Ana', identification: 99999n, role: Role.MEMBER },
+            ),
+          }),
+        ).not.toThrow();
+      });
     });
 
     it('still blocks a member who actually changes their own role', () => {
