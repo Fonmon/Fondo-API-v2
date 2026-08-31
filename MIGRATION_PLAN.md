@@ -828,13 +828,10 @@ Tracked to closure, not carried forward silently. Source:
 | C7 | `FieldAllowlist.none().assert([])` does not throw. | P1 · S5 | ✅ **Closed** (`5988ac0`). An empty allowlist denies any write including the empty one; a non-empty allowlist still accepts an empty change-set. |
 | C8 | The `body.type` gate vs the `changedFields` gate. | P1 · escalated | ✅ **Closed** (`e4c9985`). `resolveSection` + `assertSectionWritable` + the field allowlist, applied in that order; `changedFields` normalises `bigint`/`number`, `Date`/`'YYYY-MM-DD'` and numeric strings so rule 3 cannot fire on an echo. Resolution text below unchanged. |
 
-⚠️ **One condition from the review is not in this table and was left untouched:** the Phase 1
-gate in `docs/review-phase-0-1.md` §5 lists **S7 — detail-route trailing slashes** as its
-fourth condition (`GET /api/loan/5/` is a Django 404 because v1's detail-route regexes have no
-`/?`, while Express's non-strict routing matches it). It never became a `C` row when the
-conditions were transcribed into this section, and `nestjs-developer` deliberately did not act
-on it. It is a cross-cutting §4 rule (or an accepted deviation) that still needs a decision
-before Phases 3–8 add detail routes.
+| C9 | **S7 — detail-route trailing slashes.** `GET /api/loan/5/` is a Django **404** (v1's detail regexes have no `/?`), but Express's non-strict routing serves it. Note the asymmetry: v1's *collection* routes **do** carry `/?` (`^api/loan/?$`), so only detail routes diverge. | P1 · S7 | ⬜ **Open** — my transcription miss, not the developer's. Needs a §4 rule or an accepted deviation **before Phases 3–8 add detail routes**. |
+
+*(C9 was raised in the first review's Phase 1 gate and lost when I transcribed the conditions
+into this table. `nestjs-developer` correctly flagged it rather than acting outside its brief.)*
 
 ### C8 resolved — the two rules operate at different levels
 
