@@ -808,10 +808,28 @@ Tracked to closure, not carried forward silently. Source:
 | C5 | Fix multipart and malformed-JSON request parsing to match v1 (**D18**). | P1 · S3 | before P3 gate |
 | C6 | `userPatchAllowlist` builds its allowlist from `attempt.fields`, making the "positive allowlist" a tautology — it cannot reject an unexpected field. | P1 · S4 | before P3 gate |
 | C7 | `FieldAllowlist.none().assert([])` does not throw, so a non-privileged `finance` write with an empty changed-set is **the silent no-op D1 explicitly forbids** — and under the decided `changedFields` reading that is the *common* case, not an edge case. | P1 · S5 | before P3 gate |
-| C8 | Resolve the rule collision the reviewer escalated: an empty `finance` section on an ordinary member save is **403** under D1's literal reading but a **no-op** under "authorise off `body.type`". Two decided rules, same request, different answers. | P1 · escalated | before P3 gate |
+| C8 | ✅ **Resolved below** — the two rules operate at different levels and do not actually collide. | P1 · escalated | resolved |
 
-C8 is the one to settle first — it is a contradiction between two rules this plan already calls
-decided, and Phase 3 cannot implement `PATCH /api/user/<id>` until it is resolved.
+### C8 resolved — the two rules operate at different levels
+
+They are not in conflict once ordered. `update_user` (`services/user.py:100`) dispatches on
+`obj['type']` and **ignores every other section in the body**. So:
+
+1. **`body.type` gates the section.** If `type == 'finance'` and the caller is neither ADMIN nor
+   TREASURER → **403**, whether the `finance` object is empty, unchanged, or absent. The declared
+   intent is what is refused, not the diff.
+2. **A section the caller did not declare is irrelevant.** With `type == 'personal'`, a `finance`
+   key in the body is ignored by v1 and must be ignored by v2 — never a 403. This is what makes
+   every member's ordinary save work, since v1's client posts both sections every time.
+3. **`changedFields` gates privileged *fields within* the dispatched section** — `role` (D1) and
+   `identification` (D16, pending Q26). 403 only on an actual change, so echoing an unchanged
+   value is fine.
+
+Level 1 answers "may you touch this section at all", level 3 answers "may you change this field".
+The reviewer's empty-`finance` case is therefore a **403** — it is a declared finance write by an
+unprivileged caller — and C7's silent no-op cannot arise, because the refusal happens at the type
+gate before any field comparison. `FieldAllowlist.assert()` must still fail closed on an empty
+set, as defence in depth rather than as the primary control.
 
 **Phase status board**
 
