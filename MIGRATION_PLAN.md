@@ -10,6 +10,8 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-08-31 | v1.1 | **Full pipeline standing from Phase 2 to the end**: `nestjs-developer` → `manual-tester` (sign-off) → `nestjs-reviewer` (sign-off), sequential. **Phase 2 started.** |
+| 2026-08-31 | v1.0 | ✅ **Phase 0 APPROVED. Phase 1 APPROVED.** Round-2 review closed C1–C8. **C9 re-ruled: fix, do not accept** — v1 has no trailing-slash *rule*, only an inconsistent table, so a blanket rule would 404 routes v1 serves. C10–C13 added (Phase 3 gate). D19/D20 register two live v1 defects; one Phase 7 timezone consequence recorded. |
 | 2026-08-30 | v0.14 | **All eight review conditions C1–C8 closed** (§7). Rule 5 **re-corrected and settled**: Django sets `os.environ['TZ']` from `TIME_ZONE`, so v1's `DateField` dates are **Bogotá**, verified against the pinned stack — the BA escalation on `last_modified` is withdrawn. Rule 5b (BigInt→JSON number) and 5c (`formatDateEs` takes a `PlainDate`) implemented as Phase 0 primitives. **D18 fixed rather than deviated** — v2 owns request parsing and reproduces DRF's multipart/415/JSON-parse behaviour, including CPython's error strings. `relativedelta` ported (reviewer P5). D1's primitives now express the C8 rule ordering. ⚠️ One review condition is **untracked**: S7 (detail-route trailing slashes) appears in the review's Phase 1 gate but in no §7 row — see the note under the table. |
 | 2026-08-30 | v0.12 | **Phases 0 and 1 reviewed — both Approved-with-conditions, no blocking findings.** 8 conditions tracked in §7. Cross-cutting rule 5 **corrected** (Django `DateField(auto_now)` is process-local, not tz-aware). Two new rules: BigInt→JSON (17 columns; first Phase 3 response would 500) and the date-formatting/localtime asymmetry. D18 registered for content-type divergences. Fixed a self-contradiction in §9. |
 | 2026-08-30 | v0.11 | business-analyst Phase 3 note folded in (verdict: **Concerns**). D1 clarified on two points that would each have broken every ordinary member save. **D14–D17 registered**; D16/D17 need operator input. Two live v1 defects verified and recorded: personal edits to the two shared-email accounts **409 today**, and **4 of 15 members cannot reset their password**. |
@@ -489,6 +491,12 @@ identical previous-year `enable` flip; both `patch=` modes identical.
 
 ---
 
+> ⚠️ **Consequence of the C4 timezone finding, recorded here because it lands in this phase:**
+> `scheduler/tasks.py:15-18` compares `datetime.now()` against `run_date__year/month/day`
+> lookups. Those agree **only because** Django's `tzset()` makes the process zone Bogotá. v2 must
+> anchor "today" in `America/Bogota` explicitly — inheriting the host zone would make the
+> scheduler silently skip or double-run tasks around midnight.
+
 ### Phase 7 — Scheduler (replacing Celery beat)
 
 > **Resequenced (v0.3): run this directly after Phase 4, before Phases 5/6.** It is the sole
@@ -680,6 +688,8 @@ column; none of these are mine to decide unilaterally, because each changes prod
 | **D7** | A payment reminder whose `run_date` has passed is **never sent** — the 5-day reminder is skipped entirely whenever the monthly file lands within 5 days of the deadline. | **Send immediately** on the next scheduler run instead of skipping (Q8). | P7 | ✅ **Decided — change** |
 | **D8** | Bulk loan upload returns a bare `200` with no body. | **Return the list of auto-closed loans.** No cap on how many may be closed (Q3). ⚠️ Response-shape change — `manual-tester` must expect it. | P4 | ✅ **Decided — change** |
 | **D9** | Re-approving an already-approved or closed loan is allowed and corrupts the record. | **Enforce legal state transitions** `0→1`, `0→2`, `1→3`, `1→2`; reject anything else (Q14). | P4 | ✅ **Decided — fix** |
+| **D19** | `__create_birthdate_notification` (`services/user.py:269`) calls `.replace(year=today_year)` on the stored birthdate. `date(2000,2,29).replace(year=2026)` raises `ValueError`; `UserDetailView.patch` has no handler, so it **500s and `transaction.atomic()` rolls the whole edit back**. Checked 2026-08-31: **0 of 15 members have a 29 Feb birthdate**, so this is **latent** — it fires the day one is enrolled. | Clamp to 28 Feb or 1 Mar — decide which, then handle it deliberately. | P3 | ⏳ **Open (latent)** |
+| **D20** | The same handler calls `user_ids.remove(user.id)` on a list from `get_users_attr("id")`, which filters `is_active=True`. Editing a **soft-deleted** user raises `ValueError` → 500 → full rollback. ⚠️ Checked 2026-08-31: **`fondodev` has 2 inactive users, so this is triggerable today.** | Guard the removal. | P3 | ⏳ **Open — live** |
 | **D18** | Request-parsing divergences found in Phase 1 review: `text/plain` → v1 **415**, v2 400. `multipart/form-data` → v1 **200**, v2 400. Malformed JSON → v1 `{"detail":"JSON parse error - …"}`, v2 Node's message. | ✅ **Fixed, all three — no deviation taken.** v2 owns request parsing (`DrfRequestParsingMiddleware` + `DrfParserInterceptor`, `bodyParser: false`): multipart parses, an unsupported media type is DRF's **415**, and a malformed JSON body returns CPython's own message and character offset (`python-json.ts`, differentially validated against CPython 3.9 over 412 structured + 3 000 fuzz cases, 0 mismatches). Parsing is deferred until **after** the guards, so DRF's authenticate-then-parse ordering is preserved. Three residuals registered in `docs/phase-1-drf-auth-bodies.md`, none client-visible. | P1 | ✅ **Fixed** |
 | **D14** | `PATCH /api/user/-1` and `DELETE /api/user/-1` pass `-1` through and 404; only `GET` substitutes `request.user.id`. | **Split by verb** (BA). GET keeps "me". PATCH **adopts** "me" — v1 404s unconditionally, so no working client can depend on it; the change is inert but stops telling a member they don't exist. DELETE **rejects the sentinel**: `fondodev` has exactly **one** ADMIN, and self-soft-delete is unrecoverable through the API (`key_activation` is null for all 15 users, so `activate_user` can never restore them). | P3 | ✅ **Decided — fix** |
 | **D15** | `__update_user_personal` does `user.username = obj['email']`, rotating the name the member logs in with. | **Stop writing `username` on personal updates.** Login names become stable. See the runbook item below — the live behavior is *worse and narrower* than "silent rename". | P3 | ✅ **Decided — fix** |
@@ -789,6 +799,33 @@ A phase closes only when all four are green. Any ✗ re-opens the phase and revi
 | 4 | `business-analyst` | Phase alignment note = **Aligned**. |
 | 5 | *user* | Every §5 deviation owned by this phase is **decided** (port or fix) and recorded. An undecided deviation blocks the gate; an unregistered behavioral diff is a parity **failure**. |
 
+### The full pipeline is standing, from Phase 2 to the end
+
+Every phase from Phase 2 onward runs all three roles **in sequence**, each gating the next. A
+phase does not advance on the previous role's optimism.
+
+```
+nestjs-developer  ──►  manual-tester  ──►  nestjs-reviewer  ──►  phase closed
+  implements +          parity report        code + parity
+  ports tests           vs v1 on the         review, explicit
+                        shared fondodev      verdict
+       │                     │                     │
+       └── sign-off ─────────┴── sign-off ─────────┘
+```
+
+- **`manual-tester` runs before the reviewer, not after.** It exercises both APIs against the
+  shared `fondodev` and reports observable differences: response bodies, status codes, DB side
+  effects, SES payloads, SQS messages, scheduler rows. A **PASS** is required to proceed.
+- **`nestjs-reviewer` reviews the parity report as well as the code**, hunting business scenarios
+  missing from *both*. Its verdict closes the phase.
+- **`business-analyst`** remains gate 4, and is also invoked on demand whenever a business rule
+  is ambiguous — it has already changed this plan four times.
+- A failure at any stage returns the phase to `nestjs-developer`; the sequence restarts there.
+
+Phases 0 and 1 closed without a `manual-tester` pass (`n/a` on the board) because they ship no
+business endpoints — there was nothing to compare. **Phase 2 is the first with observable
+behaviour, and the first to run the full sequence.**
+
 ### The review gate is standing, not optional
 
 **Every phase ends with a `nestjs-reviewer` pass.** No phase closes without one, including phases
@@ -828,6 +865,10 @@ Tracked to closure, not carried forward silently. Source:
 | C7 | `FieldAllowlist.none().assert([])` does not throw. | P1 · S5 | ✅ **Closed** (`5988ac0`). An empty allowlist denies any write including the empty one; a non-empty allowlist still accepts an empty change-set. |
 | C8 | The `body.type` gate vs the `changedFields` gate. | P1 · escalated | ✅ **Closed** (`e4c9985`). `resolveSection` + `assertSectionWritable` + the field allowlist, applied in that order; `changedFields` normalises `bigint`/`number`, `Date`/`'YYYY-MM-DD'` and numeric strings so rule 3 cannot fire on an echo. Resolution text below unchanged. |
 
+| C10 | The `@All()` 405 fallback and handlers that never read `request.data` must bypass the parser interceptor. Two regressions found by booting the real pipeline: `PUT /api-token-auth` with `text/plain` → **415 where v1 405s** (the interceptor fires before the fallback), and `ActivityYearView.post` / `UserAppsView.post`'s `birthdates` branch → **415 where v1 succeeds**, because those handlers never read `request.data`. One marker fixes both. | P1 · R1/R2 | ⬜ before P3 gate |
+| C11 | `express.json({strict:false})` plus a DRF-shaped non-dict body error; correct the mislabelled parse-error branch and register the >2.5 MB JSON tightening. | P1 · R4/R5 | ⬜ before P3 gate |
+| C12 | **Add `express` and `multer` to `dependencies`.** Both are phantom (transitive) today, so a hoisting change could hand the adapter and the middleware **two different Express instances** — silently unsetting C2's `json replacer`, so every money field would render `"1000"` instead of `1000`. | P1 · R7 | ⬜ before P3 gate |
+| C13 | One e2e cell proving **403 precedes 415/400** on a guarded route. `test/role-matrix.e2e-spec.ts` builds a partial module without `AppModule`, so it keeps Nest's default parser and never exercises the DRF pipeline — acceptable, but it leaves the ordering unproven. | P1 · R8 | ⬜ before P3 gate |
 | C9 | **S7 — detail-route trailing slashes.** `GET /api/loan/5/` is a Django **404** (v1's detail regexes have no `/?`), but Express's non-strict routing serves it. Note the asymmetry: v1's *collection* routes **do** carry `/?` (`^api/loan/?$`), so only detail routes diverge. | P1 · S7 | ⬜ **Open** — my transcription miss, not the developer's. Needs a §4 rule or an accepted deviation **before Phases 3–8 add detail routes**. |
 
 *(C9 was raised in the first review's Phase 1 gate and lost when I transcribed the conditions
