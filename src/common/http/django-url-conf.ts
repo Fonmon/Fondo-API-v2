@@ -37,7 +37,18 @@
  * @see `~/Projects/Fondo-API/api/urls.py` and `~/Projects/Fondo-API/fondo_api/urls.py`
  */
 
-/** DRF's `APIView.default_response_headers`, per view. `null` for a plain Django view. */
+/**
+ * DRF's `APIView.default_response_headers`, per view. `null` for a plain Django view.
+ *
+ * ⚠️ **Phase 3 must widen this to carry `Vary: Cookie`.** Two v1 views patch `Cookie` into
+ * `Vary` from *outside* DRF: `CsrfViewMiddleware`, when it sets the `csrftoken` cookie on a
+ * form page, and `SessionMiddleware`, when a view touches the session. Measured on the live
+ * v1: `GET /password_reset/` answers `Vary: Cookie, Origin` with a `Set-Cookie: csrftoken=…`
+ * — a **kept** route — and `GET /api/authorize` answers `Vary: Accept, Origin, Cookie`
+ * (Alexa account linking, not migrated). The other three auth pages answer `Vary: Origin`
+ * only today; `PasswordResetConfirmView` will add `Cookie` once a *valid* token puts the
+ * reset into the session. Whoever lands those views owns both the cookie and the field.
+ */
 export interface DrfViewHeaders {
   /** `Allow` — `[m.upper() for m in http_method_names if hasattr(self, m)]`, DRF's order. */
   readonly allow: string;

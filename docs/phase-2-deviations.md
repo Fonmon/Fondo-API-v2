@@ -19,6 +19,16 @@ pre-guard URL layer), **F3** (`QueryDict` last-value semantics) and most of **F4
 headers). **P2-D4 was factually wrong** and is corrected below (F5). New registrations:
 **P2-D8**. Withdrawn: **P2-D5** (now fixed rather than deviated).
 
+**Revision 3 (2026-08-31), after the round-2 `manual-tester` FAIL** (`docs/parity-phase-2.md`
+§R2.3-R2.5): F1–F5 held and nothing in the substance regressed; the two new diffs were both
+inside the URL/CORS layer this repo added in revision 2. Fixed here: **N1/C15** (the URL layer
+is now **two** middlewares, one either side of `DjangoCorsMiddleware`, because v1's
+`APPEND_SLASH` 301 and its resolution 404 sit at different depths — §2.13), **N2/C16**
+(`escape_uri_path`/`iri_to_uri` ported; the 301 `Location` is the decoded path — §2.14) and
+**N3/C17** (Nest's router is re-targeted at `PATH_INFO`, closing it in Phase 2 rather than at
+the Phase 3 gate — §2.15). Registered: **O1** and one further server-level diff, as P2-D8
+residuals (4) and (5).
+
 ---
 
 ## 1. Registered deviations from v1
@@ -32,7 +42,7 @@ headers). **P2-D4 was factually wrong** and is corrected below (F5). New registr
 | ~~**P2-D5**~~ | ~~v1's URL regex is `^api/notification/(?P<operation>[a-zA-Z]+)/?$`, so an operation containing a digit 404s **before authentication**.~~ | ~~v2 matched any segment and rejected it in the handler → 404 for an authenticated caller, **401** for an unauthenticated one.~~ | ✅ **WITHDRAWN — fixed, not deviated.** The pre-guard URL layer (C9, below) enforces `[a-zA-Z]+` where v1 enforces it, in the URL conf, so an unauthenticated `POST /api/notification/sub1` is now a **404 in both**. The in-handler check is deleted rather than kept as belt-and-braces: two places to state one rule is how the two got out of step in the first place. |
 | **P2-D6** | `NotificationSubscriptions.objects.filter(user_id__in=…)` emits no `ORDER BY`; the row order in the SQS body is PostgreSQL's heap order. | v2 emits the same `IN (…)` with no `ORDER BY`. | Recorded as a deviation *from the obvious implementation*, not from v1 — see §2.3. Adding `ORDER BY id` would have **broken** parity. |
 | **P2-D7** | v1's SQS publish happens in a Celery worker with **no retry**; a failure is logged and the message lost. | v2 publishes inline with **3 attempts and exponential backoff** (200 ms, 400 ms). | Plan Phase 2, condition 1 — authorised in advance. Strictly an improvement; the swallow semantics at the boundary are unchanged (condition 2). |
-| **P2-D8** | Response headers v1 emits that v2 does not, and vice versa (parity finding **F4**). | **Most are now matched**, not deviated: `X-Frame-Options: SAMEORIGIN`, `Vary: Origin`, `Vary: Accept`, `Allow: <view methods>`, `Content-Type: application/json` **without** `; charset=utf-8`, and **no** `Content-Type` at all on a zero-byte DRF body — plus `X-Powered-By` and `ETag` removed. **Three residuals are accepted**: (1) v1's error *bodies* are Django's HTML pages where v2 sends JSON or nothing — already **D13**, and the `Content-Type: text/html` that goes with them follows the body; (2) transport headers differ because the servers differ — v1 sends `Server: gunicorn/19.9.0` and `Connection: close`, v2 sends no `Server` and keeps the connection alive; (3) v1 answers a bare `OPTIONS /api-token-auth` with DRF's metadata document, v2 with a 405 — that is **P1-D2**, unchanged. | Everything cheap and observable was matched, because "the response differs and nobody wrote it down" is exactly what the parity gate exists to catch. The residuals are properties of the *server*, not of the API: no client can depend on `Server`, and D13/P1-D2 are separately registered and already accepted. |
+| **P2-D8** | Response headers v1 emits that v2 does not, and vice versa (parity finding **F4**). | **Most are now matched**, not deviated: `X-Frame-Options: SAMEORIGIN`, `Vary: Origin`, `Vary: Accept`, `Allow: <view methods>`, `Content-Type: application/json` **without** `; charset=utf-8`, and **no** `Content-Type` at all on a zero-byte DRF body — plus `X-Powered-By` and `ETag` removed. **Three residuals are accepted**: (1) v1's error *bodies* are Django's HTML pages where v2 sends JSON or nothing — already **D13**, and the `Content-Type: text/html` that goes with them follows the body; (2) transport headers differ because the servers differ — v1 sends `Server: gunicorn/19.9.0` and `Connection: close`, v2 sends no `Server` and keeps the connection alive; (3) v1 answers a bare `OPTIONS /api-token-auth` with DRF's metadata document, v2 with a 405 — that is **P1-D2**, unchanged; (4) **`HEAD` returns a body in v1** (parity finding **O1**): status and every header agree, `Content-Length: 63` included, but gunicorn 19.9.0 writes the 63 payload bytes and Node writes none — v2 is the RFC-9110-conformant side and no client can observe it through a conforming HTTP library; (5) **a raw non-ASCII byte in the request target**: Node's HTTP parser answers **400** before any middleware runs, where gunicorn passes it through and v1 answers 404 (`POST /password_resetñ`) or even 301 (`POST /password_reset?a=ñ` → `Location: /password_reset/?a=%C3%83%C2%B1`, double-encoded because Django reads `QUERY_STRING` as latin-1). Unreachable from any HTTP client that encodes its URLs; both are properties of the server, not of the API. | Everything cheap and observable was matched, because "the response differs and nobody wrote it down" is exactly what the parity gate exists to catch. The residuals are properties of the *server*, not of the API: no client can depend on `Server`, and D13/P1-D2 are separately registered and already accepted. |
 
 Nothing else in Phase 2 departs from v1.
 
@@ -217,6 +227,64 @@ view calls it (grepped across `fondo_api/`, tests excluded), so nothing depends 
 being discarded. If a Phase 3–8 handler ever needs them, `collapseMultiValueFields` is the
 single place that has to change.
 
+### 2.13 The URL layer is two middlewares because v1's is two *layers* (N1)
+
+The obvious reading of finding N1 is "swap two entries in `AppModule.configure`". That would
+have traded one diff for another. v1's `MIDDLEWARE` and Django's handler put the two halves of
+v2's URL middleware at different depths:
+
+| v1 | Where | Reaches CORS? |
+|---|---|---|
+| `CommonMiddleware`'s `APPEND_SLASH` 301 | `MIDDLEWARE[2]`, **above** `corsheaders` (`MIDDLEWARE[7]`) | no — returned from `process_request`, before the preflight short-circuit |
+| the resolution 404 | `BaseHandler._get_response`, **below** all eight | yes — the preflight is answered first |
+
+Measured on the live v1, with `Origin` and `Access-Control-Request-Method`:
+
+```
+OPTIONS /password_reset  -> 301   (CommonMiddleware wins)
+OPTIONS /nope/nope       -> 200   (corsheaders wins)
+```
+
+A single middleware on either side of `DjangoCorsMiddleware` matches one row and breaks the
+other. So `DjangoAppendSlashMiddleware` occupies v1's slot 3 and `DjangoUrlResolverMiddleware`
+sits below slot 8, and `AppModule.configure` now carries **all eight** rows of v1's
+`MIDDLEWARE` as a table with what each one means for v2 — the ordering is a contract, not an
+implementation detail, and slots 2 (`SessionMiddleware`) and 4 (`CsrfViewMiddleware`) become
+live in Phase 3.
+
+### 2.14 `Location` on the 301 is `escape_uri_path(PATH_INFO)`, not the request target (N2)
+
+`django-uri-encoding.ts` ports `escape_uri_path`, `iri_to_uri` and `escape_leading_slashes`.
+No JavaScript built-in has CPython `quote`'s safe set: `encodeURI` keeps `#`, `?`, `;`, `=`
+and `%`, all of which Django escapes in a path, and `encodeURIComponent` escapes `/`, `:`,
+`@`, `&`, `+`, `$` and `,`, all of which Django keeps. Every expectation in the spec was
+produced by calling the real functions inside the v1 container over the same corpus.
+
+⚠️ One asymmetry is deliberately **not** ported: Django reads `QUERY_STRING` as latin-1, so a
+raw non-ASCII byte in a query double-encodes (`?a=ñ` → `?a=%C3%83%C2%B1`). Node answers 400 to
+that request target before any middleware runs, so the branch is unreachable — registered as
+P2-D8 residual (5) rather than emulated.
+
+### 2.15 N3 was closed in Phase 2, and it needed a mount-path change
+
+Django dispatches on the decoded `PATH_INFO`; Express's router matches **literal** segments
+against the raw target and only decodes captured params. So `POST /api%2Dtoken%2Dauth` was
+resolved by the table and then dropped by the router — v1 400, v2 404, on an *implemented*
+route. `DjangoUrlResolverMiddleware` now sets `req.url = escape_uri_path(PATH_INFO)` once the
+table has matched (re-encoded, not raw, because Express will `decodeURIComponent` the params
+it captures; for every target v1's table admits the two forms are identical anyway).
+
+The non-obvious part: this only works because `AppModule` mounts its middleware at **`/`**
+rather than at `'{*path}'`. Under a non-`/` mount Express trims the matched prefix from
+`req.url` for the duration of the middleware and restores it by *prepending* the removed
+prefix on `next()`, so the rewrite would be spliced onto the raw path
+(`/api%2Dtoken%2Dauth` + `/api-token-auth`). Nest maps `forRoutes('/')` to `app.use('/', …)`,
+which matches every request and trims nothing.
+
+Fail-closed direction re-checked: decoding cannot widen the surface, because the table is
+consulted **after** decoding and before the rewrite — `POST /%41PI/notification/subscribe`
+decodes to `/API/...` and still 404s, with no row written.
+
 ---
 
 ## 3. Review conditions closed
@@ -320,14 +388,23 @@ It is skipped without that variable. It only `SELECT`s.
 | **F4** | `Vary`, `Allow`, `X-Frame-Options`, `Content-Type` (no charset; **absent** on zero-byte bodies) all match; `X-Powered-By` and `ETag` are gone. Residuals registered as **P2-D8** | diff the header block of any response, ignoring `Server`/`Date`/`Connection` |
 | **F5** | doc corrected; `remove_all_subscriptions` now has two DB-backed e2e cells and a Phase 3 instruction | read P2-D4 above |
 
-⚠️ **Two things worth adversarial attention**, because they are new code rather than fixes:
+| **N1** | a genuine preflight on the four `APPEND_SLASH` paths is a **301** (v1's `CommonMiddleware` is above `corsheaders`), and a preflight on a path nothing resolves is still a **200** (v1's resolver is below `corsheaders`) | `curl -i -X OPTIONS -H 'Access-Control-Request-Method: POST'` on `/password_reset` **and** `/nope/nope` |
+| **N2** | `Location` is `escape_uri_path(PATH_INFO) + '/'`, so `/password%5Freset` → `/password_reset/` and `/password_reset%2Fdone` → `/password_reset/done/` | the five encoded targets from §R2.4 of the report |
+| **N3** | percent-encoded **literal** segments reach the controller: `POST /api%2Dtoken%2Dauth` → 400, `POST /api/%6Eotification/subscribe` → 200 + row | the two requests from §R2.5, plus `/%41PI/...` to confirm the table did not widen |
+
+⚠️ **Three things worth adversarial attention**, because they are new code rather than fixes:
 
 1. **The URL table is fail-closed.** If it is wrong in the *restrictive* direction, v2 404s a
    URL v1 serves — the opposite failure from F2 and just as bad. Sweeping every pattern in
    `fondo_api/urls.py` against both apps (a 401 from v1 means "resolved") is the direct check.
-2. **`Location` on the `APPEND_SLASH` 301** is built from the raw request target rather than
-   Django's decoded-then-`iri_to_uri`-re-encoded path. They agree for the four routes that can
-   reach that branch; a percent-encoded probe would show the difference.
+2. ~~**`Location` on the `APPEND_SLASH` 301** is built from the raw request target~~ — **fixed
+   (N2)**: it is built from the decoded path and re-encoded with the ported `escape_uri_path`.
+   The remaining question is the *query* half: `iri_to_uri` keeps `%` safe, so an
+   already-encoded query must survive untouched (`?a=%C3%B1&b=1`) and an invalid escape must
+   **not** be repaired (`?x=%zz`).
+3. **The middleware order is now load-bearing in both directions** (N1, §2.13). Two probes fix
+   it: a preflight on `/password_reset` must be **301** and a preflight on `/nope/nope` must be
+   **200**. Anything that makes both agree is wrong.
 
 ### 4.5 Worth checking specifically
 
@@ -377,6 +454,17 @@ It is skipped without that variable. It only `SELECT`s.
    `type=preferences` must call `removeAllSubscriptions(id)` when `notifications` goes
    `true → false`, and only then (v1 compares the stored value with the submitted one first).
 
-10. **Phase 3's `create_user` rollback now has a verified counterpart.** `MailService.sendMail`
+10. ⚠️ **`DrfViewHeaders` must widen for the Phase 3 auth pages: they vary on `Cookie`.**
+   Raised by the tester as a forward-looking nit about `/api/authorize` (a skipped Alexa
+   route) and checked against the live v1 for every **kept** route: `GET /password_reset/`
+   answers `Vary: Cookie, Origin` and `Set-Cookie: csrftoken=…` (`CsrfViewMiddleware`
+   patching `Cookie` in as it sets the token), while `/password_reset/done/`, `/reset/done/`
+   and `/reset/<uidb64>/<token>/` answer `Vary: Origin` only — `PasswordResetConfirmView`
+   will add `Cookie` too once a *valid* token puts the reset into the session. So the
+   `Cookie` field is a **`PasswordResetView`** concern, not only an Alexa one:
+   `DjangoUrlResolverMiddleware`'s `drf: null` entries model none of it today, and Phase 3
+   owns both the CSRF cookie and the `Vary` field when it lands those four views.
+
+11. **Phase 3's `create_user` rollback now has a verified counterpart.** `MailService.sendMail`
    returns `false` for *any* failure including a template miss, and never throws. Three unit
    tests pin it (SES rejects, SES throws synchronously, template unknown).
