@@ -301,6 +301,10 @@ It is skipped without that variable. It only `SELECT`s.
   uncaught 500) is JSON or empty in v2.
 * **500 bodies.** `POST /api/notification/subscribe` with a body that has no `endpoint` is a
   500 in both, but v1 returns Django's HTML page and v2 returns a zero-byte body.
+* **`/api/alexa`** — v1 resolves it (`AlexaView`); v2's URL table deliberately omits it, so
+  every method there is a **404**. Alexa is not migrated (plan §1) and v2 has no route behind
+  the path, so letting it resolve would only produce a different 404. The only observable
+  difference is the 404 body — D13 again.
 * **C11's residual** — `POST /api-token-auth` with body `NaN`: v1 400 `non_field_errors …
   got float`, v2 400 `{"detail":"JSON parse error - …"}`.
 
