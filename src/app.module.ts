@@ -4,6 +4,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { AppConfigModule } from './config/config.module';
 import { AuthModule } from './auth/auth.module';
 import { ApiExceptionFilter } from './common/filters/api-exception.filter';
+import { DjangoAppendSlashMiddleware } from './common/http/django-append-slash.middleware';
 import { DjangoCorsMiddleware } from './common/http/django-cors.middleware';
 import { DjangoResponseHeadersMiddleware } from './common/http/django-response-headers.middleware';
 import { DJANGO_URL_CONF, DJANGO_URL_CONF_TOKEN } from './common/http/django-url-conf';
@@ -71,23 +72,36 @@ export class AppModule implements NestModule {
    * `app.enableCors()` shipped a 204-for-every-`OPTIONS` past a green build (finding F1,
    * condition C14): the suites build the app from `AppModule` and never saw it.
    *
-   *  1. {@link DjangoResponseHeadersMiddleware} — `XFrameOptionsMiddleware` plus the
-   *     Express-isms v1 does not emit (`X-Powered-By`, `ETag`, `; charset=utf-8`). Registered
-   *     first so its response hook also lands on the CORS preflight short-circuit.
-   *  2. {@link DjangoCorsMiddleware} — `corsheaders.CorsMiddleware`. Answers a **genuine**
-   *     preflight before the router; lets every other `OPTIONS` fall through to the guards.
-   *  3. {@link DjangoUrlResolverMiddleware} — `URLResolver.resolve` + `APPEND_SLASH`, i.e.
-   *     v1's URL table, applied before any guard (condition C9).
-   *  4. {@link DrfRequestParsingMiddleware} — owns request body parsing, replacing Nest's
-   *     built-in parser (switched off by `NEST_APPLICATION_OPTIONS`).
+   * ## The order is v1's `MIDDLEWARE` list, not a convenience
    *
-   * 1 and 2 both act on the way *out* (via `onBeforeHeaders`) and are independent of each
-   * other; 3 and 4 act on the way in and are strictly ordered — Django resolves the URL
-   * before DRF ever looks at the body.
+   * `api/settings/base.py:38-46`, with what each entry means for v2:
+   *
+   * | # | v1 | v2 |
+   * |---|---|---|
+   * | 1 | `SecurityMiddleware` | no-op — no `SECURE_*` setting is configured |
+   * | 2 | `SessionMiddleware` | not modelled; only the Phase 3 auth pages touch the session |
+   * | 3 | `CommonMiddleware` | {@link DjangoAppendSlashMiddleware} — the `APPEND_SLASH` 301 |
+   * | 4 | `CsrfViewMiddleware` | not modelled; DRF views are CSRF-exempt (Phase 3 owns the forms) |
+   * | 5 | `AuthenticationMiddleware` | not modelled; DRF authenticates per view |
+   * | 6 | `MessageMiddleware` | not modelled; no view uses the messages framework |
+   * | 7 | `XFrameOptionsMiddleware` | {@link DjangoResponseHeadersMiddleware} (+ the Express-isms v1 does not emit) |
+   * | 8 | `corsheaders.CorsMiddleware` | {@link DjangoCorsMiddleware} |
+   * | — | `BaseHandler._get_response` — URL resolution and the view, *below* all eight | {@link DjangoUrlResolverMiddleware}, then {@link DrfRequestParsingMiddleware} |
+   *
+   * The last row is why the URL layer is **two** middlewares (finding N1, condition C15).
+   * `CommonMiddleware`'s 301 is emitted at depth 3, above CORS; the resolver's 404 is emitted
+   * below depth 8, under it. Measured on the live v1, a genuine preflight is a **301** on
+   * `/password_reset` and a **200** on `/nope/nope` — no single middleware placed on one side
+   * of {@link DjangoCorsMiddleware} can produce both.
+   *
+   * Requests run down the list; responses run back up it, which is what
+   * `onBeforeHeaders`/`skipBeforeHeadersHooks` reproduce — 7 and 8 decorate everything the
+   * layers below them return, and nothing decorates 3's redirect.
    */
   configure(consumer: MiddlewareConsumer): void {
     consumer
       .apply(
+        DjangoAppendSlashMiddleware,
         DjangoResponseHeadersMiddleware,
         DjangoCorsMiddleware,
         DjangoUrlResolverMiddleware,

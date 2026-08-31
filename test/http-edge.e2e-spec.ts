@@ -314,8 +314,58 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Round 2 — N2: the encoding of the APPEND_SLASH redirect
+  // Round 2 — N1 / N2: the order and the encoding of the URL layer
   // ---------------------------------------------------------------------------
+
+  describe('N1 — APPEND_SLASH fires above corsheaders, resolution below it (C15)', () => {
+    it.each(['/password_reset', '/password_reset/done', '/reset/done', '/reset/MQ/abc-def'])(
+      '301s a genuine preflight on %s — v1: 301, v2 before the fix: 200',
+      async (path) => {
+        // `CommonMiddleware` is 3rd in v1's MIDDLEWARE and `corsheaders.CorsMiddleware` is
+        // 8th/last, so the redirect is returned before the preflight short-circuit ever runs.
+        const response = await request(server())
+          .options(path)
+          .set('Origin', 'https://x.test')
+          .set('Access-Control-Request-Method', 'POST');
+
+        expect(response.status).toBe(301);
+        expect(response.headers.location).toBe(`${path}/`);
+        expect(response.headers['content-length']).toBe('0');
+        // The response never passes back through CORS or clickjacking.
+        expect(response.headers.vary).toBeUndefined();
+        expect(response.headers['x-frame-options']).toBeUndefined();
+        expect(response.headers['access-control-allow-origin']).toBeUndefined();
+        expect(response.headers['access-control-allow-methods']).toBeUndefined();
+        expect(response.headers['access-control-max-age']).toBeUndefined();
+      },
+    );
+
+    it('301s the same preflight without an Origin — corsheaders does not require one', async () => {
+      const response = await request(server())
+        .options('/password_reset')
+        .set('Access-Control-Request-Method', 'POST');
+
+      expect(response.status).toBe(301);
+      expect(response.headers.location).toBe('/password_reset/');
+    });
+
+    it('still 200s a preflight on a path nothing resolves — the 404 is *below* corsheaders', async () => {
+      // The mirror of the case above, and the reason the URL layer is two middlewares: in
+      // v1 the resolver 404 comes from `BaseHandler`, under all eight middlewares.
+      const response = await request(server())
+        .options('/nope/nope')
+        .set('Origin', 'https://x.test')
+        .set('Access-Control-Request-Method', 'POST');
+
+      expect(response.status).toBe(200);
+      expect(response.headers['content-length']).toBe('0');
+      expect(response.headers['x-frame-options']).toBe('SAMEORIGIN');
+    });
+
+    it('leaves a bare OPTIONS on an APPEND_SLASH path a 301 as well, not a guard 401', async () => {
+      await request(server()).options('/password_reset').expect(301);
+    });
+  });
 
   describe('N2 — the 301 Location is escape_uri_path(PATH_INFO), not the target (C16)', () => {
     it.each([
