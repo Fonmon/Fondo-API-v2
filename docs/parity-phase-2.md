@@ -420,3 +420,392 @@ exception noted in §7 (P2-D4's claim about v1, which is testable and false).
 **Phase 2 overall: FAIL** — on F1, F2 and F3, all at the HTTP edge, none touching the mail,
 hstore or SQS core. Returning to `nestjs-developer`; `nestjs-reviewer` should not start until the
 three are fixed or registered, and P2-D4 corrected.
+
+---
+
+# Round 2 — re-test after the F1–F5 fixes
+
+**Date:** 2026-08-31 (second pass).
+**Tester:** `manual-tester`, black-box, read-mostly.
+**v1 (oracle, frozen):** `~/Projects/Fondo-API` @ `5bef585`, working tree clean, gunicorn 19.9.0
+on `:8443` (container `fondo-v1`, host network, repo mounted read-only).
+**v2 (under test):** `~/Projects/Fondo-API-v2` @ `656f955`, working tree clean. The server left
+running on `:8444` was **verified current**: `npm run build` reproduced `dist/` byte-for-byte
+(`diff -rq`, tsbuildinfo excluded), and the process's `/proc/<pid>/environ` confirms
+`DATABASE_URL=…/fondodev`, `PORT=8444` and a set `NOTIFICATIONS_QUEUE_URL`.
+**Database:** shared `fondodev`. Fixture verified **before and after**: 94
+`fondo_api_notificationsubscriptions` rows, `max(id) = 1468`, table md5
+`a1a74f3cbf0ecf09647afef27e85839b`, 15 `auth_user`, 15 `authtoken_token`, 38 `django_migrations`,
+`_prisma_migrations.0_init` still `applied_steps_count = 0`, `pg_dump --schema-only` identical.
+
+## Verdict: **FAIL**
+
+Materially narrower than round 1, and for different reasons. **All five findings F1–F5 are
+fixed** — independently re-measured, not taken on the developer's word — and **nothing in the
+substance regressed**: the SQS bodies, the hstore encoding, the role matrix and the parse/415/403
+ordering are still byte-identical with the new middleware stack in the request path.
+
+The failure is that the fix round introduced **two new unregistered behavioural differences**,
+both inside the new URL/CORS layer, and both exactly in the "weak spots" §4.4b flagged:
+
+| # | New difference | Severity |
+|---|---|---|
+| **N1** | A **genuine CORS preflight on an `APPEND_SLASH` path** is a **301 in v1** and a **200 in v2**. v1's `MIDDLEWARE` puts `CommonMiddleware` **3rd** and `corsheaders.CorsMiddleware` **8th (last)**, so `APPEND_SLASH` fires *before* the preflight short-circuit; `AppModule.configure` applies `DjangoCorsMiddleware` **before** `DjangoUrlResolverMiddleware`, so the short-circuit fires first. Reproduces on all four `password_reset` / `reset` routes. | **Medium** — a status-code divergence, unregistered |
+| **N2** | `Location` on the `APPEND_SLASH` 301 is built from the **raw request target**; Django builds it from the **decoded** path re-encoded with `escape_uri_path`. `POST /password%5Freset` → v1 `Location: /password_reset/`, v2 `Location: /password%5Freset/`. The doc comment in `django-url-resolver.middleware.ts` asserting "the two agree for every path that can reach this branch" is **false** — the *routes* are ASCII, the *request target* need not be. | Low, unregistered |
+
+Two further differences were found that are **pre-existing, not regressions** (round 1 simply did
+not probe them) and are reported for the register rather than as fix-round failures: **N3**
+(percent-encoded literal path segments) and **O1** (`HEAD` response body). Details in §R2.5.
+
+Per plan §4 rule 14 and §7, N1 and N2 are unregistered behavioural diffs and are sufficient for a
+FAIL on their own. Both are cheap: N1 is a two-line reorder in `AppModule.configure`; N2 is a
+port of `escape_uri_path` (or a registration).
+
+---
+
+## R2.1 Findings F1–F5 — status
+
+| # | Status | Evidence |
+|---|---|---|
+| **F1** | ✅ **Fixed** | Full `method × role` matrix re-driven on `/api/notification/subscribe`. Bare `OPTIONS`: **403** for ADMIN(0), PRESIDENT(1), TREASURER(2), MEMBER(3) and **401** unauthenticated — byte-identical bodies to v1, on both ports. Genuine preflight (`Access-Control-Request-Method`, **no** `Origin`): **200**, `Content-Type: text/html; charset=utf-8`, `Content-Length: 0`, `Vary: Origin`, `X-Frame-Options: SAMEORIGIN` — identical on both, including on a **non-resolving** path (`/nope/nope`), confirming the developer's correction that `Origin` is not part of corsheaders 2.4.0's short-circuit condition (source read from the container: `/usr/local/lib/python3.9/site-packages/corsheaders/middleware.py`). With `Origin`: `Access-Control-Allow-Origin: *`, the nine-header allow-list, `Allow-Methods: DELETE, GET, OPTIONS, PATCH, POST, PUT`, `Max-Age: 86400` — identical. An empty-valued `Access-Control-Request-Method:` still short-circuits in both (presence, not value). ⚠️ One case is **not** fixed — see **N1**. |
+| **F2** | ✅ **Fixed** | `POST /API/notification/subscribe` → **404 in both, no row written** (`max(id)` unchanged). Same for `/api/NOTIFICATION/subscribe`, `/Api/Notification/Subscribe`, `/API/NOTIFICATION/SUBSCRIBE`, authenticated and unauthenticated. `/api/notification/SUBSCRIBE` and `/api/notification/Subscribe` still resolve and give the view-level empty **405** in both (the *operation* is case-sensitive at the handler, the *path* at the URL conf) — matching v1. |
+| **F3** | ✅ **Fixed** | `endpoint=…dup1&endpoint=…dup2` **urlencoded** → both store `"endpoint"=>"https://parity.test/r2-dup2"`. Same body as **multipart** → both store `…r2-mp2`. Full `subscription::text` identical in both directions. |
+| **F4** | ✅ **Fixed** | Header blocks diffed (excluding `Server`/`Date`/`Connection`/`Keep-Alive`/`Transfer-Encoding`) across 11 response classes: 200 subscribe, 200 subscribe+`Origin`, 401 unauth, 403 GET/ADMIN, 405 unknown op, 404 unsubscribe-miss, 400 malformed JSON, 415 `text/plain`, 301 append-slash → **all HEADERS-MATCH**. Only the 500 and the URL-conf 404 differ, and only in `Content-Length`/`Content-Type`, which is the HTML-vs-JSON body already registered as **D13 / P2-D8 residual (1)**. `X-Powered-By` and `ETag` gone; `Vary: Accept, Origin` merge order matches; `Allow` present on 401/403; `Content-Type: application/json` **without** charset; **no** `Content-Type` on zero-byte bodies. Header *ordering* differs (v1 `Content-Type, Vary, Allow, X-Frame-Options`; v2 `Allow, Vary, Content-Type, …`) — insignificant per RFC 9110, noted for completeness. |
+| **F5** | ✅ **Fixed (doc)** | P2-D4 is struck through and corrected with the real call site (`fondo_api/services/user.py:218`); `notification.service.ts` and `notification-subscription.repository.ts` carry the ⚠️ "Phase 3 must wire this call" comment; `MIGRATION_PLAN.md` §5 item 9 adds the Phase 3 scope item. Two DB-backed e2e cells exist and pass (`remove_all_subscriptions deletes every row of one user and no one else's`, `… on a user with no rows is a no-op`). |
+
+`P2-D5` is genuinely **withdrawn, not deviated**: `POST /api/notification/sub1` is now **404 in
+both, authenticated and unauthenticated**, raised before the guards; only the body differs (D13).
+
+---
+
+## R2.2 The URL table — full sweep of all 22 patterns, both slashed and unslashed
+
+The highest-value check. Method: for each pattern, a concrete instance in **both** forms, driven
+with `curl --path-as-is` at both ports, `GET` and `POST`. "v1 resolved" is read off any status
+that is **not 404**; in v2 the two 404s are distinguished by body — `{"message":"Not Found"}` is
+the **URL conf** refusing to resolve, `{"message":"Cannot <M> <path>"}` is the **Nest router**
+having no handler for a path the URL conf *did* let through. That distinction is what separates
+"the table is over-restrictive" from "Phase 3+ has no controller yet", and it is checked on every
+row rather than assumed.
+
+**Result: 22/22 patterns agree, in both forms, in both directions.** No row where v1 resolves and
+v2's URL conf 404s; no row where v1 404s and v2's URL conf lets it through.
+
+| Path | v1 | v2 URL conf |
+|---|---|---|
+| `/password_reset/`, `/password_reset/done/`, `/reset/MQ/abc-def/`, `/reset/done/` | 200 | resolved (router 404 — Phase 3) |
+| `/password_reset`, `/password_reset/done`, `/reset/MQ/abc-def`, `/reset/done` (bare) | **301** | **301**, same `Location` for ASCII targets |
+| `/api-token-auth`, `/api-token-auth/` | 405 | 405 (identical) |
+| `/api/authorize`, `/api/authorize/` | 200 | resolved (router 404 — skipped endpoint) |
+| `/api/loan`, `/api/loan/` | 401 | resolved |
+| `/api/loan/1` | 401 | resolved | 
+| **`/api/loan/1/`** | **404** | **URL-conf 404** |
+| `/api/loan/1/approve` | 401 | resolved |
+| **`/api/loan/1/approve/`** | **404** | **URL-conf 404** |
+| `/api/user`, `/api/user/` | 401 | resolved |
+| `/api/user/birthdates`, `/api/user/-power`, `/api/user/1`, `/api/user/-1` | 401 | resolved |
+| **`/api/user/birthdates/`, `/api/user/1/`, `/api/user/-1/`** | **404** | **URL-conf 404** |
+| `/api/user/activate/1` | 405 (GET) | resolved |
+| **`/api/user/activate/1/`** | **404** | **URL-conf 404** |
+| **`/api/activity/1` and `/api/activity/1/`** | **401 both** — the one detail route carrying `/?` | **resolved both** |
+| `/api/activity/year`, `/api/activity/year/`, `/api/activity/year/2021` | 401 | resolved |
+| **`/api/activity/year/2021/`** | **404** | **URL-conf 404** |
+| `/api/notification/subscribe`, `…/subscribe/` | 401 | 401 (identical) |
+| `/api/file`, `/api/file/`, `/api/file/1` | 401 | resolved |
+| **`/api/file/1/`** | **404** | **URL-conf 404** |
+| `/api/admin`, `/api/admin/`, `/api/saving-account`, `/api/saving-account/` | 401 | resolved |
+| `/api/alexa`, `/api/alexa/` | 405 (GET) / 422 (POST) | URL-conf 404 — **registered**, §4.4 |
+| `/health`, `/health/` | 404 | 200 — **registered**, P0-D2 |
+
+**The asymmetry the brief called out is reproduced exactly:** `GET /api/activity/1/` is a **401 in
+both** (resolves) while `GET /api/loan/1/` is a **404 in both**.
+
+### Regex boundary probes — 25 further paths, 0 mismatches
+
+Driven to catch a transcription that is *nearly* right:
+
+* `reset` token `{1,13}-{1,20}`: `abcdefghijklm-abcdefghijklmnopqrst` (13-20) resolves in both;
+  `abcdefghijklmn-…` (14) and `…-abcdefghijklmnopqrstu` (21) are 404/URL-conf-404 in both.
+* `uidb64` `[0-9A-Za-z_\-]+`: `/reset/M_Q-x/a-b/` resolves in both; `/reset/M.Q/a-b/` 404s in both.
+  `/reset/MQ/a_b/` (no `-` in the token) 404s in both.
+* Numeric ids: `/api/loan/007` and `/api/loan/99999999999999999999` resolve in both;
+  `/api/loan/1a`, `/api/loan/+1` 404 in both.
+* The `-?` sentinel: `/api/user/-1` and `/api/user/-abc` resolve in both; `/api/user/--1` and
+  `/api/user/abc-def` 404 in both.
+* `operation` `[a-zA-Z]+`: `/api/notification/a` and `/api/notification/aBcXyZ` resolve in both;
+  `sub-scribe`, `sub_scribe`, `subscribeñ`, `sub1`, `subscribe%20`, `subscribe.` 404 in both.
+* Doubled slashes: `/api//notification/subscribe`, `/api/notification/subscribe//`,
+  `/api-token-auth//`, `/password_reset//` — 404 in both.
+* Near-misses: `/api/saving_account`, `/api/savingaccount` — 404 in both.
+
+### WSGI `PATH_INFO` decoding
+
+* `POST /api/notification/%73ubscribe` → **200 authenticated / 401 unauthenticated in both**.
+* `POST /api/notification/su%62scribe` and `%73%75%62%73%63%72%69%62%65` → same.
+* `POST /api/notification/%73ubscribe/` (decoded **and** trailing slash) → 200/401 in both.
+* `POST /api/notification/sub%2Fscribe` → **404 in both**.
+* Double-encoded `%2573ubscribe` → 404 in both. `subscri%C3%A9be` → 404 in both.
+* `/api/notification/../notification/subscribe`, `/api/./notification/subscribe` → 404 in both
+  (neither server normalises dot-segments).
+
+### `Allow` / `Vary: Accept` transcription — verified against live v1
+
+All 17 `allow` strings in `django-url-conf.ts` were read back off a live v1 response and compared:
+**17/17 correct**, and `varyAccept` is right everywhere (`Vary: Accept, Origin` on every DRF view,
+`Vary: Origin` only on `/api-token-auth`, whose `ObtainAuthToken` has a single renderer).
+
+⚠️ **One forward-looking nit** (not a Phase 2 defect; `/api/authorize` is a skipped endpoint):
+v1 answers `GET /api/authorize` with `Vary: Accept, Origin, **Cookie**` — `AuthView` touches the
+session, so `SessionMiddleware` patches `Cookie` in. The table models only `Accept`. Whoever
+implements `AuthView` should widen `DrfViewHeaders` rather than discover this in Phase 3's own run.
+
+---
+
+## R2.3 N1 — genuine preflight vs `APPEND_SLASH` (new, unregistered)
+
+`corsheaders.CorsMiddleware` is **last** in v1's `MIDDLEWARE` (`api/settings/base.py:38-46`),
+below `django.middleware.common.CommonMiddleware`. Django's new-style stack runs `process_request`
+top-down, so `CommonMiddleware` issues the `APPEND_SLASH` 301 and returns **without ever calling**
+the CORS middleware. In v2, `AppModule.configure` applies `DjangoCorsMiddleware` **before**
+`DjangoUrlResolverMiddleware`, so the preflight short-circuit wins.
+
+```
+$ printf 'OPTIONS /password_reset HTTP/1.1\r\nHost: 127.0.0.1\r\n
+          Origin: https://x.test\r\nAccess-Control-Request-Method: POST\r\n
+          Connection: close\r\n\r\n' | nc 127.0.0.1 8443
+HTTP/1.1 301 Moved Permanently
+Content-Type: text/html; charset=utf-8
+Location: /password_reset/
+Content-Length: 0
+
+… same request to 8444 …
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Vary: Origin
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Headers: accept, accept-encoding, authorization, content-type, dnt, origin, user-agent, x-csrftoken, x-requested-with
+Access-Control-Allow-Methods: DELETE, GET, OPTIONS, PATCH, POST, PUT
+Access-Control-Max-Age: 86400
+Content-Length: 0
+X-Frame-Options: SAMEORIGIN
+```
+
+Reproduced identically on all four paths that can reach the branch: `/password_reset`,
+`/password_reset/done`, `/reset/done`, `/reset/MQ/abc-def`. With and without `Origin`.
+
+**Scope.** Only these four; a preflight on a resolving path (`/api/notification/subscribe`) and on
+a wholly non-resolving path (`/nope/nope`) is a 200 in both, correctly. No **Phase 2** route is
+affected today, and no browser sends a preflight to the bare form of a Django form page — but it
+is a status-code divergence produced by this fix round, it is unregistered, and it goes live the
+moment Phase 3 lands `PasswordResetView`. Fix: swap the two entries in `AppModule.configure` so
+the resolver runs first, matching v1's `MIDDLEWARE` order. (The response-phase hook ordering must
+be preserved: v1's 301 carries **no** `Vary`, **no** `X-Frame-Options` and **no** `Access-Control-*`,
+which `skipBeforeHeadersHooks` already reproduces and which the reorder must not break.)
+
+---
+
+## R2.4 N2 — `Location` encoding on the `APPEND_SLASH` 301 (new, unregistered)
+
+Django builds the redirect from `request.get_full_path(force_append_slash=True)`, i.e.
+`escape_uri_path(<decoded path>) + '/' + ('?' + iri_to_uri(QUERY_STRING))`.
+`redirectWithSlash` uses `splitQuery(request.originalUrl)` — the **raw** target.
+
+```
+$ curl -si --path-as-is -X POST http://127.0.0.1:8443/password%5Freset | head -1; …
+HTTP/1.1 301 Moved Permanently
+Location: /password_reset/          ← v1
+
+$ curl -si --path-as-is -X POST http://127.0.0.1:8444/password%5Freset
+HTTP/1.1 301 Moved Permanently
+Location: /password%5Freset/        ← v2
+```
+
+Further confirmed cases (all 301 in both, `Location` differing):
+
+| Request target | v1 `Location` | v2 `Location` |
+|---|---|---|
+| `/password%5Freset` | `/password_reset/` | `/password%5Freset/` |
+| `/password%5freset` (lower hex) | `/password_reset/` | `/password%5Freset/` |
+| `/pass%77ord_reset` | `/password_reset/` | `/pass%77ord_reset/` |
+| `/password_reset%2Fdone` | `/password_reset/done/` | `/password_reset%2Fdone/` |
+| `/reset/M%51/abc-def` | `/reset/MQ/abc-def/` | `/reset/M%51/abc-def/` |
+| `/password_reset?a=%C3%B1&b=1` | `/password_reset/?a=%C3%B1&b=1` | **same** |
+
+The `%2F` case is the sharpest: v1's `Location` names a *different, decoded* path. Both redirects
+happen to converge on a working URL, so the practical impact is small, but the header bytes differ
+and the code comment claiming they cannot is wrong. Fix: port `escape_uri_path` (`quote(path,
+safe="/:@&+$,-_.!~*'()")`) over the already-computed `pathInfo`, and `iri_to_uri` over the query —
+or register the deviation and correct the comment.
+
+---
+
+## R2.5 N3 and O1 — pre-existing, found this round, not regressions
+
+**N3 — percent-encoded *literal* path segments 404 in v2.** The URL conf is right; Nest's
+Express router matches literal segments against the **raw** path, so a decoded-equal target does
+not reach the controller. Diagnosed by body: v2 returns `{"message":"Cannot POST …"}`, i.e. the
+URL conf resolved and the router did not.
+
+```
+POST /api%2Dtoken%2Dauth   {"username":"a","password":"b"}
+  v1 400 {"non_field_errors":["Unable to log in with provided credentials."]}
+  v2 404 {"message":"Cannot POST /api%2Dtoken%2Dauth"}
+
+POST /api/%6Eotification/subscribe   <valid subscription>   (MEMBER token)
+  v1 200, row written        v2 404, no row
+  unauthenticated: v1 401    v2 404
+```
+
+Also `/%61pi/notification/subscribe`, `/api/l%6Fan/1`, `/api/%61ctivity/1/`, `/password%5Freset/`.
+This is the **mirror image of F2** — v2 narrower than v1 rather than wider — so it writes nothing
+v1 would not, but it is unregistered and cross-cutting (it will apply to every Phase 3–8 route).
+It predates the fix round: `/api%2Dtoken%2Dauth` has 404'd since Phase 1. Only the parameterised
+segments decode correctly, because Express decodes params (`%73ubscribe` works). For
+`nestjs-developer`: either normalise the path for the router the way `decodePathInfo` already does
+for the table, or register it.
+
+**O1 — `HEAD` returns a response body in v1.** `HEAD /api/notification/subscribe` with an ADMIN
+token: **identical status (403) and identical headers including `Content-Length: 63`** in both, but
+v1 (gunicorn 19.9.0) writes the 63-byte JSON body and v2 (Node) writes 0 bytes. Same for the
+unauthenticated 401. Round 1 recorded `HEAD → 403 / 403 PASS` on status alone. This is a property
+of the **server**, in the same class as **P2-D8 residual (2)** (`Server:`, `Connection:`), and v2
+is the RFC-conformant side; it belongs in that residual rather than as a defect.
+
+---
+
+## R2.6 Regression check — the round-1 substance, re-run against the new build
+
+The middleware now sits in the request path, so all of it was re-driven, not assumed.
+
+### Role matrix, both operations — `PASS`
+
+| Role (user) | subscribe v1 / v2 | rows for that endpoint | owner | unsubscribe via **v2** | repeat via **v1** |
+|---|---|---|---|---|---|
+| ADMIN (0), u1 | 200 / 200, 0-byte | **1** | 1 | 200 | 404 |
+| PRESIDENT (1), u9 | 200 / 200, 0-byte | **1** | 9 | 200 | 404 |
+| TREASURER (2), u2 | 200 / 200, 0-byte | **1** | 2 | 200 | 404 |
+| MEMBER (3), u4 | 200 / 200, 0-byte | **1** | 4 | 200 | 404 |
+
+Each endpoint was subscribed through v1 **and** v2 — exactly one row each, proving the global
+dedupe still crosses apps. Denials re-verified byte-for-byte on **both** operations: inactive
+token → `401 {"detail":"User inactive or deleted."}`; unknown token → `401 {"detail":"Invalid
+token."}`; no header → `401 {"detail":"Authentication credentials were not provided."}`.
+Non-`POST` verbs (`GET/PUT/PATCH/DELETE/OPTIONS`) → `403 {"detail":"You do not have permission to
+perform this action."}` for **every** role including ADMIN, `401` unauthenticated.
+
+### The three §4.5 checks — `PASS`
+
+1. **Cross-app single row + identical `subscription::text`.** A payload with accents, an
+   apostrophe and a backslash in `keys`, written by v1 and by v2 (differing only in the endpoint,
+   normalised away):
+
+   ```
+   "keys"=>"{'p256dh': 'BNhR5oáé', 'auth': \"oLq'g\\\\m\"}", "endpoint"=>"https://parity.test/X", "expirationTime"=>NULL
+   ```
+
+   **`cmp`-identical** — the Python-repr quoting flip (`'…'` → `"…"` when the value contains an
+   apostrophe), the doubled backslash and the raw UTF-8 all agree.
+2. **Cross-user unsubscribe.** MEMBER u5 against u4's endpoint → **404, 0 bytes, in both**; the row
+   survives (`count = 1`). v2 then deleted a v1-written row and v1 a v2-written row, both 200.
+3. **SQS `MessageBody` compared with `cmp`**, both apps driven against the same live rows, each
+   capture written to disk raw by a local HTTP stub (`:4599` v1 via a swapped `tasks.sqs_client`,
+   `:4598` v2 via `AWS_ENDPOINT_URL_SQS` + `NOTIFICATIONS_QUEUE_URL`):
+
+   | Send | Bytes | `cmp` |
+   |---|---|---|
+   | `[1]` — `Ha sido creada una nueva solicitud de crédito` | 476 | **identical** |
+   | `[2,5,9]` — 75 subscriptions, `…fecha límite…mañana` | 28 265 | **identical** |
+   | `[1]` — `José "Pepe" \ / <b>ñ</b> ç 🎉` + literal TAB, target `/user/13?q=á&z=1` | 537 | **identical** |
+   | `[1]` — DEL (U+007F), U+0001, NBSP | 429 | **identical** |
+   | `[1..15]` — **all 94 live rows** | 35 392 | **identical** |
+   | `[4]` (no subscriptions) and `[]` | — | **no HTTP request from either system** |
+
+### The 94-row live decode scan — `PASS`
+
+Decoding the 35 392-byte body (which is byte-identical between the two systems) yields
+**94 subscriptions, 0 failing the `keys`-object decode**, every one with `auth` + `p256dh`, and
+hstore key order preserved as **93 × `keys, endpoint, expirationTime` + 1 × `keys, endpoint`**
+(the Apple row). Heap order, not id order, matched. Independently, the developer's read-only e2e
+scan runs rather than skips: `test/notification.e2e-spec.ts` is **30 passed + 1 skipped** without
+`FONDODEV_DATABASE_URL` and **31 passed, 0 skipped** with it.
+
+### Rule 5d on a real accented Spanish body — `PASS`
+
+The captured bytes show `ensure_ascii` escaping and `', '` / `': '` separators in both:
+
+```
+{"subscriptions": [{"keys": {"p256dh": "BO-ciUqn…", "auth": "iEqZDhjU-hAfpOegPQgqSA"}, "endpoint": "https://web.push.apple…"}], "message": {"body": "Hoy está cumpliendo años José \"Pepe\" \\ / <b>ñ</b> ç 🎉\tTAB", "target": "/user/13?q=á&z=1"}}
+```
+
+The whole 537-byte body is ASCII-only, the emoji is the surrogate pair, `\t` and `\"` and `\\` are
+CPython's escapes, and DEL/NBSP are escaped in the control-character send. **`NOTIFICATIONS_QUEUE_URL`
+re-verified load-bearing**: with it unset, v2 logs `Error trying to connect to MNS service:
+NOTIFICATIONS_QUEUE_URL is not configured` and the capture count does not move — so every cell
+above is backed by bytes on the wire.
+
+### Parsers, error bodies, registered deviations — `PASS` / unchanged
+
+| Case | v1 | v2 |
+|---|---|---|
+| malformed JSON `{` | `400 {"detail":"JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"}` | **byte-identical** |
+| `Content-Type: text/plain` | `415 {"detail":"Unsupported media type \"text/plain\" in request."}` | **byte-identical** |
+| body `{}`, `[1,2]`, `5` | 500, Django HTML | 500, 0 bytes — §4.4 / D13 |
+| `{"endpoint": null}` | 200 + a SQL-NULL row | 500 — **P2-D3**, unchanged (row cleaned up) |
+| `NaN` | 400 `…Out of range float values…` | 400 `…Expecting value…` — **C11 residual**, unchanged |
+| `POST …/suscribe` (typo) | **405, 0-byte** | identical; `401` unauthenticated in both |
+| `POST …/sub1` | **404** authenticated **and** unauthenticated | identical — P2-D5 withdrawn |
+
+### Test gates
+
+`npm test` → **1094 passed / 30 suites**. `npm run test:e2e` (with `FONDODEV_DATABASE_URL`) →
+**420 passed / 7 suites, 0 skipped**, including the 422-line `test/http-edge.e2e-spec.ts`.
+
+---
+
+## R2.7 System health
+
+| Check | Result |
+|---|---|
+| v1 boots and serves | OK — gunicorn 19.9.0, 3 workers, `:8443`; `git status` clean at `5bef585`, repo read-only |
+| v2 build is current | OK — `npm run build` reproduced the running `dist/` exactly; process env confirmed |
+| v2 route inventory | OK — no surface beyond `POST`/`ALL /api/notification/:operation`, `POST`/`ALL /api-token-auth`, `GET /health`; every other v1 path is a router 404 behind a correctly-resolving URL table |
+| Schema untouched | OK — `pg_dump --schema-only` byte-identical before/after (only pg_dump's `\restrict` token) |
+| Migrations | OK — `django_migrations` 38 rows; `_prisma_migrations.0_init` still `applied_steps_count = 0`; no `prisma migrate` ever run |
+| The 94-row fixture | OK — restored exactly: 94 rows, `max(id) = 1468`, md5 `a1a74f3cbf0ecf09647afef27e85839b`, `pg_dump -t …` identical to the pre-test dump. Only the id sequence advanced (1558 → 1572) from rows I created and deleted |
+| Stray writes | OK — `auth_user` 15, `authtoken_token` 15, `fondo_api_userprofile` 15, `fondo_api_loan` 425, `fondo_api_loandetail` 374, `fondo_api_userfinance` 15, `fondo_api_schedulertask` 632, `fondo_api_activity` 26, `fondo_api_savingaccount` 2 — all unchanged. No temporary users created this round |
+| e2e uses its own DB | OK — `test/test-database.ts` provisions `fondo_api_test`; only the opt-in scan reads `fondodev`, `SELECT` only |
+| Scheduler / worker | n/a — v2 registers `ScheduleModule` with no jobs; v1's Celery beat/worker not running |
+| Both repos | OK — clean working trees, `5bef585` and `656f955` |
+
+---
+
+## R2.8 Verdict per surface
+
+| Surface | Round 1 | Round 2 |
+|---|---|---|
+| `POST /api/notification/subscribe` — roles, dedupe, cross-app, hstore encoding | PASS | **PASS** |
+| `POST /api/notification/unsubscribe` — roles, cross-user 404, cross-app | PASS | **PASS** |
+| `OPTIONS` on the route (bare and preflight) | FAIL (F1) | **PASS** |
+| URL matching — case, trailing slash, operation charset, `PATH_INFO` decoding, all 22 patterns | FAIL (F2) | **PASS** |
+| Body parsing incl. repeated form/multipart keys | FAIL (F3) | **PASS** |
+| Response headers | FAIL (F4) | **PASS** (residuals = D13 / P2-D8) |
+| P2-D4 / `remove_all_subscriptions` register | FAIL (F5) | **PASS** |
+| `MailService` — six SES payloads | PASS | **PASS** (unchanged code; `src/mail/` untouched since `b5742bc`) |
+| `NotificationService.sendNotification` → SQS | PASS | **PASS** (re-driven, 5 sends `cmp`-identical) |
+| DB side effects and schema stability | PASS | **PASS** |
+| **`APPEND_SLASH` 301 — preflight interaction** | n/a (no 301 existed) | **FAIL (N1)** |
+| **`APPEND_SLASH` 301 — `Location` encoding** | n/a | **FAIL (N2)** |
+| Percent-encoded literal path segments | not probed | **DEVIATION (N3)** — pre-existing, unregistered |
+| `HEAD` response body | PASS (status only) | **DEVIATION (O1)** — pre-existing, server-level |
+
+**Phase 2 overall: FAIL**, on **N1** and **N2** only. F1–F5 are closed and the phase's substance
+is unchanged and exact. Back to `nestjs-developer` for a middleware reorder, an `escape_uri_path`
+port (or two register entries), and a decision on N3; `nestjs-reviewer` should not start until
+N1/N2 are resolved.
+
+## R2.9 What I could not test this round
+
+Unchanged from §8: the Celery hop, real AWS, mail/notification over HTTP (no route until Phases
+3/4/6), P2-D1 and P2-D2's internals, `POST /password_reset/` end-to-end, the dedupe race, load.
+Additionally: `GET/POST /api/authorize` and `POST /api/alexa` are out of scope per the brief and
+were only exercised at the URL-resolution layer.
