@@ -1,3 +1,6 @@
+import type { Server } from 'node:http';
+import { connect } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import type { INestApplication } from '@nestjs/common';
 import { Test, type TestingModule } from '@nestjs/testing';
 import request from 'supertest';
@@ -41,6 +44,63 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
   const sqs = { send: jest.fn() };
 
   const server = (): App => app.getHttpServer();
+
+  /**
+   * `app.init()` wires the app up but never binds a socket, so the server has no address until
+   * something listens; supertest hides this by calling `listen(0)` per request. The raw probe
+   * needs a real port, so it binds one ephemeral listener and reuses it — supertest then reuses
+   * the same address, and `app.close()` tears it down.
+   */
+  async function listeningPort(): Promise<number> {
+    // supertest types `App` as `Server | string`; the Nest adapter always hands back a Server.
+    const httpServer = server() as unknown as Server;
+    if (!httpServer.listening) {
+      await new Promise<void>((resolve) => {
+        httpServer.listen(0, '127.0.0.1', resolve);
+      });
+    }
+    return (httpServer.address() as AddressInfo).port;
+  }
+
+  /**
+   * A request written straight onto the socket, because **supertest cannot express a
+   * fragment**: superagent normalises the URL and strips everything from the `#` on before it
+   * writes the request line, so `POST /password_reset#frag` reaches the app as
+   * `POST /password_reset` and the N4 cells below would pass against the unfixed code. This
+   * sends the bytes verbatim, exactly as the raw-socket probe against v1 did.
+   */
+  async function rawRequest(
+    target: string,
+    method = 'POST',
+  ): Promise<{ status: number; location: string | undefined }> {
+    const port = await listeningPort();
+    const raw = await new Promise<string>((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1', () => {
+        socket.write(
+          `${method} ${target} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n` +
+            'Connection: close\r\n\r\n',
+        );
+      });
+      let buffer = '';
+      socket.setEncoding('latin1');
+      socket.on('data', (chunk: string) => {
+        buffer += chunk;
+      });
+      socket.on('end', () => {
+        resolve(buffer);
+      });
+      socket.on('error', reject);
+    });
+
+    const head = raw.split('\r\n\r\n')[0].split('\r\n');
+    const status = Number(head[0].split(' ')[1]);
+    const location = head
+      .slice(1)
+      .find((line) => line.toLowerCase().startsWith('location:'))
+      ?.slice('location:'.length)
+      .trim();
+    return { status, location };
+  }
 
   async function countSubscriptions(): Promise<number> {
     const rows = await prisma.$queryRawUnsafe<{ count: bigint }[]>(
@@ -537,6 +597,58 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
       expect(response.headers.vary).toBe('Origin');
       expect(response.headers['x-frame-options']).toBe('SAMEORIGIN');
       expect(response.headers.allow).toBeUndefined();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Round 3 — N4: gunicorn drops the fragment before Django ever runs
+  // ---------------------------------------------------------------------------
+
+  describe('N4 — the request-target fragment reaches neither PATH_INFO nor Location (C18)', () => {
+    // gunicorn's `parse_request_line` splits the target with `urlsplit` and `create()` copies
+    // only `path` and `query` into the WSGI environ (`wsgi.py:97,191-194`); the fragment stays
+    // on the request object, reachable only through `RAW_URI`, which Django never reads.
+    // Statuses and Locations below are v1's, over a raw socket on :8443.
+
+    it('301s a bare fragment — v1: 301 /password_reset/, v2 before the fix: 404', async () => {
+      const { status, location } = await rawRequest('/password_reset#frag');
+
+      expect(status).toBe(301);
+      expect(location).toBe('/password_reset/');
+    });
+
+    it('drops a fragment after a query — v2 before the fix echoed `#frag` into Location', async () => {
+      const { status, location } = await rawRequest('/password_reset?a=1#frag');
+
+      expect(status).toBe(301);
+      expect(location).toBe('/password_reset/?a=1');
+    });
+
+    it('still 404s the percent-encoded %23 — the control that the fix did not over-reach', async () => {
+      // `%23` is not a delimiter: it decodes to a literal `#` *inside* PATH_INFO, so the path
+      // is `/password_reset#frag`, which no pattern matches in either direction. 404 in v1
+      // both before and after the fix.
+      const { status, location } = await rawRequest('/password_reset%23frag');
+
+      expect(status).toBe(404);
+      expect(location).toBeUndefined();
+    });
+
+    it('splits on the first #, so a `?` inside the fragment is not a query string', async () => {
+      // v1: POST /password_reset#frag?a=1 -> 301 /password_reset/ — no `?a=1`, because
+      // `urlsplit` removed the fragment before it went looking for a `?`.
+      const { status, location } = await rawRequest('/password_reset#frag?a=1');
+
+      expect(status).toBe(301);
+      expect(location).toBe('/password_reset/');
+    });
+
+    it('resolves a normal route carrying a fragment rather than 404ing it', async () => {
+      // The resolver reads the same split, so the fragment must not reach the URL table
+      // either. Unauthenticated, so this is the guard's 401 and not a 404.
+      const { status } = await rawRequest('/api/notification/subscribe#frag');
+
+      expect(status).toBe(401);
     });
   });
 });

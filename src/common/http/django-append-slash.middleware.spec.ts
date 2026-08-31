@@ -107,6 +107,41 @@ describe('DjangoAppendSlashMiddleware', () => {
     });
   });
 
+  describe('N4 — the fragment never reaches PATH_INFO or the Location (C18)', () => {
+    // gunicorn parses the target with `urlsplit` and puts only `path`/`query` into the
+    // environ, so Django cannot see a fragment. Every `Location` below was read off v1 over a
+    // raw socket, because supertest/superagent strips the `#` before writing the request line
+    // and therefore cannot express these shapes at all.
+    it('301s a bare fragment — v1: 301, v2 before the fix: 404', () => {
+      const { response } = run('/password_reset#frag');
+      expect(response.statusCode).toBe(301);
+      expect(response.headers.Location).toBe('/password_reset/');
+    });
+
+    it('keeps the query but drops the fragment — v2 before the fix leaked `#frag`', () => {
+      const { response } = run('/password_reset?a=1#frag');
+      expect(response.statusCode).toBe(301);
+      expect(response.headers.Location).toBe('/password_reset/?a=1');
+    });
+
+    it('leaves %23 encoded, which stays a 404 — the control on the fix', () => {
+      // `%23` decodes to a literal `#` inside PATH_INFO, and `/password_reset#frag` is not a
+      // route, so neither form resolves and CommonMiddleware passes it through to the 404.
+      const { response, nextCalled } = run('/password_reset%23frag');
+      expect(nextCalled).toBe(true);
+      expect(response.ended).toBe(false);
+    });
+
+    it.each([
+      ['/password_reset#frag?a=1', '/password_reset/'],
+      ['/password_reset?a=1#f1#f2', '/password_reset/?a=1'],
+      ['/password_reset#', '/password_reset/'],
+      ['/password_reset?a=1#', '/password_reset/?a=1'],
+    ])('splits %s on the first # — Location %s', (target, location) => {
+      expect(run(target).response.headers.Location).toBe(location);
+    });
+  });
+
   describe('the response is the one Django builds above the CORS middleware', () => {
     it('is a 301 with an empty text/html body and no Express-isms', () => {
       const { response } = run('/password_reset');
