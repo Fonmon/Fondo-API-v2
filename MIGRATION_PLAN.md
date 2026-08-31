@@ -860,8 +860,8 @@ set, as defence in depth rather than as the primary control.
 |---|---|---|---|---|---|
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
 | 0 Foundations & Prisma baseline | ✅ Complete (`b3effab`) | ✅ | n/a | ✅ **Approved w/ conditions** — C1–C4 **closed** (v0.14), re-review pending | n/a |
-| 1 Auth + roles | ✅ Complete (`151314f`) | ✅ | ⬜ | ✅ **Approved w/ conditions** — C5–C8 **closed** (v0.14), S7 still untracked, re-review pending | ⬜ |
-| 2 Mail + notifications | ⬜ Blocked on P1 | — | — | — | — |
+| 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
+| 2 Mail + notifications | 🟢 **AUTHORISED — ready to start** | — | — | — | — |
 | 3 Users + finance | ⬜ Blocked on P2 | — | — | — | — |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
 | 7 Scheduler *(resequenced)* | ⬜ Blocked on P4 | — | — | — | — |

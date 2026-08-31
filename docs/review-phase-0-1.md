@@ -592,3 +592,436 @@ C3, C7, C8, C10 and C12, and the test additions in §4.3, are recommendations.
    member profile save posts an unchanged `finance` section. Is that a 403 (the literal reading of
    D1's last bullet) or a no-op (authorise off `body.type` alone)? These give different answers to
    the same request and the choice needs to be recorded, not inferred.
+
+---
+---
+
+# Round 2 — re-review of the condition fixes
+
+**Reviewer:** `nestjs-reviewer` · **Date:** 2026-08-31 · **Gate criterion #3, final pass.**
+
+**Under review:** `~/Projects/Fondo-API-v2`, branch `feat/phase-1-auth`, `151314f..5ff018c`
+(nine implementation commits `114d8cf`…`3a4e547`, plus `c75e9d5` and `5ff018c`, plan/docs only).
+Plan revision **v0.14**. Round 1 above is unchanged and remains the baseline.
+
+**Parity oracle:** `~/Projects/Fondo-API`, verified clean (`git status --porcelain` empty).
+
+Lint / typecheck / suite results were re-verified by the operator (938 unit, 343 e2e) and are
+taken as given. This pass spent its effort on substance, as round 1 did.
+
+## 6. What I re-derived independently this round
+
+| Claim under test | How | Result |
+|---|---|---|
+| **C4's reversal** — Django makes the process zone equal `TIME_ZONE` | Read `django/conf/__init__.py:183-193` in an installed `Django==2.2.27` tree: `os.environ['TZ'] = self.TIME_ZONE; time.tzset()`, guarded by `hasattr(time,'tzset')` | ✅ **Confirmed.** The developer is right and my S6 inference was wrong |
+| The C4 residual (no tzdata ⇒ silent UTC) | Ran `os.environ['TZ']='Bogus/Zone'; time.tzset(); date.today()` in CPython on a UTC host | ✅ **Confirmed silent** — no exception, offset 0. Django's own validation is skipped when `/usr/share/zoneinfo` is absent (`conf/__init__.py:186-189`) |
+| `python-json.ts` reproduces CPython | Ran the emulator over all 412 committed fixture rows via `tsx` | ✅ **412/412**, 0 mismatches |
+| The fixture is a genuine 3.9 capture, not a transcription | Replayed the same 412 inputs through local CPython **3.14**: 4 rows differ — the two `Illegal trailing comma` messages (added after 3.9) and the two `\uXXXX`-at-end rows | ✅ The fixture is **3.9-authentic**; it could not have been generated on a modern interpreter |
+| The `\uXXXX`-at-end-of-input quirk, which 3.14 disagrees with | Read CPython **3.9** `Modules/_json.c::scanstring_unicode`: `next++; end = next + 4; if (end >= len) raise_errmsg("Invalid \\uXXXX escape", pystr, next - 1);` — `>=`, and the position is the index of `u` | ✅ **Exactly what `python-json.ts:96-105` implements.** "Captured, not guessed" is accurate |
+| `Invalid \escape` / `Invalid control character at` offsets | Same file: `raise_errmsg("Invalid \\escape", pystr, end - 2)` (the backslash) and `raise_errmsg("Invalid control character at", pystr, next)` (the character) | ✅ Both match `python-json.ts:130,140` |
+| `media_type_matches` port | Compared `drf-media-type.ts:41-67` with DRF's `_MediaType.match` + Django's `parse_header` (which **lowercases** the full type — an easy miss) | ✅ Faithful, including the lhs-parameters loop being vacuous for parser media types |
+| `_parse` / `_load_stream` semantics | Read `rest_framework/request.py` in an installed `djangorestframework==3.11.2` | ✅ The empty-body short-circuit, `content_type == ''`, and the 415 path are all reproduced correctly |
+| **C3 against the real library** | Installed `python-dateutil==2.7.5`; generated **5 096** `(date, delta)` cases from the TS port across 2016-2021 × month-ends × 13 deltas and compared | ✅ **0 mismatches.** The 14-step MONTHLY clone chain from `2018-01-31T14:30:15.250Z` and the 5-step YEARLY chain from `2020-02-29` are identical to dateutil, microseconds included |
+| C6's field sets | Diffed `PERSONAL/PREFERENCES/FINANCE_FIELDS` against `services/user.py:208-261` | ✅ Exact; `username` correctly absent (D15), `available_quota` correctly absent (derived) |
+| The C5 pipeline's real behaviour | Booted a minimal Nest app with the production middleware + interceptor + filter and drove 11 probe requests | ⚠️ Mostly correct — **three divergences found, see R1/R2/R4** |
+| v1's URL table for C9 | Read `fondo_api/urls.py` and `api/urls.py` in full | ⚠️ The C9 premise is **not quite right** — see §9 |
+
+---
+
+## 7. Condition-by-condition rulings
+
+### C1 (S1) — `formatDateEs()` takes only a `PlainDate` — ✅ **Closed**
+
+`spanish-format.ts:82-97` accepts `PlainDate` only, with a runtime `TypeError` naming both
+conversions for JS callers and `as` casts. `date.util.ts:45-51` (`fromDateColumn`) and
+`timezone.util.ts:123-126` (`toBogotaDate`) are the two named halves, each carrying the v1
+`serializers.py` line it corresponds to, and `date.util.ts:37-40` is a per-column table Phase 2/4
+can follow without re-deriving anything. The test I asked for exists verbatim
+(`spanish-format.spec.ts`: one instant, `'28 mar. 2018'` through Bogotá and `'29 mar. 2018'`
+through the date-column path). Recorded in `docs/phase-0-deviations.md` §2.11 and plan rule 5c.
+Nothing left open.
+
+### C2 (S2) — BigInt → JSON number — ✅ **Closed**
+
+`json-bigint.ts:80-82` renders a bare number; `:67-72` throws `BigIntPrecisionError` outside
+±(2^53−1) rather than losing a cent. The replacer-not-interceptor argument at `:32-39` is right
+and worth keeping: `res.json()` applies `app.get('json replacer')` for both the handler path and
+`ApiExceptionFilter` (`api-exception.filter.ts:54,78`), so error bodies and DTO instances are
+covered without cloning. Installed by an `AppModule` provider (`app.module.ts:41`), so the e2e
+suites exercise the production wiring — and `test/json-bigint.e2e-spec.ts` asserts the **raw
+response text**, which is the only assertion that can tell `1000` from `"1000"`. Decision
+recorded in `docs/phase-0-deviations.md` §2.10 and plan rule 5b.
+
+### C3 (plan gap) — `relativedelta` month-end primitive — ✅ **Closed**
+
+Independently differentially verified against `python-dateutil==2.7.5` above: 5 096 cases,
+0 mismatches. `relativedelta.util.ts:76-78` folds months into total-month arithmetic instead of
+reproducing dateutil's sign-dependent `divmod`, which is equivalent for every reachable input
+and easier to read; `:81` is the clamp; `:88-93` applies `days`/`weeks` afterwards as a real
+`timedelta`, which is the property that makes `2018-01-31 + 1 month − 5 days` come out right.
+`addRelativeDeltaToInstant` operating on **UTC** wall-clock parts is correct here and for the
+right reason (`:99-103`): Django hands `create_repeat_instance` a UTC-aware datetime and
+`__radd__` calls `other.replace(...)`, leaving `tzinfo` untouched.
+
+**On the two v1 behaviours it reproduces rather than fixes — reproducing them is correct, and
+neither needs a business-analyst question.** I checked reachability in v1 rather than assuming
+it:
+
+* **MONTHLY collapse to the 28th is unreachable in v1.** `schedule_notification(run_date,
+  payload, repeat=0)` has exactly three call sites — `services/loan.py:314`, `:315` (both
+  `repeat=0`) and `services/user.py:282` (`repeat=4`). Nothing in v1 ever creates a `repeat=3`
+  row, so `tasks.py:37` is dead code. Porting it faithfully costs nothing and is the right call;
+  it is not a business question because there is no live behaviour to ask about.
+* **The leap-day YEARLY drift is reachable only through a v1 path that already crashes.**
+  `__create_birthdate_notification` (`services/user.py:267-282`) does
+  `datetime.strptime(user.birthdate,'%Y-%m-%d').date().replace(year=today_year)`, and
+  `date(2000,2,29).replace(year=2026)` raises `ValueError: day 29 must be in range 1..28`. See
+  **V1** in §8 — that is a live v1 defect, and it is the thing worth escalating, not the drift.
+
+### C4 (S6) — `auto_now` dates are Bogotá — ✅ **Closed.** My round-1 inference is withdrawn.
+
+The reversal is correct and I confirm it at source level: `Settings.__init__` ends with
+`os.environ['TZ'] = self.TIME_ZONE; time.tzset()` (Django 2.2.27, `django/conf/__init__.py:192-193`),
+so `DateField.pre_save`'s process-local `datetime.date.today()` **is** Bogotá in any Django
+process. My S6 was right about `pre_save` and wrong about the conclusion; the developer read one
+level further, and the demonstration on the pinned stack (`2026-08-31` before `django.setup()`,
+`2026-08-30` after, at 19:09 Bogotá on a UTC host) is the right kind of evidence. Plan rule 5
+(`MIGRATION_PLAN.md:594-618`) and `timezone.util.ts:19-67` now record the whole chain, and the
+two halves are named separately (`nowInstant()` / `todayForAutoNowDateField()`), which was the
+part of S6 that still stands. The escalation is correctly withdrawn.
+
+**The reversal has a second consequence nobody has written down yet, and it is good news:**
+`scheduler/tasks.py:15-18` selects the day's tasks with `datetime.now()` (process-local) against
+`run_date__year/month/day` lookups, which Django evaluates in `settings.TIME_ZONE`. Those two
+only agree *because* of `tzset()`. Phase 7 must therefore anchor "today" in Bogotá, not UTC —
+worth adding to Phase 7's scope note while rule 5 is being read.
+
+**On the recorded residual (no in-repo Dockerfile; `tzset()` fails silently without tzdata):**
+verified real — I reproduced the silent UTC fallback — and correctly characterised as the *only*
+scenario producing UTC dates. I rate it **low and non-blocking**, for three reasons: v2 pins the
+zone explicitly either way (`timezone.util.ts:164-169`), so no v2 behaviour depends on it; the
+only exposure is whether *historic* rows written by the prod container agree with the rows v2
+will write, and `last_modified` is rewritten on every save; and `LoanDetail.from_date` — the one
+place a one-day error would move money through `days360` — is historic data v2 consumes as
+stored, unchanged, either way.
+**Follow-up, not a condition:** one command on the running production container settles it
+permanently (`python -c "import time; print(time.tzname)"`, or `date`). Add it to the Phase 9
+cutover runbook next to the other environment checks; it costs a minute and closes the last
+unknown. I could not do it here — the dev database was down this session (`fondodev` refuses
+connections, no postgres process, no containers), so no live-data cross-check was possible.
+
+### C5 (S3, D18) — DRF request parsing — ⚠️ **Closed with follow-up**
+
+**The condition itself is met, and the complexity is warranted.** All three original rows are
+fixed rather than deviated: multipart parses, an unsupported media type is DRF's 415 with the
+header echoed as sent, and a malformed JSON body returns CPython's own message and offset. I
+verified the emulator independently (412/412; the 3.9-vs-3.14 divergence proves the fixture is a
+real capture; the two C-scanner quirks match `Modules/_json.c` in the 3.9 branch). The
+media-type port is a faithful reading of `_MediaType.match`, including the two things a
+reimplementation usually gets wrong — Django's `parse_header` lowercases, and an absent
+`Content-Type` is `''` rather than `None` and therefore 415s.
+
+**Is the surface justified?** Yes. The alternative was three registered deviations, one of which
+(multipart) makes Phases 3, 4 and 8 impossible — `UserView.patch`, `LoanView.patch` and
+`FileView.post` all declare `@parser_classes((MultiPartParser,))`. `python-json.ts` is the only
+part that is arguably optional, and it is 334 lines with a differential harness behind it; given
+`JSONParser.parse` puts `str(exc)` verbatim into a client-visible body, emulating it is cheaper
+than explaining a per-endpoint diff eight times.
+
+**Is the seam in the right place?** Yes, and this is the strongest design decision in the batch.
+Deferring the raise until after the guards reproduces `dispatch → initial() → handler` exactly,
+so a bad token on a broken body still 401s. Doing it any other way (Nest's parser, or a
+middleware that throws) inverts DRF's order on every write endpoint in Phases 3–8. Sharing
+`NEST_APPLICATION_OPTIONS` via `src/bootstrap.ts` so no test app can silently diverge is the
+right instinct — with one exception, R8 below.
+
+**Three follow-ups, all found by driving the real pipeline. None re-opens Phase 1; all are due
+at the Phase 3 gate.** See R1, R2 and R4 in §8. R1 and R2 are the ones that matter for the
+Phases 3–8 side effects you asked about.
+
+### C6 (S4) — a genuinely positive allowlist — ✅ **Closed**
+
+`user-patch.policy.ts:85-111` transcribes the three field sets; I diffed them line by line
+against `services/user.py:208-261` and they are exact, including `username`'s deliberate absence
+(D15) and `available_quota`'s (derived at `:259`). `userPatchAllowlist:238-242` now builds from
+`SECTION_FIELDS ∩ rights` and never reads `attempt.fields`, so `is_active`, `key_activation`,
+`user_ptr_id` and `available_quota` are rejected. The round-1 §4.1 duplication note is also
+addressed: `:234` calls `canWriteSection`, so section logic exists once. Parameterising
+`privileged` (`:226`) so D16/Q26 can be switched on without editing the function, and testing
+both readings now, is better than what I asked for.
+
+### C7 (S5) — `FieldAllowlist` fails closed — ✅ **Closed**
+
+`field-allowlist.ts:74-78`: an empty allowlist denies any write including the empty one; a
+non-empty allowlist still accepts an empty change set, which is the correct asymmetry. The
+docstring at `:58-72` states why it is defence in depth rather than the primary control, which
+is exactly the ordering C8 settled.
+
+### C8 — `body.type` gates the section, `changedFields` gates the field — ✅ **Closed**
+
+`assertUserPatchAllowed:203-208` applies the two levels in that order, and level 1
+(`assertSectionWritable`) never looks at a field, so a declared `finance` write by a MEMBER is a
+403 whether the object is empty, unchanged or absent. `resolveSection:35-45` reproduces v1's
+fall-through (any unrecognised `type` → `preferences`) and, more importantly, makes "authorise on
+the body's shape" unrepresentable — the policy is only ever handed the dispatched section. My
+round-1 §4.1 `Object.is` finding is fixed at `:273-304` with normalisation across the
+JSON/Prisma boundary. One nit on that normalisation: R9.
+
+### C9 (S7) — detail-route trailing slashes — 🔴 **Not closed** (correctly: never in the brief)
+
+Unchanged in code; promoted to a tracked row in `MIGRATION_PLAN.md:833`. `nestjs-developer` was
+right not to act outside its brief. My ruling is in §9 — and the premise in that row needs
+correcting before anyone implements it.
+
+---
+
+## 8. New findings from this round
+
+None blocking. Ranked; all are for the **Phase 3 gate**, not for Phase 2's start.
+
+### R1 — major — the parser interceptor fires *before* the `@All()` 405 fallback
+
+**Where:** `src/common/http/drf-parser.interceptor.ts:59-85` interacting with
+`src/auth/auth.controller.ts:43-47`. **Reproduced**, not inferred, by driving the real
+middleware + interceptor + filter:
+
+| Request | v1 | v2 today |
+|---|---|---|
+| `PUT /api-token-auth`, `Content-Type: text/plain`, body | **405** `{"detail":"Method \"PUT\" not allowed."}` | **415** `{"detail":"Unsupported media type \"text/plain\" in request."}` |
+| `PATCH /api-token-auth`, `application/json`, body `{` | **405** | **400** `{"detail":"JSON parse error - Expecting property name…"}` |
+| `PUT /api-token-auth`, valid JSON | 405 | 405 ✅ |
+
+**v1 behaviour it must match:** `APIView.dispatch` resolves `handler =
+self.http_method_not_allowed` and raises `MethodNotAllowed` from the handler; `request.data` is
+never touched, so no parser ever runs. **Why it matters:** it is live on a Phase 1 route today,
+and it will be live on all six Phase 3–8 controllers, each of which needs the same `@All()`
+fallback (plan rule 12). **Fix:** give the fallback a marker the interceptor honours — e.g.
+`@DrfParsers()` with an empty list, or a `DRF_NO_BODY` metadata key — and skip the parse decision
+when it is present. The same mechanism fixes R2, so it is one change, not two.
+
+### R2 — major — v1 handlers that never read `request.data` will 415 in v2
+
+**Where:** the same interceptor; the doc at `drf-request-parsing.middleware.ts:41-44` claims
+POST/PUT/PATCH is a safe proxy for "reads `request.data`", "verified across all of
+`fondo_api/views/`". The verification is method-level, but the property is handler-level, and two
+handlers falsify it:
+
+* `ActivityYearView.post` (`fondo_api/views/activity.py:38-43`) — calls `create_year()` and
+  ignores the body entirely. `POST /api/activity/year` with `text/plain` is a **201** in v1;
+  reproduced as **415** in v2. Phase 5.
+* `UserAppsView.post` with `app == "birthdates"` (`fondo_api/views/user.py:79-83`) — returns
+  birthdates without touching `request.data`. Same divergence. Phase 3. (The `"power"` branch
+  *does* read it, so the two branches of one handler differ — which is exactly why the marker
+  has to be per-handler and consciously applied.)
+* `PasswordResetView.post` (`fondo_api/views/auth.py:31`) is a **Django** view reading
+  `request.POST`, not a DRF view: it never negotiates a parser and never 415s. Phase 3 must not
+  let the DRF pipeline touch it.
+
+**Fix:** the R1 marker, plus one line in `docs/phase-1-drf-auth-bodies.md` naming these three so
+Phase 3/5 apply it deliberately rather than discovering a 415 in a parity report.
+
+### R3 — major — the C9 premise is wrong in both directions; see §9.
+
+### R4 — minor — `express.json({strict: true})` fabricates a CPython message for top-level scalars
+
+**Where:** `drf-request-parsing.middleware.ts:60-66` and `python-json.ts:328-334`. body-parser
+defaults to `strict: true`, so a body of `5`, `null`, `true` or `NaN` under
+`Content-Type: application/json` throws a `SyntaxError` **that CPython would not have thrown**.
+`drfJsonParseErrorDetail` then falls through to its hardcoded
+`'Expecting value: line 1 column 1 (char 0)'` — reproduced:
+
+```
+POST body `5`     v2: 400 {"detail":"JSON parse error - Expecting value: line 1 column 1 (char 0)"}
+                  v1: 400 {"non_field_errors":["Invalid data. Expected a dictionary, but got int."]}
+POST body `NaN`   v1 parses it (CPython accepts NaN/Infinity — python-json.ts:280-288 knows this)
+POST body `[1,2]` v2 200-path, v1 400 non_field_errors   (arrays pass strict mode)
+```
+
+The `/* istanbul ignore next -- only called after JSON.parse already failed */` at
+`python-json.ts:331` asserts this branch is unreachable. It is reachable, and it emits a message
+CPython never produces. **Fix:** set `strict: false` (CPython's `json.loads` is non-strict, so
+this *is* the parity setting) and let Phase 3's DTO layer produce DRF's
+`Invalid data. Expected a dictionary, but got <type>.` for a non-dict body; then the fallback
+becomes genuinely unreachable and the ignore comment becomes true.
+
+### R5 — minor — one error branch mislabels, and v1 does not enforce the body limit it mirrors
+
+**Where:** `drf-request-parsing.middleware.ts:144-150`. Every non-`SyntaxError` is rendered as
+`Multipart form parse error - …`, including a JSON body over the limit. Reproduced: a 3 MB JSON
+body returns `400 {"detail":"Multipart form parse error - request entity too large"}`.
+Separately, the limit itself is a tightening rather than a match — DRF's
+`Request._load_stream` sets `self._stream = self._request` and streams the WSGI input directly,
+**bypassing** `HttpRequest.body`'s `DATA_UPLOAD_MAX_MEMORY_SIZE` check, so v1 accepts an
+arbitrarily large JSON body on any DRF route. (For multipart, v2 is fine: multer imposes no
+default limit, matching Django's spill-to-disk.) The round-1 C1 concern is nonetheless **closed
+as reported** — a 200 kB body no longer 500s, and 100 kB → 2.5 MB was the right move. **Fix:**
+branch the message on which parser ran, and register the >2.5 MB JSON tightening as a one-line
+residual in `docs/phase-1-drf-auth-bodies.md` rather than leaving it as an unexplained 400.
+
+### R6 — minor — `hasRequestBody`'s `Transfer-Encoding` branch has no counterpart in DRF
+
+**Where:** `drf-request-parsing.middleware.ts:190-200`, whose comment cites `_load_stream`.
+`_load_stream` reads `CONTENT_LENGTH`/`HTTP_CONTENT_LENGTH` only and nulls the stream at zero;
+it has no chunked branch, so a chunked request yields empty data, no negotiation and no 415.
+v2 parses it. (The `Number.isFinite` guard, by contrast, matches DRF's `except (ValueError,
+TypeError): content_length = 0` exactly — that detail is right.) I could not reproduce the
+end-to-end effect because Node rejects `Transfer-Encoding` + `Content-Length` at the HTTP layer,
+which is why this is minor rather than major. **Fix:** drop the branch, or say in the comment
+that it is a deliberate widening and why.
+
+### R7 — minor — `express` and `multer` are phantom dependencies
+
+**Where:** `drf-request-parsing.middleware.ts:2-3` imports both; `package.json` `dependencies`
+lists neither. They resolve only because `@nestjs/platform-express@12.0.1` depends on
+`express@5.2.1` and `multer@2.2.0` (`package-lock.json:2045-2056`) and npm hoists them. A
+transitive bump or a different resolution breaks the build, and a root install at a different
+major would give the adapter and the middleware **two different Express instances** — which
+would silently unset the `json replacer` (C2). Adding `@types/multer` to `devDependencies` was
+half the change. **Fix:** add `express` and `multer` to `dependencies`, pinned to the versions
+platform-express resolves, so npm cannot dedupe them apart.
+
+### R8 — minor — nothing proves DRF's permission-before-parse order on a *guarded* route
+
+**Where:** `test/role-matrix.e2e-spec.ts:55` builds the app without `NEST_APPLICATION_OPTIONS`
+and without `AppModule`, so it keeps Nest's default parser and registers neither the DRF
+middleware nor the interceptor. That divergence is **acceptable and correctly reported** — the
+suite's job is guard wiring and it sends no bodies — but it leaves a real hole: `/api-token-auth`
+is `@Public()`, so the 401-beats-parse ordering is tested and the **403**-beats-parse ordering is
+not tested anywhere. That is the ordering Phases 3–8 depend on (a MEMBER PATCHing `/api/loan`
+with a malformed body must get 403, not 400). **Fix:** have the test module `configure()` the
+middleware and pass `NEST_APPLICATION_OPTIONS`, then add one cell: a role-denied caller sending
+`Content-Type: text/plain` must still get 403.
+
+### R9 — nit — `normalise()` collapses numeric strings for free-text fields too
+
+`user-patch.policy.ts:293-299`: `"007"` and `"7"` normalise identically, so `first_name` changing
+from `"7"` to `"007"` reads as unchanged. Harmless for the gate — the privileged fields (`role`,
+`identification`) are genuinely numeric and the collapse is right for them — but if Phase 3
+reuses `changedFields` to compute a persistence diff, that edit is silently dropped. Either scope
+the numeric collapse to a known field list, or add a comment saying the function is for
+authorisation only.
+
+### V1 / V2 — two live v1 defects found while checking C3's reachability
+
+Not v2's problem to fix at this gate; recording them because Phase 3 will hit both.
+
+* **V1 — a member born on 29 February cannot have their profile updated in a non-leap year.**
+  `services/user.py:269` does `.replace(year=today_year)` on the birthdate, which raises
+  `ValueError` (verified). `__update_user_personal` catches only `UserProfile.DoesNotExist` and
+  `IntegrityError`, and `UserDetailView.patch` (`views/user.py:52-58`) has no try/except — so the
+  request 500s and the surrounding `transaction.atomic()` rolls back the name/email change too.
+* **V2 — updating an inactive user's `personal` section with a `birthdate` 500s the same way.**
+  `services/user.py:272` does `user_ids.remove(user.id)` on a list built from
+  `UserProfile.objects.filter(is_active=True)` (`:147-155`); for an inactive target the id is
+  absent and `list.remove` raises `ValueError`.
+
+---
+
+## 9. Ruling on C9 — trailing slashes
+
+**First, correct the premise.** The C9 row (and my own S7) says v1's collection routes carry
+`/?` and its detail routes do not. Reading `fondo_api/urls.py` and `api/urls.py` in full, that is
+wrong in **both** directions:
+
+```python
+url( r'^api/activity/(?P<id>[0-9]+)/?$',            ActivityDetailView )   # detail WITH /?
+url( r'^api/notification/(?P<operation>[a-zA-Z]+)/?$', NotificationView )  # parameterised WITH /?
+url( r'^api/user/(?P<app>-?[a-zA-Z]+)$',            UserAppsView )         # no /?
+url( r'^api/user/(?P<id>-?[0-9]+)$',                UserDetailView )       # no /?
+url( r'^api/user/activate/(?P<id>[0-9]+)$',         UserActivateView )     # no /?
+url( r'^api/loan/(?P<id>[0-9]+)$',                  LoanDetailView )       # no /?
+url( r'^api/loan/(?P<id>[0-9]+)/(?P<app>[a-zA-Z]+)$', LoanAppsView )       # no /?
+url( r'^api/activity/year/(?P<id_year>[0-9]+)$',    ActivityYearDetailView)# no /?
+url( r'^api/file/(?P<id>[0-9]+)$',                  FileDetailView )       # no /?
+# api/urls.py — trailing slash is MANDATORY, and APPEND_SLASH 301s the bare form:
+url( r'^password_reset/$' ) · url( r'^password_reset/done/$' )
+url( r'^reset/(?P<uidb64>…)/(?P<token>…)/$' ) · url( r'^reset/done/$' )
+```
+
+There is no rule here, only a table. A blanket "detail routes are strict" rule would make v2
+**404 `/api/activity/5/` and `/api/notification/subscribe/`, which v1 serves** — a regression in
+the opposite direction, and a worse one than the current widening. And `CommonMiddleware` is
+enabled (`api/settings/base.py:41`) with `APPEND_SLASH` defaulted on, so the four password-reset
+paths **301** from their bare form in v1 — a case neither S7 nor C9 mentions and which Phase 3
+owns.
+
+**Ruling: fix it, do not accept it — but transcribe the table, do not infer a category rule.**
+
+1. Enable Express strict routing once, at bootstrap, alongside `bodyParser: false` in
+   `src/bootstrap.ts` so no test app can diverge.
+2. Give every controller its paths as an explicit array, transcribed from the two `urls.py`
+   files: `@Get(['api/activity/:id', 'api/activity/:id/'])` where v1 has `/?`, a single path
+   where it does not. Twenty-odd literals, each traceable to one v1 line.
+3. Phase 3 additionally decides the password-reset routes: mandatory slash, plus 301 or 404 for
+   the bare form.
+4. One e2e case per shape: `/api/loan/5/` → 404, `/api/activity/5/` → 200, `/api/loan/` → 200.
+
+Why fix rather than accept: the widening is not cosmetic. It applies to `PATCH` and `DELETE
+/api/user/<id>/` — a client that appends a slash gets an inert 404 in v1 and a **real soft
+delete** in v2. And the governance cost is asymmetric: exactness needs no operator decision,
+whereas plan §7 criterion 5 makes an accepted deviation a decision the user must own — for a
+behaviour with no upside. The 404 body itself is already covered by **D13** (HTML → JSON), so
+this needs no new deviation at all.
+
+If the user prefers speed over exactness, the fallback is acceptable but must be explicit: a §4
+rule containing the table above verbatim, an operator sign-off under criterion 5, and a note to
+`manual-tester` that trailing-slash 200s are expected diffs for eight phases. I do not recommend
+it.
+
+**Deadline:** unchanged from round 1 — the **Phase 3 gate**, before the first detail route ships.
+It does not block Phase 2, which adds no routes.
+
+---
+
+## 10. Final gate verdicts
+
+### Phase 0 — Foundations, Prisma baseline, cross-cutting utilities
+
+> # ✅ APPROVED
+
+All four Phase 0 conditions are closed: **C1** ✅, **C2** ✅, **C3** ✅, **C4** ✅. Each was
+re-verified against something outside this repository — Django's own source for C4,
+`python-dateutil==2.7.5` for C3 (5 096 cases, 0 mismatches), the raw HTTP response text for C2.
+The C4 residual is documented, non-blocking, and reduced to a one-command runbook check. No
+conditions carry forward from Phase 0.
+
+### Phase 1 — Authentication and role permissions
+
+> # ✅ APPROVED
+
+**C5** ✅ closed (with the three follow-ups in §8), **C6** ✅, **C7** ✅, **C8** ✅. **C9**
+remains open, with my ruling in §9; per round 1 its deadline was always the **Phase 3** gate, and
+Phase 2 adds no routes, so it does not gate what happens next.
+
+Approving with R1/R2 known and unregistered is a deliberate call, not a hedge. Both are
+consequences of a change that removed three strictly larger divergences; neither is reachable by
+any client of this API (`PUT`ting `text/plain` at the login endpoint; a `text/plain` body on a
+year-creation POST that does not exist yet); and both are now tracked, which is the difference
+between a known residual and a latent one. What would *not* be acceptable is carrying them into
+Phase 3 unfixed, which is why they are conditions on that gate.
+
+**Phase 2 is authorised to start.**
+
+### Conditions carried to the Phase 3 gate
+
+| # | Condition | From |
+|---|---|---|
+| C9 | Trailing slashes: strict routing + the transcribed path table (§9), including the password-reset routes. | R2 · S7 |
+| C10 | The `@All()` 405 fallback and handlers that never read `request.data` must bypass the parser interceptor (R1, R2) — one marker, three call sites, one doc line. | R2 |
+| C11 | `express.json({strict:false})` + a DRF-shaped non-dict body error (R4); correct the mislabelled parse-error branch and register the >2.5 MB JSON tightening (R5). | R2 |
+| C12 | Add `express` and `multer` to `dependencies` (R7). | R2 |
+| C13 | One e2e cell proving 403 precedes 415/400 on a guarded route (R8). | R2 |
+
+R6 and R9 are recommendations, not conditions. Round 1's C1–C12 "consider" items that were not
+promoted remain recommendations.
+
+### Escalations to `business-analyst`
+
+1. **v1 defect V1** — a member with a 29 February birthdate 500s on every personal update in a
+   non-leap year, rolling back the whole edit. v2 must choose a behaviour (clamp to 28 Feb, or
+   schedule on 1 March) before Phase 3 implements `__create_birthdate_notification`. This
+   supersedes any question about C3's leap-day drift, which is unreachable until this is decided.
+2. **v1 defect V2** — the same endpoint 500s when a `birthdate` is set on an **inactive** user,
+   because the notification's recipient list excludes inactive members and `list.remove` raises.
+   Phase 3 needs a rule: skip the notification, or include the target.
+3. The round-1 escalation on `UserFinance.last_modified` is **withdrawn** — C4 settled it.
