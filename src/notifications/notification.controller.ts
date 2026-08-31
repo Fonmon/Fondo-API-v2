@@ -1,14 +1,4 @@
-import {
-  All,
-  Body,
-  Controller,
-  HttpCode,
-  HttpStatus,
-  NotFoundException,
-  Param,
-  Post,
-  Req,
-} from '@nestjs/common';
+import { All, Body, Controller, HttpCode, HttpStatus, Param, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { V1View } from '../auth/decorators/v1-view.decorator';
@@ -21,6 +11,12 @@ import { NotificationService, UNSUBSCRIBE_OK } from './notification.service';
 /**
  * `fondo_api/views/notification.py:NotificationView`, mounted by
  * `url(r'^api/notification/(?P<operation>[a-zA-Z]+)/?$', …, name='view_notification')`.
+ *
+ * The `[a-zA-Z]+` constraint on `operation` is enforced where v1 enforces it — in the URL
+ * conf, **before** authentication — by `DjangoUrlResolverMiddleware`
+ * (`src/common/http/django-url-conf.ts`). So an unauthenticated `POST …/sub1` is a 404 in
+ * both systems, and this handler only ever sees a `[a-zA-Z]+` segment. That closes P2-D5;
+ * the earlier in-handler check reproduced the status but not the ordering.
  *
  * ```python
  * def post(self, request, operation):
@@ -68,8 +64,6 @@ export class NotificationController {
     @CurrentUser() user: AuthenticatedUser | undefined,
     @Body() body: unknown,
   ): Promise<void> {
-    assertOperationMatchesUrlPattern(operation);
-
     // Unreachable: the route is guarded, so `RolesGuard` has already 401'd a caller without
     // a user. Narrowing rather than asserting keeps that fact checked instead of assumed.
     /* istanbul ignore next -- guarded route */
@@ -106,22 +100,5 @@ export class NotificationController {
   @All(':operation')
   methodNotAllowed(@Req() request: Request): never {
     throw DrfException.methodNotAllowed(request.method, 'POST, OPTIONS');
-  }
-}
-
-/**
- * v1's URL regex constrains `operation` to `[a-zA-Z]+`; anything else fails URL resolution
- * and Django returns a 404 **before** authentication runs.
- *
- * v2 cannot express that constraint in the route: Express 5 / path-to-regexp v8 dropped
- * inline parameter patterns. Checking it in the handler reproduces the **status** but not the
- * **ordering** — an unauthenticated `POST /api/notification/sub1` is a 404 in v1 and a 401
- * here, because the guards run first. Registered in `docs/phase-2-deviations.md` as P2-D5 and
- * routed to the C9 work item, which is where Phase 3 transcribes v1's URL patterns properly
- * (v1's trailing-slash rules have the same shape of problem).
- */
-function assertOperationMatchesUrlPattern(operation: string): void {
-  if (!/^[a-zA-Z]+$/.test(operation)) {
-    throw new NotFoundException();
   }
 }

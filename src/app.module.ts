@@ -4,6 +4,8 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { AppConfigModule } from './config/config.module';
 import { AuthModule } from './auth/auth.module';
 import { ApiExceptionFilter } from './common/filters/api-exception.filter';
+import { DJANGO_URL_CONF, DJANGO_URL_CONF_TOKEN } from './common/http/django-url-conf';
+import { DjangoUrlResolverMiddleware } from './common/http/django-url-resolver.middleware';
 import { DrfParserInterceptor } from './common/http/drf-parser.interceptor';
 import { DrfRequestParsingMiddleware } from './common/http/drf-request-parsing.middleware';
 import { JsonBigIntSetup } from './common/http/json-bigint';
@@ -39,6 +41,12 @@ import { PrismaModule } from './prisma/prisma.module';
     HealthModule,
   ],
   providers: [
+    // v1's URL conf, as a provider so a suite that mounts a synthetic controller can widen
+    // it explicitly (`test/json-bigint.e2e-spec.ts`) and no other way.
+    {
+      provide: DJANGO_URL_CONF_TOKEN,
+      useValue: DJANGO_URL_CONF,
+    },
     {
       provide: APP_FILTER,
       useClass: ApiExceptionFilter,
@@ -56,11 +64,19 @@ import { PrismaModule } from './prisma/prisma.module';
 })
 export class AppModule implements NestModule {
   /**
-   * Owns request body parsing, replacing Nest's built-in parser (which is switched off by
-   * `NEST_APPLICATION_OPTIONS`). Applied here rather than in `main.ts` so every e2e suite
-   * that imports `AppModule` runs the production request pipeline.
+   * The request pipeline, in the order Django runs it.
+   *
+   *  1. {@link DjangoUrlResolverMiddleware} — `URLResolver.resolve` + `APPEND_SLASH`, i.e.
+   *     v1's URL table, applied **before any guard** (condition C9).
+   *  2. {@link DrfRequestParsingMiddleware} — owns request body parsing, replacing Nest's
+   *     built-in parser (switched off by `NEST_APPLICATION_OPTIONS`).
+   *
+   * Both are registered here rather than in `main.ts` so every e2e suite that imports
+   * `AppModule` runs the production request pipeline.
    */
   configure(consumer: MiddlewareConsumer): void {
-    consumer.apply(DrfRequestParsingMiddleware).forRoutes('{*path}');
+    consumer
+      .apply(DjangoUrlResolverMiddleware, DrfRequestParsingMiddleware)
+      .forRoutes('{*path}');
   }
 }

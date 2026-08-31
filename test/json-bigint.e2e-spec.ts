@@ -5,6 +5,11 @@ import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { NEST_APPLICATION_OPTIONS } from '../src/bootstrap';
 import { Public } from '../src/auth/decorators/public.decorator';
+import {
+  DJANGO_URL_CONF,
+  DJANGO_URL_CONF_TOKEN,
+  type DjangoUrlPattern,
+} from '../src/common/http/django-url-conf';
 import { MAX_SAFE_BIGINT } from '../src/common/http/json-bigint';
 
 /**
@@ -38,6 +43,13 @@ class BigIntProbeController {
   }
 }
 
+/** The synthetic stand-in for Phase 3's `GET /api/user/<id>`; not a v1 URL. */
+const PROBE_ROUTE: DjangoUrlPattern = {
+  regex: /^__bigint\/[a-z]+$/,
+  view: 'BigIntProbeController (test only)',
+  drf: null,
+};
+
 describe('Phase 0 — BigInt responses (plan rule 5b)', () => {
   let app: INestApplication<App>;
 
@@ -45,7 +57,13 @@ describe('Phase 0 — BigInt responses (plan rule 5b)', () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
       controllers: [BigIntProbeController],
-    }).compile();
+    })
+      // `DjangoUrlResolverMiddleware` is fail-closed: a path absent from v1's URL table never
+      // reaches a controller (condition C9). This probe is synthetic, so it has to be
+      // declared — which is the point of the token being overridable and nothing else being.
+      .overrideProvider(DJANGO_URL_CONF_TOKEN)
+      .useValue([...DJANGO_URL_CONF, PROBE_ROUTE] satisfies DjangoUrlPattern[])
+      .compile();
 
     app = moduleFixture.createNestApplication(NEST_APPLICATION_OPTIONS);
     await app.init();
