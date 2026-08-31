@@ -11,6 +11,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 | Date | Rev | Change |
 |---|---|---|
 | 2026-08-31 | v1.2 | **Phase 2 implemented** (`feat/phase-2-notifications`): SES mail + the six Spanish templates, the hstore `NotificationSubscriptionRepository`, SQS publishing with bounded retry, and `POST /api/notification/<subscribe|unsubscribe>`. **C10–C13 closed** (C11 with one registered residual); C9 still open. Deviations P2-D1–P2-D7 registered in `docs/phase-2-deviations.md`. ⚠️ Three findings for this plan: `json.dumps` ≠ `JSON.stringify` (separators + `ensure_ascii`) is a byte-parity rule that belongs in §4 alongside 5b/5c; adding `ORDER BY id` to the subscription read would **break** parity (heap order is the wire order, verified live); and `{% host %}` has **zero** call sites in v1's templates. |
+| 2026-08-31 | v1.2 | **Phase 2 implemented** (`c72cc7c`); C10–C13 closed alongside. New cross-cutting **rule 5d**: CPython `json.dumps` ≠ `JSON.stringify` (separators + `ensure_ascii`) — this diverges on *every* notification, since all v1 bodies are accented Spanish, and Phase 7 publishes through the same path. Subscription queries must emit **no `ORDER BY`** (verified: heap order ≠ id order on `fondodev`). Handed to `manual-tester`. |
 | 2026-08-31 | v1.1 | **Full pipeline standing from Phase 2 to the end**: `nestjs-developer` → `manual-tester` (sign-off) → `nestjs-reviewer` (sign-off), sequential. **Phase 2 started.** |
 | 2026-08-31 | v1.0 | ✅ **Phase 0 APPROVED. Phase 1 APPROVED.** Round-2 review closed C1–C8. **C9 re-ruled: fix, do not accept** — v1 has no trailing-slash *rule*, only an inconsistent table, so a blanket rule would 404 routes v1 serves. C10–C13 added (Phase 3 gate). D19/D20 register two live v1 defects; one Phase 7 timezone consequence recorded. |
 | 2026-08-30 | v0.14 | **All eight review conditions C1–C8 closed** (§7). Rule 5 **re-corrected and settled**: Django sets `os.environ['TZ']` from `TIME_ZONE`, so v1's `DateField` dates are **Bogotá**, verified against the pinned stack — the BA escalation on `last_modified` is withdrawn. Rule 5b (BigInt→JSON number) and 5c (`formatDateEs` takes a `PlainDate`) implemented as Phase 0 primitives. **D18 fixed rather than deviated** — v2 owns request parsing and reproduces DRF's multipart/415/JSON-parse behaviour, including CPython's error strings. `relativedelta` ported (reviewer P5). D1's primitives now express the C8 rule ordering. ⚠️ One review condition is **untracked**: S7 (detail-route trailing slashes) appears in the review's Phase 1 gate but in no §7 row — see the note under the table. |
@@ -109,6 +110,11 @@ requirements to offset it.
   storing, so a nested dict becomes a Python `repr` (single quotes). If v2 wrote JSON into the
   same column, v1 and v2 rows would be encoded differently and the read-side repair would break
   on v2's own rows. The Phase 0 codec implements both directions; use it on every write.
+- ⚠️ **Subscription queries must emit no `ORDER BY`.** Django emits none, so v1 serialises
+  **heap order**, and on `fondodev` heap order is not id order (verified: `160, 761, 1027, 783…`
+  vs `160, 677, 710, 715…`). Adding the "obvious" `ORDER BY id` would *break* parity. Note this
+  sits beside — and reads like the opposite of — the key-order rule below; both are about
+  reproducing an order v1 never chose deliberately.
 - ⚠️ **hstore key order is part of the SQS wire format.** Postgres returns hstore keys ordered by
   key length then bytes, and v1 `json.dumps`es that dict straight through to SQS. Phase 2's
   byte-identical criterion depends on reproducing that ordering — it is not an implementation
@@ -267,7 +273,9 @@ emit on write paths.
 - Port the six Spanish templates via the `EmailTemplate` enum: `USER_ACTIVATION`,
   `CHANGE_STATE_LOAN_APPROVED`, `CHANGE_STATE_LOAN_DENIED`, `POWER_APPROVED`, `TEST`,
   `PASSWORD_RESET`. Django templates → a Node engine (Handlebars/Eta). The `{% host %}`
-  custom tag → a `host` template variable from config.
+  custom tag → a `host` template variable from config. *(Phase 2 note: `{% host %}` has **zero
+  call sites** in v1 — no template uses it. The activation email receives the same value as an
+  ordinary `host_url` context variable at `services/user.py:51`. Wired but unused.)*
 - `NotificationSubscriptionRepository` (raw SQL, hstore — §2): storage deduped on
   `subscription__endpoint`.
 - `send_notification(user_ids, message, target)` builds `{ subscriptions, message: { body, target } }`
@@ -632,6 +640,13 @@ Verified in every phase's parity report, not just the phase that introduces them
    (`src/common/http/json-bigint.ts`, installed by an `AppModule` provider). The reflex fix
    (`BigInt.prototype.toJSON = toString`) renders `"1000"` and is **wrong**. A value outside
    ±(2^53 − 1) throws rather than rounding. Do not re-litigate per DTO in Phase 3.
+5d. ⚠️ **CPython `json.dumps` is not `JSON.stringify`.** Two differences, both live on the very
+   first message: CPython uses `', '` / `': '` separators, and `ensure_ascii=True` escapes
+   non-ASCII. Verified: Python emits `{"body": "…de cr\u00e9dito", "target": "/loan/1"}` where
+   Node emits `{"body":"…de crédito","target":"/loan/1"}`. **Every** v1 notification body is
+   accented Spanish, so this is not an edge case. Use `python-json-dumps.ts` (Phase 2) anywhere a
+   payload must match v1 byte-for-byte — **Phase 7 publishes through the same path.** Same species
+   as rules 5b and 5c: a plausible-looking standard-library equivalence that is not one.
 5c. **Date formatting is not uniform in v1 — do not assume it is.** `LoanSerializer.get_created_at`
    calls `timezone.localtime` first (`serializers.py:88`); `UserFinanceSerializer.get_last_modified`
    does not (`:29`). A `formatDateEs()` that silently reads a `DateTime` as UTC is correct for
@@ -903,7 +918,7 @@ set, as defence in depth rather than as the primary control.
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
 | 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab` + C1–C4) | ✅ | n/a | ✅ **APPROVED** | n/a |
 | 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
-| 2 Mail + notifications | 🔨 **Dev complete** (`feat/phase-2-notifications`) — awaiting `manual-tester` | ✅ | ⬜ | ⬜ | ⬜ |
+| 2 Mail + notifications | 🔨 dev done (`c72cc7c`) → **tester** | ✅ | 🔨 | ⬜ | ⬜ |
 | 3 Users + finance | ⬜ Blocked on P2 | — | — | — | — |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
 | 7 Scheduler *(resequenced)* | ⬜ Blocked on P4 | — | — | — | — |
