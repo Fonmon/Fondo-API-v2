@@ -13,14 +13,20 @@ the exact next actions.
 |---|---|
 | **0 Foundations & Prisma baseline** | ✅ Complete (`b3effab`). Reviewed → Approved-with-conditions. Conditions C1–C4 **closed**. |
 | **1 Auth + roles** | ✅ Complete (`151314f`). Reviewed → Approved-with-conditions. C5–C8 **closed**; **C9 open**. |
-| **2 Mail + notifications** | ⬜ Not started. **Next phase**, pending the round-2 verdict. |
+| **2 Mail + notifications** | 🔨 **Dev complete** (`feat/phase-2-notifications`). SES mail + 6 templates, hstore subscription repository, SQS publisher, `POST /api/notification/<subscribe\|unsubscribe>`. C10–C13 closed. **Next: `manual-tester`, then `nestjs-reviewer`.** See `docs/phase-2-deviations.md`. |
 | 3–9 | ⬜ Not started. |
 
-**Branch:** `feat/phase-1-auth` at `c75e9d5`. Working tree clean. **Nothing pushed** — `main` is
-still at `f1660d3`. `feat/phase-0-foundations` is an ancestor and can be deleted or left.
+**Branch:** `feat/phase-2-notifications`, branched off `feat/phase-1-auth` at `cf23eae`.
+Working tree clean. **Nothing pushed.**
 
-**Gate, verified independently (not just reported):** lint clean, `tsc --noEmit` clean,
-**938 unit / 23 suites**, **343 e2e / 5 suites**.
+**Gate (Phase 2):** lint clean, `tsc --noEmit` clean, `nest build` clean (and the email
+templates are copied into `dist` — verified by rendering from `dist` at runtime),
+**1029 unit / 28 suites**, **381 e2e / 6 suites** (+1 skipped: the read-only `fondodev` scan,
+enabled with `FONDODEV_DATABASE_URL`).
+
+⚠️ **New required e2e env var:** `NOTIFICATIONS_QUEUE_URL` (defaulted in `test/setup-env.ts`).
+Without it `NotificationPublisher` short-circuits and every publish assertion silently passes
+without sending anything.
 
 **v1 (`~/Projects/Fondo-API`) is FROZEN and untouched.** Its only new commit this session,
 `5bef585`, adds `.claude/agents/*.md` and was made by the user. No Django source changed —

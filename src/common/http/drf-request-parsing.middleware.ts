@@ -57,7 +57,23 @@ export class DrfRequestParsingMiddleware implements NestMiddleware {
    */
   private static readonly DATA_UPLOAD_MAX_MEMORY_SIZE = 2.5 * 1024 * 1024;
 
+  /**
+   * ⚠️ `strict: false` is the parity setting, not a relaxation — reviewer finding **R4**,
+   * condition **C11**. body-parser defaults to `strict: true`, which rejects a top-level
+   * scalar (`5`, `null`, `true`) with a `SyntaxError` that **CPython never raises**:
+   * `json.loads('5')` returns the int, DRF hands it to the serializer, and v1 answers
+   * `400 {"non_field_errors": ["Invalid data. Expected a dictionary, but got int."]}`.
+   * With strict mode on, v2 answered a fabricated `JSON parse error - Expecting value: …`
+   * instead. Off, the scalar reaches the DTO layer and the DTO produces DRF's message
+   * (`auth-token.serializer.ts` already does; Phase 3's DTOs must too).
+   *
+   * One residual remains, registered in `docs/phase-1-drf-auth-bodies.md`: CPython's
+   * `json.loads` accepts `NaN`, `Infinity` and `-Infinity`, and `JSON.parse` does not, so
+   * those three bodies are a 400 parse error in v2 and a `got float` serializer error in v1.
+   * No client sends them.
+   */
   private readonly json = express.json({
+    strict: false,
     limit: DrfRequestParsingMiddleware.DATA_UPLOAD_MAX_MEMORY_SIZE,
     // Keep the raw text: CPython's parse-error message quotes a character offset into it.
     verify: (request: Request, _response: Response, buffer: Buffer) => {
@@ -102,34 +118,32 @@ export class DrfRequestParsingMiddleware implements NestMiddleware {
       return;
     }
 
-    const runner = this.parserFor(state.contentType);
-    if (runner === null) {
+    const selected = this.parserFor(state.contentType);
+    if (selected === null) {
       // Unsupported media type: leave the body unread. The interceptor turns this into DRF's
       // 415 *after* authentication, and only if the handler really would have read the body.
       next();
       return;
     }
 
-    runner.call(this, request, response, (error?: unknown) => {
+    selected.run.call(this, request, response, (error?: unknown) => {
       if (error !== undefined && error !== null) {
-        state.parseErrorDetail = this.describe(error, request);
+        state.parseErrorDetail = this.describe(error, request, selected.kind);
       }
       next();
     });
   }
 
-  private parserFor(
-    contentType: string,
-  ): ((request: Request, response: Response, next: NextFunction) => void) | null {
+  private parserFor(contentType: string): SelectedParser | null {
     const match = (parser: DrfParserMediaType): boolean => mediaTypeMatches(parser, contentType);
     if (match(DRF_PARSER_MEDIA_TYPES.JSON)) {
-      return this.json as never;
+      return { kind: 'json', run: this.json as never };
     }
     if (match(DRF_PARSER_MEDIA_TYPES.FORM)) {
-      return this.urlencoded as never;
+      return { kind: 'form', run: this.urlencoded as never };
     }
     if (match(DRF_PARSER_MEDIA_TYPES.MULTIPART)) {
-      return this.multipart as never;
+      return { kind: 'multipart', run: this.multipart as never };
     }
     return null;
   }
@@ -137,17 +151,44 @@ export class DrfRequestParsingMiddleware implements NestMiddleware {
   /**
    * Turns a body-parser / multer failure into the DRF `ParseError` detail string.
    *
-   * A `SyntaxError` from `express.json` is the only case v1 has a documented string for; a
-   * multipart failure (`MulterError`) surfaces as Django's own `MultiPartParserError`
-   * equivalent, and DRF renders that as `Multipart form parse error - <message>`.
+   * ⚠️ Branching on **which parser ran** is reviewer finding **R5** (condition C11): the
+   * previous version labelled every non-`SyntaxError` as `Multipart form parse error - …`,
+   * so an over-sized *JSON* body returned
+   * `{"detail": "Multipart form parse error - request entity too large"}` — a message about
+   * a parser that never ran.
+   *
+   *  * `SyntaxError` from `express.json` → CPython's own message and offset, which is what
+   *    `JSONParser.parse` puts in the body (`'JSON parse error - %s' % str(exc)`).
+   *  * A multipart failure → Django's `MultiPartParserError`, which DRF renders as
+   *    `Multipart form parse error - <message>`.
+   *  * Anything else (in practice only `PayloadTooLargeError`) → DRF's own
+   *    `ParseError.default_detail`, `'Malformed request.'`.
+   *
+   * ⚠️ Registered residual: the 2.5 MB limit is a **tightening**. DRF's `Request._load_stream`
+   * streams the WSGI input directly and bypasses `DATA_UPLOAD_MAX_MEMORY_SIZE`, so v1 accepts
+   * an arbitrarily large JSON body on any route. Kept anyway — an unbounded in-memory parse
+   * is a denial-of-service primitive, and no v1 client posts megabytes of JSON (the bulk
+   * uploads are multipart, where multer imposes no limit and matches Django's spill-to-disk).
+   * See `docs/phase-1-drf-auth-bodies.md`.
    */
-  private describe(error: unknown, request: Request): string {
-    if (error instanceof SyntaxError) {
+  private describe(error: unknown, request: Request, parser: ParserKind): string {
+    if (parser === 'json' && error instanceof SyntaxError) {
       return drfJsonParseErrorDetail(getRawBody(request) ?? '');
     }
-    const message = error instanceof Error ? error.message : String(error);
-    return `Multipart form parse error - ${message}`;
+    if (parser === 'multipart') {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Multipart form parse error - ${message}`;
+    }
+    return 'Malformed request.';
   }
+}
+
+/** Which of DRF's three default parsers the `Content-Type` selected. */
+type ParserKind = 'json' | 'form' | 'multipart';
+
+interface SelectedParser {
+  readonly kind: ParserKind;
+  readonly run: (request: Request, response: Response, next: NextFunction) => void;
 }
 
 /** The methods whose v1 handlers read `request.data`. Verified across `fondo_api/views/`. */

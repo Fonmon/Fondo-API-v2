@@ -38,15 +38,16 @@ export interface SeededUser {
 const passwords = new DjangoPasswordService();
 
 /**
- * Deletes every row Phase 1 can touch, in FK-safe order.
+ * Deletes every row Phases 1-2 can touch, in FK-safe order.
  *
  * The e2e database is disposable (`test/test-database.ts`) and never the shared dev one, but
  * suites still start from a clean slate so ordering between files cannot matter.
  */
 export async function resetDatabase(prisma: PrismaService): Promise<void> {
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE authtoken_token, fondo_api_userfinance, fondo_api_userpreference, ' +
-      'fondo_api_userprofile, auth_user RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE authtoken_token, fondo_api_notificationsubscriptions, ' +
+      'fondo_api_userfinance, fondo_api_userpreference, fondo_api_userprofile, auth_user ' +
+      'RESTART IDENTITY CASCADE',
   );
 }
 

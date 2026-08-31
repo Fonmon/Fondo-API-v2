@@ -3,7 +3,14 @@ import { Reflector } from '@nestjs/core';
 import { of } from 'rxjs';
 import type { Request } from 'express';
 import { DRF_PARSER_MEDIA_TYPES } from './drf-media-type';
-import { DrfParserInterceptor, DrfParsers, DRF_PARSERS_KEY } from './drf-parser.interceptor';
+import {
+  assertRequestDataParsable,
+  DrfNoRequestData,
+  DrfParserInterceptor,
+  DrfParsers,
+  DRF_NO_REQUEST_DATA_KEY,
+  DRF_PARSERS_KEY,
+} from './drf-parser.interceptor';
 import { DrfException } from './drf.exception';
 import { setParseState, type DrfParseState } from './drf-request-parsing.middleware';
 
@@ -22,6 +29,7 @@ describe('DrfParserInterceptor', () => {
   function contextFor(
     state: DrfParseState | undefined,
     parsers?: readonly string[],
+    noRequestData = false,
   ): ExecutionContext {
     const request = {} as Request;
     if (state !== undefined) {
@@ -31,6 +39,9 @@ describe('DrfParserInterceptor', () => {
     const target = function handle(): void {};
     if (parsers !== undefined) {
       Reflect.defineMetadata(DRF_PARSERS_KEY, parsers, target);
+    }
+    if (noRequestData) {
+      Reflect.defineMetadata(DRF_NO_REQUEST_DATA_KEY, true, target);
     }
 
     return {
@@ -134,6 +145,108 @@ describe('DrfParserInterceptor', () => {
     expect(error.getStatus()).toBe(HttpStatus.UNSUPPORTED_MEDIA_TYPE);
     expect(error.drfBody).toEqual({
       detail: 'Unsupported media type "application/json" in request.',
+    });
+  });
+
+  describe('C10 — @DrfNoRequestData bypasses negotiation entirely', () => {
+    it('does not 415 an unsupported media type', async () => {
+      // `PUT /api-token-auth` with `text/plain`: v1 raises MethodNotAllowed from
+      // `dispatch` without ever touching `request.data`, so the 405 must win.
+      const context = contextFor(
+        { contentType: 'text/plain', hasBody: true, parseErrorDetail: null },
+        undefined,
+        true,
+      );
+
+      await expect(firstValueOf(interceptor.intercept(context, handler))).resolves.toBe('handled');
+    });
+
+    it('does not 400 a malformed JSON body', async () => {
+      const context = contextFor(
+        {
+          contentType: 'application/json',
+          hasBody: true,
+          parseErrorDetail: 'JSON parse error - Expecting value: line 1 column 1 (char 0)',
+        },
+        undefined,
+        true,
+      );
+
+      await expect(firstValueOf(interceptor.intercept(context, handler))).resolves.toBe('handled');
+    });
+
+    it('still 415s the same request without the marker — proving the marker is what changed', () => {
+      const error = expectDrf(
+        contextFor({ contentType: 'text/plain', hasBody: true, parseErrorDetail: null }),
+      );
+      expect(error.getStatus()).toBe(HttpStatus.UNSUPPORTED_MEDIA_TYPE);
+    });
+
+    it('records its metadata on the handler', () => {
+      class Probe {
+        @DrfNoRequestData()
+        handle(): void {}
+      }
+
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- reading metadata, not calling
+      expect(Reflect.getMetadata(DRF_NO_REQUEST_DATA_KEY, Probe.prototype.handle)).toBe(true);
+    });
+  });
+
+  describe('assertRequestDataParsable — for handlers where only some branches read the body', () => {
+    function requestWith(state?: DrfParseState): Request {
+      const request = {} as Request;
+      if (state !== undefined) {
+        setParseState(request, state);
+      }
+      return request;
+    }
+
+    it('is a no-op for a method the middleware skipped', () => {
+      expect(() => assertRequestDataParsable(requestWith(undefined))).not.toThrow();
+    });
+
+    it('is a no-op for an empty body', () => {
+      expect(() =>
+        assertRequestDataParsable(
+          requestWith({ contentType: 'text/plain', hasBody: false, parseErrorDetail: null }),
+        ),
+      ).not.toThrow();
+    });
+
+    it('raises DRF 415 for an unsupported media type', () => {
+      expect(() =>
+        assertRequestDataParsable(
+          requestWith({ contentType: 'text/plain', hasBody: true, parseErrorDetail: null }),
+        ),
+      ).toThrow(DrfException);
+    });
+
+    it('raises DRF 400 carrying CPython’s parse-error message', () => {
+      try {
+        assertRequestDataParsable(
+          requestWith({
+            contentType: 'application/json',
+            hasBody: true,
+            parseErrorDetail: 'JSON parse error - Expecting value: line 1 column 1 (char 0)',
+          }),
+        );
+        throw new Error('expected a DrfException');
+      } catch (error) {
+        expect(error).toBeInstanceOf(DrfException);
+        expect((error as DrfException).drfBody).toEqual({
+          detail: 'JSON parse error - Expecting value: line 1 column 1 (char 0)',
+        });
+      }
+    });
+
+    it('honours a narrowed parser list', () => {
+      expect(() =>
+        assertRequestDataParsable(
+          requestWith({ contentType: 'application/json', hasBody: true, parseErrorDetail: null }),
+          [DRF_PARSER_MEDIA_TYPES.MULTIPART],
+        ),
+      ).toThrow(DrfException);
     });
   });
 

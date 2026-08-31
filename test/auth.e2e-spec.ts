@@ -179,6 +179,28 @@ describe('Phase 1 — token authentication', () => {
           });
       });
 
+      describe('C11 / R4 — a top-level non-dict body is a serializer error, not a parse error', () => {
+        // body-parser's `strict: true` rejected these with a SyntaxError CPython never
+        // raises. `json.loads('5')` returns the int and DRF's serializer reports the type.
+        it.each([
+          ['5', 'int'],
+          ['1.5', 'float'],
+          ['"abc"', 'str'],
+          ['true', 'bool'],
+          ['null', 'NoneType'],
+          ['[1, 2]', 'list'],
+        ])('body %s -> "got %s"', async (body, pythonType) => {
+          await request(app.getHttpServer())
+            .post('/api-token-auth')
+            .set('Content-Type', 'application/json')
+            .send(body)
+            .expect(400)
+            .expect({
+              non_field_errors: [`Invalid data. Expected a dictionary, but got ${pythonType}.`],
+            });
+        });
+      });
+
       it('authenticates before parsing: a bad token 401s even on a malformed body', async () => {
         // DRF's `initial()` runs `perform_authentication` before the handler ever touches
         // `request.data`, so the parse error is never reached. This is the ordering the
@@ -308,6 +330,40 @@ describe('Phase 1 — token authentication', () => {
       expect(response.status).toBe(405);
       expect(response.body).toEqual({ detail: 'Method "GET" not allowed.' });
       expect(response.headers.allow).toBe('POST, OPTIONS');
+    });
+
+    describe('C10 / R1 — the 405 fallback never reads the body', () => {
+      // `APIView.dispatch` resolves `http_method_not_allowed` and raises from there;
+      // `request.data` is never touched, so no parser is ever negotiated. Without
+      // `@DrfNoRequestData()` the interceptor fired first and answered 415 / 400.
+      it('405s a PUT carrying a text/plain body, rather than 415ing', async () => {
+        const response = await request(app.getHttpServer())
+          .put('/api-token-auth')
+          .set('Content-Type', 'text/plain')
+          .send('anything at all');
+
+        expect(response.status).toBe(405);
+        expect(response.body).toEqual({ detail: 'Method "PUT" not allowed.' });
+        expect(response.headers.allow).toBe('POST, OPTIONS');
+      });
+
+      it('405s a PATCH carrying malformed JSON, rather than 400ing', async () => {
+        const response = await request(app.getHttpServer())
+          .patch('/api-token-auth')
+          .set('Content-Type', 'application/json')
+          .send('{');
+
+        expect(response.status).toBe(405);
+        expect(response.body).toEqual({ detail: 'Method "PATCH" not allowed.' });
+      });
+
+      it('still 415s the same media type on POST — only the fallback is exempt', async () => {
+        await request(app.getHttpServer())
+          .post('/api-token-auth')
+          .set('Content-Type', 'text/plain')
+          .send('anything at all')
+          .expect(415);
+      });
     });
 
     it('405s the other unhandled methods too', async () => {

@@ -28,8 +28,8 @@ describe('Phase 0 application boot', () => {
     expect(response.body).toEqual({ status: 'ok', database: 'up' });
   });
 
-  it('ships no business endpoints yet', async () => {
-    // Users, loans, activities, saving accounts, files and notifications are Phases 2-8.
+  it('ships no Phase 3-8 business endpoints yet', async () => {
+    // Users, loans, activities, saving accounts and files are Phases 3-8.
     for (const path of [
       '/api/loan',
       '/api/user',
@@ -37,10 +37,17 @@ describe('Phase 0 application boot', () => {
       '/api/saving-account',
       '/api/file',
       '/api/admin',
-      '/api/notification/subscribe',
     ]) {
       await request(app.getHttpServer()).get(path).expect(404);
     }
+  });
+
+  it('exposes the Phase 2 notification route, guarded', async () => {
+    // A route that exists answers 401 without credentials; one that does not answers 404.
+    // The @All() fallback is what makes a GET reach the guard at all — without it Express
+    // would 404 and v1's 403-for-an-undeclared-method could never be reproduced.
+    await request(app.getHttpServer()).get('/api/notification/subscribe').expect(401);
+    await request(app.getHttpServer()).post('/api/notification/subscribe').expect(401);
   });
 
   it('exposes exactly one Phase 1 route: POST /api-token-auth', async () => {
