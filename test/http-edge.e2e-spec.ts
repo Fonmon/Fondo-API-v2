@@ -31,7 +31,7 @@ import { V1_TEST_SUBSCRIPTION } from './support/push-subscription.fixture';
  * Every expectation below is a byte the running v1 produced (gunicorn,
  * `api.settings.production`, `DEBUG = False`) for the same request.
  */
-describe('Phase 2 — HTTP edge parity (F1-F4)', () => {
+describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
   let admin: SeededUser;
@@ -310,6 +310,31 @@ describe('Phase 2 — HTTP edge parity (F1-F4)', () => {
 
     it('does not invent a redirect for a path whose slashed form does not resolve either', async () => {
       await request(server()).get('/nope').expect(404);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Round 2 — N2: the encoding of the APPEND_SLASH redirect
+  // ---------------------------------------------------------------------------
+
+  describe('N2 — the 301 Location is escape_uri_path(PATH_INFO), not the target (C16)', () => {
+    it.each([
+      ['/password%5Freset', '/password_reset/'],
+      ['/password%5freset', '/password_reset/'],
+      ['/pass%77ord_reset', '/password_reset/'],
+      ['/password_reset%2Fdone', '/password_reset/done/'],
+      ['/reset/M%51/abc-def', '/reset/MQ/abc-def/'],
+    ])('redirects %s to %s — v1 decodes, then re-encodes', async (target, location) => {
+      const response = await request(server()).post(target);
+
+      expect(response.status).toBe(301);
+      expect(response.headers.location).toBe(location);
+    });
+
+    it('leaves an already-encoded query string alone (iri_to_uri keeps `%` safe)', async () => {
+      const response = await request(server()).post('/password_reset?a=%C3%B1&b=1');
+
+      expect(response.headers.location).toBe('/password_reset/?a=%C3%B1&b=1');
     });
   });
 

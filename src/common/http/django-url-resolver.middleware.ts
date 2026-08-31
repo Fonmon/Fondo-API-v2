@@ -8,6 +8,7 @@ import {
   resolveDjangoUrl,
   type DjangoUrlPattern,
 } from './django-url-conf';
+import { escapeLeadingSlashes, escapeUriPath, iriToUri } from './django-uri-encoding';
 
 /**
  * Resolves the request against {@link DJANGO_URL_CONF} **before the guards**, exactly where
@@ -47,7 +48,7 @@ export class DjangoUrlResolverMiddleware implements NestMiddleware {
 
     if (matched === null) {
       if (this.shouldRedirectWithSlash(pathInfo)) {
-        this.redirectWithSlash(request, response);
+        this.redirectWithSlash(request, response, pathInfo);
         return;
       }
       this.notFound(response);
@@ -70,17 +71,23 @@ export class DjangoUrlResolverMiddleware implements NestMiddleware {
    * redirecting. v1 deploys with `DEBUG = False` (`api/settings/production.py:16`), so the
    * 301 is the production behaviour for **every** method, verified with `POST`.
    *
-   * `Location` is built from the raw request target; Django builds it from the decoded path
-   * and re-encodes with `iri_to_uri`. The two agree for every path that can reach this
-   * branch (the four `password_reset` / `reset` routes are pure ASCII).
+   * ⚠️ `Location` is **not** the request target with a slash on the end — parity finding
+   * **N2**, condition **C16**. Django builds it from `request.get_full_path(
+   * force_append_slash=True)`, i.e. `escape_uri_path(PATH_INFO) + '/' + '?' +
+   * iri_to_uri(QUERY_STRING)`: the *decoded* path, re-encoded. The comment this replaces
+   * claimed the two agree "for every path that can reach this branch"; the **routes** are
+   * ASCII, the **request target** need not be, and v1 answers `POST /password%5Freset` with
+   * `Location: /password_reset/` where v2 answered `/password%5Freset/`.
    */
-  private redirectWithSlash(request: Request, response: Response): void {
+  private redirectWithSlash(request: Request, response: Response, pathInfo: string): void {
     skipBeforeHeadersHooks(response);
-    const [path, query] = splitQuery(request.originalUrl);
+    const [, rawQuery] = splitQuery(request.originalUrl);
+    const query = rawQuery === '' ? '' : `?${iriToUri(rawQuery.slice(1))}`;
+    const location = escapeLeadingSlashes(`${escapeUriPath(pathInfo)}/${query}`);
     response.removeHeader('X-Powered-By');
     response.statusCode = 301;
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
-    response.setHeader('Location', `${path}/${query}`);
+    response.setHeader('Location', location);
     response.setHeader('Content-Length', '0');
     response.end();
   }
