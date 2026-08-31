@@ -1,9 +1,11 @@
-import { Module } from '@nestjs/common';
-import { APP_FILTER } from '@nestjs/core';
+import { Module, type MiddlewareConsumer, type NestModule } from '@nestjs/common';
+import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { AppConfigModule } from './config/config.module';
 import { AuthModule } from './auth/auth.module';
 import { ApiExceptionFilter } from './common/filters/api-exception.filter';
+import { DrfParserInterceptor } from './common/http/drf-parser.interceptor';
+import { DrfRequestParsingMiddleware } from './common/http/drf-request-parsing.middleware';
 import { JsonBigIntSetup } from './common/http/json-bigint';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -37,6 +39,21 @@ import { PrismaModule } from './prisma/prisma.module';
     // Money is `BigInt` in Prisma and `JSON.stringify(1n)` throws. Registered here rather
     // than in `main.ts` so every e2e suite exercises the production wiring (rule 5b).
     JsonBigIntSetup,
+    // Raises the 415 / JSON-parse 400 that `DrfRequestParsingMiddleware` deferred, at DRF's
+    // point in the pipeline: after authentication and permissions, before the handler (D18).
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: DrfParserInterceptor,
+    },
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  /**
+   * Owns request body parsing, replacing Nest's built-in parser (which is switched off by
+   * `NEST_APPLICATION_OPTIONS`). Applied here rather than in `main.ts` so every e2e suite
+   * that imports `AppModule` runs the production request pipeline.
+   */
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(DrfRequestParsingMiddleware).forRoutes('{*path}');
+  }
+}

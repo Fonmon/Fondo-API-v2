@@ -3,6 +3,7 @@ import { config as loadDotEnv } from 'dotenv';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { NEST_APPLICATION_OPTIONS } from './bootstrap';
 import { AppConfigService } from './config/app-config.service';
 import { ENV_FILE_PATHS } from './config/env-files';
 import { EnvValidationError, validateEnv } from './config/env.validation';
@@ -31,7 +32,9 @@ async function bootstrap(): Promise<void> {
   assertEnvironmentIsValid();
 
   const logger = new Logger('Bootstrap');
-  const app = await NestFactory.create(AppModule);
+  // `NEST_APPLICATION_OPTIONS` disables Nest's body parser; `AppModule` installs DRF's
+  // request-parsing middleware in its place. See `src/bootstrap.ts`.
+  const app = await NestFactory.create(AppModule, NEST_APPLICATION_OPTIONS);
 
   // v1 sets `CORS_ORIGIN_ALLOW_ALL = True` (api/settings/base.py). Tightening it to an
   // allowlist is on the post-cutover backlog, not this migration.

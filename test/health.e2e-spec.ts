@@ -3,6 +3,7 @@ import { Test, type TestingModule } from '@nestjs/testing';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
+import { NEST_APPLICATION_OPTIONS } from '../src/bootstrap';
 import { ApiExceptionFilter } from '../src/common/filters/api-exception.filter';
 
 describe('Phase 0 application boot', () => {
@@ -13,7 +14,7 @@ describe('Phase 0 application boot', () => {
       imports: [AppModule],
     }).compile();
 
-    app = moduleFixture.createNestApplication();
+    app = moduleFixture.createNestApplication(NEST_APPLICATION_OPTIONS);
     app.useGlobalFilters(new ApiExceptionFilter());
     await app.init();
   });

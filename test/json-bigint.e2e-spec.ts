@@ -3,6 +3,7 @@ import { Test, type TestingModule } from '@nestjs/testing';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
+import { NEST_APPLICATION_OPTIONS } from '../src/bootstrap';
 import { Public } from '../src/auth/decorators/public.decorator';
 import { MAX_SAFE_BIGINT } from '../src/common/http/json-bigint';
 
@@ -46,7 +47,7 @@ describe('Phase 0 — BigInt responses (plan rule 5b)', () => {
       controllers: [BigIntProbeController],
     }).compile();
 
-    app = moduleFixture.createNestApplication();
+    app = moduleFixture.createNestApplication(NEST_APPLICATION_OPTIONS);
     await app.init();
   });
 

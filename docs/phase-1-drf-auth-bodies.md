@@ -129,3 +129,68 @@ running the stack:
   = []` clears permissions, never authenticators — so this holds for every `@Public()` route,
   including `POST /api/user/activate/<id>` in Phase 3.
 * `OPTIONS` on a guarded view is authenticated and permission-checked like any other method.
+
+## Request media types — added closing review condition C5 (finding S3, plan §5 D18)
+
+`ObtainAuthToken` inherits `DEFAULT_PARSER_CLASSES` = `JSONParser`, `FormParser`,
+`MultiPartParser` (v1 never overrides `REST_FRAMEWORK['DEFAULT_PARSER_CLASSES']`). Captured by
+driving `rest_framework.request.Request` with those parsers on the pinned stack
+(`Django==2.2.27`, `djangorestframework==3.11.2`, CPython 3.9):
+
+```python
+from rest_framework.test import APIRequestFactory
+from rest_framework.request import Request
+from rest_framework.settings import api_settings
+
+factory = APIRequestFactory()
+parsers = [p() for p in api_settings.DEFAULT_PARSER_CLASSES]
+request = Request(factory.post('/api-token-auth', data='hello', content_type='text/plain'),
+                  parsers=parsers)
+request.data          # -> UnsupportedMediaType: Unsupported media type "text/plain" in request.
+```
+
+| Request | Status | Body |
+|---|---|---|
+| `application/json`, valid | 200 | `{"token": …}` |
+| `application/json; charset=utf-8` | 200 | parsed — DRF drops media-type parameters when matching |
+| `multipart/form-data` + valid credentials | **200** | `{"token": …}` — `MultiPartParser` |
+| `application/x-www-form-urlencoded` | 200 | `{"token": …}` — `FormParser` |
+| Bare wildcard content type | 200 | matches `JSONParser`, the first parser in the list |
+| `text/plain` **with** a body | **415** | `{"detail":"Unsupported media type \"text/plain\" in request."}` |
+| `application/xml; charset=utf-8` | **415** | `{"detail":"Unsupported media type \"application/xml; charset=utf-8\" in request."}` — parameters are echoed as sent |
+| No `Content-Type` header **with** a body | **415** | `{"detail":"Unsupported media type \"\" in request."}` — Django's `content_type` is `''`, never `None`, so `_parse`'s `media_type is None` guard never fires |
+| `text/plain` with an **empty** body | 400 | `{"username":["This field is required."],"password":["This field is required."]}` — `_load_stream` nulls the stream at `CONTENT_LENGTH: 0`, so no negotiation happens |
+| Malformed JSON `not json` | 400 | `{"detail":"JSON parse error - Expecting value: line 1 column 1 (char 0)"}` |
+| Malformed JSON `{` | 400 | `{"detail":"JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"}` |
+| Malformed JSON `{"a" 1}` | 400 | `{"detail":"JSON parse error - Expecting ':' delimiter: line 1 column 6 (char 5)"}` |
+| Malformed JSON `{} {}` | 400 | `{"detail":"JSON parse error - Extra data: line 1 column 4 (char 3)"}` |
+| Empty JSON body | 400 | field-required errors — *not* a parse error, same `CONTENT_LENGTH: 0` short-circuit |
+
+Two structural facts behind the table, both of which v2 reproduces:
+
+1. **Parsing is lazy and happens inside the handler.** `APIView.dispatch` runs `initial()` —
+   authentication, then permissions — *before* the handler touches `request.data`. So a bad
+   token on a malformed body is a **401**, never a 400 or a 415. v2 defers the decision to
+   `DrfParserInterceptor`, which runs after the guards, for exactly this reason.
+2. **The parse-error text is CPython's, verbatim.** `JSONParser.parse` does
+   `'JSON parse error - %s' % str(exc)`, so `json.JSONDecodeError`'s message *and character
+   offset* are part of the HTTP contract. Node's message is different
+   (`Unexpected token 'n', "not json" is not valid JSON`), so `src/common/http/python-json.ts`
+   reimplements CPython's scanner. It was validated differentially against `python:3.9-slim`
+   over a 412-case structured corpus (committed as `python-json.fixture.ts`) **and** a
+   3 000-case seeded fuzz of mutated documents: **0 mismatches**.
+
+Regenerating the fuzz, if the scanner is ever touched:
+
+```bash
+docker run --rm -v "$PWD/scratch:/w" python:3.9-slim python /w/fuzz.py   # writes /w/fuzz.json
+# then compare pythonJsonLoadsError(input) against every captured `expected`
+```
+
+### Accepted residual divergences
+
+| Case | v1 | v2 | Why accepted |
+|---|---|---|---|
+| Malformed **multipart** body | `{"detail":"Multipart form parse error - <Django's message>"}` | same shape, **multer's** message | Both are 400 with the same prefix; the inner text comes from a different parser and no client reads it. Registered rather than emulated — unlike the JSON case, v1's own text is a Django internal that no v1 test or client asserts. |
+| Malformed body **and** a bad token, on a route that is `@Public()` | 401 | 401 | matches — the interceptor runs after the guards |
+| Astral characters before the error position in a malformed JSON body | offset in code points | offset in UTF-16 code units | documented in `python-json.ts`; no client sends one |

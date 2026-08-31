@@ -95,6 +95,34 @@ export class DrfException extends HttpException {
   }
 
   /**
+   * `exceptions.UnsupportedMediaType(media_type)` — raised by `Request.negotiate_parser`
+   * when no parser matches the request's `Content-Type`
+   * (`rest_framework/request.py:344`). DRF's `default_detail` is
+   * `'Unsupported media type "{media_type}" in request.'` and `media_type` is the header as
+   * sent, parameters included.
+   *
+   * Only reachable on a method whose view reads `request.data` (POST/PUT/PATCH in v1) and
+   * only when the request actually carries a body — DRF returns an empty `QueryDict` without
+   * negotiating when `CONTENT_LENGTH` is 0.
+   */
+  static unsupportedMediaType(mediaType: string): DrfException {
+    return new DrfException(
+      HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+      { detail: `Unsupported media type "${mediaType}" in request.` },
+      {},
+    );
+  }
+
+  /**
+   * `exceptions.ParseError(detail)` — `JSONParser.parse` wraps CPython's own message:
+   * `'JSON parse error - %s' % str(exc)` (`rest_framework/parsers.py:66`). The message text
+   * is reproduced by `python-json.ts`, since it is part of the response body.
+   */
+  static parseError(detail: string): DrfException {
+    return new DrfException(HttpStatus.BAD_REQUEST, { detail }, {});
+  }
+
+  /**
    * `serializers.ValidationError` surfaced by `serializer.is_valid(raise_exception=True)`.
    * `exc.detail` is already a dict, so DRF renders it **without** a `detail` wrapper.
    * Key order follows the serializer's field declaration order (`username`, then `password`).

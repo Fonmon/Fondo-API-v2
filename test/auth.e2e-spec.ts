@@ -3,6 +3,7 @@ import { Test, type TestingModule } from '@nestjs/testing';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
+import { NEST_APPLICATION_OPTIONS } from '../src/bootstrap';
 import { ApiExceptionFilter } from '../src/common/filters/api-exception.filter';
 import { Role } from '../src/auth/permissions/roles';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -39,7 +40,7 @@ describe('Phase 1 — token authentication', () => {
       imports: [AppModule],
     }).compile();
 
-    app = moduleFixture.createNestApplication();
+    app = moduleFixture.createNestApplication(NEST_APPLICATION_OPTIONS);
     app.useGlobalFilters(new ApiExceptionFilter());
     await app.init();
 
@@ -95,6 +96,101 @@ describe('Phase 1 — token authentication', () => {
         .type('form')
         .send({ username: ADMIN_EMAIL, password: TEST_PASSWORD })
         .expect(200);
+    });
+
+    /**
+     * §5 D18 / review finding S3 — request media-type handling. Every expectation below was
+     * captured from the pinned stack (`Django==2.2.27`, `djangorestframework==3.11.2`) by
+     * driving `rest_framework.request.Request` with DRF's `DEFAULT_PARSER_CLASSES`; the
+     * transcript is in `docs/phase-1-drf-auth-bodies.md` §6.
+     */
+    describe('media types (D18)', () => {
+      it("accepts multipart/form-data as DRF's MultiPartParser does", async () => {
+        // The load-bearing row: Phase 3's `PATCH /api/user` and Phase 4's `PATCH /api/loan`
+        // are multipart TSV uploads declaring `@parser_classes((MultiPartParser,))`.
+        const response = await request(app.getHttpServer())
+          .post('/api-token-auth')
+          .field('username', ADMIN_EMAIL)
+          .field('password', TEST_PASSWORD)
+          .expect(200);
+
+        expect((response.body as { token: string }).token).toMatch(/^[0-9a-f]{40}$/);
+      });
+
+      it("415s an unsupported media type, with DRF's wording", async () => {
+        await request(app.getHttpServer())
+          .post('/api-token-auth')
+          .set('Content-Type', 'text/plain')
+          .send('username=admin')
+          .expect(415)
+          .expect({ detail: 'Unsupported media type "text/plain" in request.' });
+      });
+
+      it('keeps the Content-Type parameters in the 415 message, as DRF does', async () => {
+        await request(app.getHttpServer())
+          .post('/api-token-auth')
+          .set('Content-Type', 'application/xml; charset=utf-8')
+          .send('<x/>')
+          .expect(415)
+          .expect({
+            detail: 'Unsupported media type "application/xml; charset=utf-8" in request.',
+          });
+      });
+
+      it('415s a binary body', async () => {
+        await request(app.getHttpServer())
+          .post('/api-token-auth')
+          .set('Content-Type', 'application/octet-stream')
+          .send(Buffer.from([0x00, 0x01, 0x02]))
+          .expect(415)
+          .expect({ detail: 'Unsupported media type "application/octet-stream" in request.' });
+      });
+
+      it('does NOT 415 an empty body, whatever the Content-Type', async () => {
+        // `_load_stream` sets the stream to None when CONTENT_LENGTH is 0, so DRF returns an
+        // empty QueryDict without negotiating and the serializer reports missing fields.
+        await request(app.getHttpServer())
+          .post('/api-token-auth')
+          .set('Content-Type', 'text/plain')
+          .expect(400)
+          .expect({
+            username: ['This field is required.'],
+            password: ['This field is required.'],
+          });
+      });
+
+      it("renders CPython's own message for a malformed JSON body", async () => {
+        await request(app.getHttpServer())
+          .post('/api-token-auth')
+          .set('Content-Type', 'application/json')
+          .send('not json')
+          .expect(400)
+          .expect({ detail: 'JSON parse error - Expecting value: line 1 column 1 (char 0)' });
+      });
+
+      it("reports the character offset CPython reports, not Node's", async () => {
+        await request(app.getHttpServer())
+          .post('/api-token-auth')
+          .set('Content-Type', 'application/json')
+          .send('{"username" "a"}')
+          .expect(400)
+          .expect({
+            detail: "JSON parse error - Expecting ':' delimiter: line 1 column 13 (char 12)",
+          });
+      });
+
+      it('authenticates before parsing: a bad token 401s even on a malformed body', async () => {
+        // DRF's `initial()` runs `perform_authentication` before the handler ever touches
+        // `request.data`, so the parse error is never reached. This is the ordering the
+        // deferred-parse design exists to preserve.
+        await request(app.getHttpServer())
+          .post('/api-token-auth')
+          .set('Authorization', 'Token deadbeef')
+          .set('Content-Type', 'application/json')
+          .send('not json')
+          .expect(401)
+          .expect({ detail: 'Invalid token.' });
+      });
     });
 
     it('authenticates by auth_user.username, not by email', async () => {

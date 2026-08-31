@@ -45,6 +45,7 @@
     "@prisma/adapter-pg": "^7.10.0",
     "@types/express": "^5.0.6",
     "@types/jest": "^30.0.0",
+    "@types/multer": "^2.2.0",
     "@types/node": "^26.4.0",
     "@types/pg": "^8.23.1",
     "@types/supertest": "^7.2.1",
