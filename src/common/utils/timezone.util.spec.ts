@@ -1,13 +1,16 @@
 import {
   BOGOTA_TIME_ZONE,
   bogotaWallClockToInstant,
+  nowInstant,
   partsInZone,
   plainDateToUtcDate,
   toBogotaDate,
+  todayForAutoNowDateColumn,
+  todayForAutoNowDateField,
   todayInBogota,
 } from './timezone.util';
 import { formatDateEs } from '../i18n/spanish-format';
-import { toPlainDate } from './date.util';
+import { fromDateColumn, toPlainDate } from './date.util';
 
 describe('America/Bogota time handling (Django USE_TZ = True)', () => {
   it('is a fixed UTC-05:00 zone', () => {
@@ -77,5 +80,63 @@ describe('America/Bogota time handling (Django USE_TZ = True)', () => {
 
   it('exports the zone name Django is configured with', () => {
     expect(BOGOTA_TIME_ZONE).toBe('America/Bogota');
+  });
+});
+
+/**
+ * Plan §4 rule 5 / review finding S6 — the `auto_now` question, settled by running the
+ * pinned stack rather than by reading `DateField.pre_save` alone.
+ *
+ * `DateField.pre_save` calls `datetime.date.today()`, which is process-local and ignores
+ * `settings.TIME_ZONE` — but `django.conf.Settings.__init__` has already done
+ * `os.environ['TZ'] = self.TIME_ZONE; time.tzset()`, so the process zone *is*
+ * `America/Bogota`. Verified on `Django==2.2.27` / CPython 3.9 with the container clock at
+ * `2026-08-31T00:09Z`: `date.today()` returned `2026-08-30` after `django.setup()` and
+ * `2026-08-31` before it.
+ */
+describe('auto_now (Django DateTimeField vs DateField)', () => {
+  // 2026-08-31 00:09 UTC == 2026-08-30 19:09 Bogota: inside the ~21% of the day where the
+  // two calendars disagree, and the exact instant used in the verification run above.
+  const insideTheWindow = new Date('2026-08-31T00:09:53.000Z');
+
+  it('DateField(auto_now=True) writes the Bogota calendar date, as v1 does', () => {
+    expect(todayForAutoNowDateField(insideTheWindow)).toEqual({
+      year: 2026,
+      month: 8,
+      day: 30,
+    });
+  });
+
+  it('is pinned to Bogota, never inherited from the host TZ', () => {
+    const previousTz = process.env.TZ;
+    try {
+      for (const hostZone of ['UTC', 'Europe/Madrid', 'Australia/Sydney']) {
+        process.env.TZ = hostZone;
+        expect(todayForAutoNowDateField(insideTheWindow).day).toBe(30);
+      }
+    } finally {
+      process.env.TZ = previousTz;
+    }
+  });
+
+  it('renders the DateField value as a Prisma @db.Date at UTC midnight', () => {
+    const column = todayForAutoNowDateColumn(insideTheWindow);
+    expect(column.toISOString()).toBe('2026-08-30T00:00:00.000Z');
+    // Round-trips through the reader Phase 3 will use for `last_modified`.
+    expect(fromDateColumn(column)).toEqual({ year: 2026, month: 8, day: 30 });
+  });
+
+  it('DateTimeField(auto_now=True) writes the instant, with no calendar decision at all', () => {
+    const before = Date.now();
+    const value = nowInstant().getTime();
+    expect(value).toBeGreaterThanOrEqual(before);
+    expect(value).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('the two halves disagree by a day inside the window — which is the whole point', () => {
+    // `Loan.created_at` (timestamptz) and `LoanDetail.from_date` (DateField) written in the
+    // same request at 19:09 Bogota: the instant is the 31st in UTC, the date is the 30th.
+    expect(insideTheWindow.getUTCDate()).toBe(31);
+    expect(todayForAutoNowDateField(insideTheWindow).day).toBe(30);
   });
 });

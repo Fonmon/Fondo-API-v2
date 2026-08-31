@@ -597,12 +597,25 @@ Verified in every phase's parity report, not just the phase that introduces them
 4. **Money is integer whole units.** No floats on a money path. Rounding uses the Phase 0
    half-even helper.
 5. **Timestamps.** `auto_now` / `auto_now_add` are application-set in v1, not DB defaults — v2
-   must set them. ⚠️ **CORRECTED (v0.12): the timezone half was wrong.** Django 2.2's
-   `DateTimeField.pre_save` uses `timezone.now()` (tz-aware), but **`DateField.pre_save` uses
-   `datetime.date.today()`** — *process-local*, ignoring `settings.TIME_ZONE` entirely. That
-   governs `UserFinance.last_modified` and `LoanDetail.from_date`. Before Phase 3, check the
-   deployed container's `TZ`: if it is UTC, v1 has been writing UTC dates all along and v2 must
-   reproduce that, not "fix" it to Bogotá.
+   must set them. ✅ **RESOLVED (v0.14) — the answer is Bogotá, and it was worth checking.**
+   Django 2.2's `DateTimeField.pre_save` uses `timezone.now()` (a tz-aware instant), while
+   **`DateField.pre_save` uses `datetime.date.today()`** — process-local, ignoring
+   `settings.TIME_ZONE`. v0.12 inferred from that "so v1 probably writes UTC dates". It does
+   not: `django/conf/__init__.py::Settings.__init__` ends with
+   `os.environ['TZ'] = self.TIME_ZONE; time.tzset()`, so Django *makes* the process zone equal
+   the setting. Verified on `Django==2.2.27` / CPython 3.9 with the container `TZ` unset (host
+   zone UTC) at `2026-08-31T00:09Z` = `2026-08-30 19:09` Bogotá: `date.today()` returns
+   `2026-08-31` before `django.setup()` and **`2026-08-30` after it**.
+   **So `UserFinance.last_modified` and `LoanDetail.from_date` hold Bogotá dates, there are no
+   next-day rows to reconcile, and the escalation to `business-analyst` is withdrawn.** v2 pins
+   the zone explicitly in `todayForAutoNowDateField()` (`timezone.util.ts`) rather than
+   inheriting it from the host, and uses `nowInstant()` for the `DateTimeField` half.
+   ⚠️ Residual, recorded rather than guessed: v1's repo has no Dockerfile (the image is built
+   by an out-of-repo `entrypoint_deploy` on the EC2 host), so the base image cannot be read
+   from source. The result above holds for any image shipping tzdata — `python:3.9-slim` and
+   `python:3.9-alpine` both do, both verified. Strip `/usr/share/zoneinfo` and `tzset()` cannot
+   resolve the zone, Django does not raise, and `date.today()` silently falls back to UTC (also
+   verified). That is the only scenario in which v1's stored dates are UTC.
 5b. **Money is `BigInt` in Prisma — 17 columns — and `JSON.stringify(1n)` throws.** The first
    Phase 3 response returning a money field will 500 without a serialization strategy. The reflex
    fix (`BigInt.prototype.toJSON = toString`) is **wrong**: it renders `"1000"` where DRF renders
