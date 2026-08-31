@@ -104,6 +104,45 @@ is the kind of diff that passes a status-code check and fails a byte comparison.
 Django computes `ceil(max(1, count - orphans) / per_page)` with `orphans = 0`, so an empty
 result set reports `num_pages: 1, count: 0`. Easy to "fix" into 0. Pinned by a test.
 
+### 2.10 A Prisma `BigInt` serialises as a JSON **number**, not a string
+
+*Added closing review condition C2 (finding S2), plan §4 rule 5b.*
+
+17 columns are `BigInt` — every money field plus `UserProfile.identification` — and
+`JSON.stringify(1n)` throws `TypeError: Do not know how to serialize a BigInt`. Phase 0/1
+never serialise one, so nothing was broken; the first Phase 3 response carrying `finance`
+would have 500ed.
+
+**Decision: a bare JSON number**, because v1 renders `models.BigIntegerField` through DRF's
+`IntegerField.to_representation` → `int(value)`. The reflex fix
+`BigInt.prototype.toJSON = function () { return this.toString() }` renders `"1000"` where
+v1 renders `1000` — a response-shape change affecting every money field of every endpoint,
+and a global prototype mutation on top. **Do not re-litigate this in Phase 3.**
+
+Implemented in `src/common/http/json-bigint.ts` as Express's `json replacer`, installed by
+the `JsonBigIntSetup` provider of `AppModule` (so e2e exercises the production wiring, not a
+`main.ts`-only line). A replacer rather than an interceptor because an interceptor has to
+deep-clone the payload, and cloning degrades class instances, `Date` and `Decimal` on the
+way through; a replacer visits every nested value at stringify time and copies nothing.
+
+A value outside ±(2^53 − 1) **throws** (`BigIntPrecisionError` → 500) rather than silently
+rounding. The fund's largest realistic amount is ~10^9 COP, so this is a tripwire.
+
+### 2.11 `formatDateEs` takes a `PlainDate`, never a `Date`
+
+*Added closing review condition C1 (finding S1), plan §4 rule 5c.*
+
+v1 formats dates two different ways and the difference is a calendar day:
+`LoanSerializer.get_created_at` calls `timezone.localtime` first (`serializers.py:88`),
+`UserFinanceSerializer.get_last_modified` does not (`serializers.py:29`). A single
+`formatDateEs(value: Date)` reading UTC parts is right for a `@db.Date` column and wrong for
+a `timestamptz`, where it yields the **next** day for every instant between 19:00 and 23:59
+Bogota — roughly 21% of the day, invisible in CI because every fixture is at UTC midnight.
+
+The signature is therefore narrowed to `PlainDate` and the conversion is forced to the call
+site, where the column type is known: `fromDateColumn(v)` for `@db.Date`, `toBogotaDate(v)`
+for `timestamptz`. A runtime `TypeError` naming both catches JS callers and `as` casts.
+
 ---
 
 ## 3. Findings for `MIGRATION_PLAN.md`

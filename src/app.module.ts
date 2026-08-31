@@ -4,6 +4,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { AppConfigModule } from './config/config.module';
 import { AuthModule } from './auth/auth.module';
 import { ApiExceptionFilter } from './common/filters/api-exception.filter';
+import { JsonBigIntSetup } from './common/http/json-bigint';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
 
@@ -33,6 +34,9 @@ import { PrismaModule } from './prisma/prisma.module';
       provide: APP_FILTER,
       useClass: ApiExceptionFilter,
     },
+    // Money is `BigInt` in Prisma and `JSON.stringify(1n)` throws. Registered here rather
+    // than in `main.ts` so every e2e suite exercises the production wiring (rule 5b).
+    JsonBigIntSetup,
   ],
 })
 export class AppModule {}
