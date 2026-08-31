@@ -40,14 +40,45 @@
 /**
  * DRF's `APIView.default_response_headers`, per view. `null` for a plain Django view.
  *
- * ⚠️ **Phase 3 must widen this to carry `Vary: Cookie`.** Two v1 views patch `Cookie` into
- * `Vary` from *outside* DRF: `CsrfViewMiddleware`, when it sets the `csrftoken` cookie on a
- * form page, and `SessionMiddleware`, when a view touches the session. Measured on the live
- * v1: `GET /password_reset/` answers `Vary: Cookie, Origin` with a `Set-Cookie: csrftoken=…`
- * — a **kept** route — and `GET /api/authorize` answers `Vary: Accept, Origin, Cookie`
- * (Alexa account linking, not migrated). The other three auth pages answer `Vary: Origin`
- * only today; `PasswordResetConfirmView` will add `Cookie` once a *valid* token puts the
- * reset into the session. Whoever lands those views owns both the cookie and the field.
+ * ⚠️ **Phase 3 must widen this to carry `Vary: Cookie`.** Two v1 middlewares patch `Cookie`
+ * into `Vary` from *outside* DRF: `CsrfViewMiddleware`, when it sets the `csrftoken` cookie on
+ * a form page, and `SessionMiddleware`, when a view touches the session.
+ *
+ * This was first recorded as affecting one route. The round-3 sweep found it is **three kept
+ * routes**, and that the element order is not constant between them:
+ *
+ * | route | `Vary` | also |
+ * |---|---|---|
+ * | `GET /password_reset/` | `Cookie, Origin` | `Set-Cookie: csrftoken` |
+ * | `GET /reset/<uid>/<valid token>/` | `Origin, Cookie` | **302** → `/reset/<uid>/set-password/` |
+ * | `GET /reset/<uid>/set-password/` | `Origin, Cookie` | `Set-Cookie: csrftoken` |
+ *
+ * ⚠️ **`Cookie, Origin` on the first, `Origin, Cookie` on the other two.** Django does not
+ * sort `Vary`; `patch_vary_headers` appends whatever is not already present, so the order is a
+ * function of *which middleware got there first*, not of the header's meaning. That is
+ * irrelevant if Phase 3 transcribes the string per route and load-bearing the moment anyone
+ * builds it by joining a set — which is why it is written down here.
+ *
+ * `GET /api/authorize` also answers `Vary: Accept, Origin, Cookie`, but that is Alexa account
+ * linking and is **not migrated** (plan §1), so it is out of scope rather than a fourth row.
+ *
+ * ⚠️ **Phase 3 scope, and probably a Phase 3 *design* question, not a one-liner:
+ * `GET /reset/<uid>/<token>/` performs a database write.** With a *valid* token,
+ * `PasswordResetConfirmView.dispatch` (Django 2.2.27,
+ * `django/contrib/auth/views.py:272-278`) does:
+ *
+ * ```python
+ * self.request.session[INTERNAL_RESET_SESSION_TOKEN] = token   # '_password_reset_token'
+ * redirect_url = self.request.path.replace(token, INTERNAL_RESET_URL_TOKEN)  # 'set-password'
+ * ```
+ *
+ * so `SessionMiddleware` persists the modified session and a **`django_session` row is
+ * inserted on a GET**, before the 302. That is where both the `Cookie` in `Vary` and the
+ * `sessionid` cookie on those two routes come from. **v2 has no session model at all** — no
+ * `django_session` mapping, no session store, no `sessionid`. Reproducing this is a decision
+ * about how far the password-reset flow is ported (real server-side sessions vs. a signed
+ * token carrying the same state), not a header to add, so it belongs to whoever lands
+ * `PasswordResetConfirmView`. **Do not build it as part of the header work.**
  */
 export interface DrfViewHeaders {
   /** `Allow` — `[m.upper() for m in http_method_names if hasattr(self, m)]`, DRF's order. */

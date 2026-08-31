@@ -381,6 +381,33 @@ emit on write paths.
   environment, and the **unconditional** redirect to `/password_reset/done/` (no user
   enumeration). *Runbook note: reset links issued by v1 stop working at cutover; Django's
   default timeout is 3 days, so worst case a few members re-request.*
+- ⚠️ **`Vary: Cookie` is on three *kept* routes, not one** (corrected in the round-3 sweep;
+  v1.6 recorded only `GET /password_reset/`). `DrfViewHeaders` in
+  `src/common/http/django-url-conf.ts` must widen when these views land:
+
+  | route | `Vary` | also |
+  |---|---|---|
+  | `GET /password_reset/` | `Cookie, Origin` | `Set-Cookie: csrftoken` |
+  | `GET /reset/<uid>/<valid token>/` | `Origin, Cookie` | **302** → `/reset/<uid>/set-password/` |
+  | `GET /reset/<uid>/set-password/` | `Origin, Cookie` | `Set-Cookie: csrftoken` |
+
+  **The element order differs between them** — `Cookie, Origin` on the first, `Origin, Cookie`
+  on the other two. Django's `patch_vary_headers` appends rather than sorts, so the order
+  records which middleware ran first. Transcribe the string per route; do **not** build it by
+  joining a set. (`GET /api/authorize` is also `Vary: Accept, Origin, Cookie`, but Alexa is not
+  migrated — out of scope, not a fourth row.)
+- ⚠️ **`GET /reset/<uid>/<token>/` writes a `django_session` row — a DB side effect on a GET,
+  and a Phase 3 *design* question rather than a one-liner.** With a valid token,
+  `PasswordResetConfirmView.dispatch` (Django 2.2.27, `contrib/auth/views.py:272-278`) stores
+  the token in the session (`self.request.session['_password_reset_token'] = token`) and
+  redirects to the same path with the token replaced by `set-password`, so `SessionMiddleware`
+  persists the session and **inserts a `django_session` row before the 302**. That write is
+  also where the `Cookie` in `Vary` and the `sessionid` cookie on those two routes come from.
+  **v2 has no session model at all** — nothing maps `django_session`, there is no session store
+  and no `sessionid`. Since v2 already uses its own token scheme (above), the open question is
+  whether the token-in-session hop is reproduced with real server-side sessions or replaced by
+  a signed token carrying the same state. **Decide it here; do not build it as part of the
+  header work**, and put the choice to `business-analyst` if it changes the reset URL shape.
 
 **Risks**
 - MTI writes touch two tables; a partial insert corrupts login.

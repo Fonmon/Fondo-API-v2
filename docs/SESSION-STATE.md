@@ -63,6 +63,23 @@ the developer and restarts the sequence. `business-analyst` is gate 4 and on-dem
 - ⚠️ **`fondodev`'s 94 `fondo_api_notificationsubscriptions` rows are the fixture** for the hstore
   codec — production-shaped data that cannot be regenerated. Snapshot before any write test:
   `pg_dump -t fondo_api_notificationsubscriptions`.
+- ⚠️ **Do not use an md5 of `pg_dump` output as the fixture guard — it is nondeterministic.**
+  Postgres runs with `synchronize_seqscans = on`, so a seqscan may start at a block other than
+  0 and `COPY` emits the same 94 rows in a *rotated* order. Six consecutive dumps of provably
+  unmodified data gave six different md5s (2026-08-31). A changed checksum is therefore not
+  evidence of a write, and a matching one is luck. Use order-independent checks instead:
+
+  ```sh
+  psql -tAc "SELECT count(*), max(id) FROM fondo_api_notificationsubscriptions"   # 94 | 1468
+  psql -tAc "SELECT md5(string_agg(t, E'\n' ORDER BY t)) FROM (SELECT id||'|'||user_id||'|'
+             ||subscription::text AS t FROM fondo_api_notificationsubscriptions) s"
+  # -> 7a6afbccd2f133c147bd096062655750
+  psql -tAc "SELECT DISTINCT xmin FROM fondo_api_notificationsubscriptions"       # -> 905
+  ```
+
+  The `xmin` check is the strongest of the three: all 94 rows are still the single tuple
+  version written by txn **905**, so no row has been updated since the load, whatever the dump
+  order says.
 
 ---
 
