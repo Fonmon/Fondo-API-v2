@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-08-30 | v0.14 | **All eight review conditions C1–C8 closed** (§7). Rule 5 **re-corrected and settled**: Django sets `os.environ['TZ']` from `TIME_ZONE`, so v1's `DateField` dates are **Bogotá**, verified against the pinned stack — the BA escalation on `last_modified` is withdrawn. Rule 5b (BigInt→JSON number) and 5c (`formatDateEs` takes a `PlainDate`) implemented as Phase 0 primitives. **D18 fixed rather than deviated** — v2 owns request parsing and reproduces DRF's multipart/415/JSON-parse behaviour, including CPython's error strings. `relativedelta` ported (reviewer P5). D1's primitives now express the C8 rule ordering. ⚠️ One review condition is **untracked**: S7 (detail-route trailing slashes) appears in the review's Phase 1 gate but in no §7 row — see the note under the table. |
 | 2026-08-30 | v0.12 | **Phases 0 and 1 reviewed — both Approved-with-conditions, no blocking findings.** 8 conditions tracked in §7. Cross-cutting rule 5 **corrected** (Django `DateField(auto_now)` is process-local, not tz-aware). Two new rules: BigInt→JSON (17 columns; first Phase 3 response would 500) and the date-formatting/localtime asymmetry. D18 registered for content-type divergences. Fixed a self-contradiction in §9. |
 | 2026-08-30 | v0.11 | business-analyst Phase 3 note folded in (verdict: **Concerns**). D1 clarified on two points that would each have broken every ordinary member save. **D14–D17 registered**; D16/D17 need operator input. Two live v1 defects verified and recorded: personal edits to the two shared-email accounts **409 today**, and **4 of 15 members cannot reset their password**. |
 | 2026-08-30 | v0.10 | **Standing review gate made explicit** (§7): `nestjs-reviewer` runs at the end of every phase and writes `docs/review-phase-<n>.md`; no phase closes without a verdict. Phases 0 and 1 under review now, retroactively. |
@@ -616,16 +617,20 @@ Verified in every phase's parity report, not just the phase that introduces them
    `python:3.9-alpine` both do, both verified. Strip `/usr/share/zoneinfo` and `tzset()` cannot
    resolve the zone, Django does not raise, and `date.today()` silently falls back to UTC (also
    verified). That is the only scenario in which v1's stored dates are UTC.
-5b. **Money is `BigInt` in Prisma — 17 columns — and `JSON.stringify(1n)` throws.** The first
-   Phase 3 response returning a money field will 500 without a serialization strategy. The reflex
-   fix (`BigInt.prototype.toJSON = toString`) is **wrong**: it renders `"1000"` where DRF renders
-   the bare number `1000`. Decide this once, globally, before Phase 3 — a per-DTO fix will drift.
+5b. **Money is `BigInt` in Prisma — 17 columns — and `JSON.stringify(1n)` throws.** ✅ **Settled
+   (v0.14):** a BigInt serialises as a **bare JSON number**, matching DRF's
+   `IntegerField.to_representation`, via Express's `json replacer`
+   (`src/common/http/json-bigint.ts`, installed by an `AppModule` provider). The reflex fix
+   (`BigInt.prototype.toJSON = toString`) renders `"1000"` and is **wrong**. A value outside
+   ±(2^53 − 1) throws rather than rounding. Do not re-litigate per DTO in Phase 3.
 5c. **Date formatting is not uniform in v1 — do not assume it is.** `LoanSerializer.get_created_at`
    calls `timezone.localtime` first (`serializers.py:88`); `UserFinanceSerializer.get_last_modified`
    does not (`:29`). A `formatDateEs()` that silently reads a `DateTime` as UTC is correct for
    `@db.Date` and wrong for `timestamptz`, and the type system does not distinguish them — so it
    yields the **next day's date for ~21% of every day**, passing in CI and failing in production
-   against the byte-identical email criteria. Make the two cases distinct at the type level.
+   against the byte-identical email criteria. ✅ **Done (v0.14):** `formatDateEs` accepts only a
+   `PlainDate`, and the call site must choose `fromDateColumn(v)` (`@db.Date`) or
+   `toBogotaDate(v)` (`timestamptz`). A `Date` is a compile error.
 6. **Shared DB is a dev/parity concern only** (production is a hard switch). During parity
    testing v2 runs **no** schema migrations, and only one scheduler runs at a time.
 7. **hstore values are strings.** Never write a native JSON object into an hstore column —
@@ -812,16 +817,24 @@ is cheapest at the end of the phase that introduced it.
 Tracked to closure, not carried forward silently. Source:
 [`docs/review-phase-0-1.md`](docs/review-phase-0-1.md).
 
-| # | Condition | From | Due |
+| # | Condition | From | Status |
 |---|---|---|---|
-| C1 | `formatDateEs()` must distinguish `@db.Date` from `timestamptz` at the type level (rule 5c). | P0 · S1 | before P2 gate |
-| C2 | Global BigInt→JSON strategy rendering bare numbers, not strings (rule 5b). | P0 · S2 | before P3 gate |
-| C3 | Add a `relativedelta` month-end primitive. **Phase 3's birthday task needs it, long before Phase 7 runs** — month-end arithmetic on the 29th–31st is where clone dates drift. | P0 · plan gap | before P3 gate |
-| C4 | Verify the deployed container's `TZ` and record whether v1's `DateField` dates are UTC or Bogotá (rule 5). | P0 · S6 | before P3 gate |
-| C5 | Fix multipart and malformed-JSON request parsing to match v1 (**D18**). | P1 · S3 | before P3 gate |
-| C6 | `userPatchAllowlist` builds its allowlist from `attempt.fields`, making the "positive allowlist" a tautology — it cannot reject an unexpected field. | P1 · S4 | before P3 gate |
-| C7 | `FieldAllowlist.none().assert([])` does not throw, so a non-privileged `finance` write with an empty changed-set is **the silent no-op D1 explicitly forbids** — and under the decided `changedFields` reading that is the *common* case, not an edge case. | P1 · S5 | before P3 gate |
-| C8 | ✅ **Resolved below** — the two rules operate at different levels and do not actually collide. | P1 · escalated | resolved |
+| C1 | `formatDateEs()` must distinguish `@db.Date` from `timestamptz` at the type level (rule 5c). | P0 · S1 | ✅ **Closed** (`114d8cf`). Signature narrowed to `PlainDate`; `fromDateColumn` / `toBogotaDate` are the two named conversions; a `Date` is a compile error *and* a runtime `TypeError`. Test pins `28 mar.` vs `29 mar.` for the same instant. |
+| C2 | Global BigInt→JSON strategy rendering bare numbers, not strings (rule 5b). | P0 · S2 | ✅ **Closed** (`43759e8`). Express `json replacer` installed by an `AppModule` provider; bigint → **number**, `BigIntPrecisionError` above 2^53 rather than silent loss. Unit + e2e on the raw response text. Recorded in `docs/phase-0-deviations.md` §2.10. |
+| C3 | Add a `relativedelta` month-end primitive. **Phase 3's birthday task needs it, long before Phase 7 runs.** | P0 · plan gap | ✅ **Closed** (`a98c732`). `relativedelta.util.ts` + `nextRepeatRunDate`; 104 tests, every value captured from `python-dateutil==2.7.5` on CPython 3.9. Pins two v1 behaviours: a MONTHLY chain from the 31st collapses to the 28th forever, and a leap-day YEARLY task loses 29 February. |
+| C4 | Verify the deployed container's `TZ` and record whether v1's `DateField` dates are UTC or Bogotá (rule 5). | P0 · S6 | ✅ **Closed** (`42eed47`). **Bogotá.** `Settings.__init__` does `os.environ['TZ'] = TIME_ZONE; time.tzset()`, verified live at 19:09 Bogotá with the host zone UTC. `todayForAutoNowDateField()` / `nowInstant()` pin each half. Escalation withdrawn; one residual recorded (v1 has no Dockerfile in-repo; conclusion holds for any image shipping tzdata, slim and alpine both verified). |
+| C5 | Fix multipart and malformed-JSON request parsing to match v1 (**D18**). | P1 · S3 | ✅ **Closed** (`59700ff`). All three rows fixed, none deviated: multipart parses, unsupported media types 415 with DRF's wording, malformed JSON returns **CPython's** message and offset (`python-json.ts`, 412 structured + 3 000 fuzz cases differentially validated, 0 mismatches). Parsing deferred until after the guards, preserving DRF's authenticate-then-parse order. |
+| C6 | `userPatchAllowlist` builds its allowlist from `attempt.fields`, making the "positive allowlist" a tautology. | P1 · S4 | ✅ **Closed** (`9638d2e`). Three frozen field sets transcribed from `services/user.py:208-261`; the allowlist no longer reads the payload. `identification` (D16) is parameterised and tested both ways, awaiting Q26. |
+| C7 | `FieldAllowlist.none().assert([])` does not throw. | P1 · S5 | ✅ **Closed** (`5988ac0`). An empty allowlist denies any write including the empty one; a non-empty allowlist still accepts an empty change-set. |
+| C8 | The `body.type` gate vs the `changedFields` gate. | P1 · escalated | ✅ **Closed** (`e4c9985`). `resolveSection` + `assertSectionWritable` + the field allowlist, applied in that order; `changedFields` normalises `bigint`/`number`, `Date`/`'YYYY-MM-DD'` and numeric strings so rule 3 cannot fire on an echo. Resolution text below unchanged. |
+
+⚠️ **One condition from the review is not in this table and was left untouched:** the Phase 1
+gate in `docs/review-phase-0-1.md` §5 lists **S7 — detail-route trailing slashes** as its
+fourth condition (`GET /api/loan/5/` is a Django 404 because v1's detail-route regexes have no
+`/?`, while Express's non-strict routing matches it). It never became a `C` row when the
+conditions were transcribed into this section, and `nestjs-developer` deliberately did not act
+on it. It is a cross-cutting §4 rule (or an accepted deviation) that still needs a decision
+before Phases 3–8 add detail routes.
 
 ### C8 resolved — the two rules operate at different levels
 
@@ -849,8 +862,8 @@ set, as defence in depth rather than as the primary control.
 | Phase | Status | Dev | Tester | Reviewer | Analyst |
 |---|---|---|---|---|---|
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
-| 0 Foundations & Prisma baseline | ✅ Complete (`b3effab`) | ✅ | n/a | ✅ **Approved w/ conditions** (C1–C4) | n/a |
-| 1 Auth + roles | ✅ Complete (`151314f`) | ✅ | ⬜ | ✅ **Approved w/ conditions** (C5–C8) | ⬜ |
+| 0 Foundations & Prisma baseline | ✅ Complete (`b3effab`) | ✅ | n/a | ✅ **Approved w/ conditions** — C1–C4 **closed** (v0.14), re-review pending | n/a |
+| 1 Auth + roles | ✅ Complete (`151314f`) | ✅ | ⬜ | ✅ **Approved w/ conditions** — C5–C8 **closed** (v0.14), S7 still untracked, re-review pending | ⬜ |
 | 2 Mail + notifications | ⬜ Blocked on P1 | — | — | — | — |
 | 3 Users + finance | ⬜ Blocked on P2 | — | — | — | — |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
