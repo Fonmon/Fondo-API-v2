@@ -216,6 +216,49 @@ describe('Phase 2 — notifications', () => {
       expect(await countSubscriptions()).toBe(1);
     });
 
+    /**
+     * ⚠️ **P2-D4 corrected** (parity finding F5). `remove_all_subscriptions` is *not* dead in
+     * v1: `services/user.py:218` calls it from `__update_user_preferences` when a member
+     * switches notifications off —
+     *
+     * ```python
+     * if remove_notifications and not user_preference.notifications:
+     *     self.__notification_service.remove_all_subscriptions(id)
+     * ```
+     *
+     * — so turning notifications off deletes every push subscription that member owns, on
+     * every device. Phase 2 ships no route that reaches it (`PATCH /api/user/<id>` is Phase
+     * 3), so it is exercised here against the real table instead, both to prove the SQL and
+     * so Phase 3 only has to wire the call.
+     */
+    it('remove_all_subscriptions deletes every row of one user and no one else’s', async () => {
+      await subscribe(V1_TEST_SUBSCRIPTION).expect(200);
+      await subscribe({
+        ...V1_TEST_SUBSCRIPTION,
+        endpoint: `${V1_TEST_SUBSCRIPTION.endpoint}-second-device`,
+      }).expect(200);
+      await subscribe(
+        { ...V1_TEST_SUBSCRIPTION, endpoint: `${V1_TEST_SUBSCRIPTION.endpoint}-other-member` },
+        otherToken,
+      ).expect(200);
+      expect(await countSubscriptions()).toBe(3);
+
+      await notifications.removeAllSubscriptions(member.id);
+
+      const rows = await prisma.$queryRawUnsafe<{ user_id: number }[]>(
+        'SELECT user_id FROM fondo_api_notificationsubscriptions',
+      );
+      expect(rows).toEqual([{ user_id: other.id }]);
+    });
+
+    it('remove_all_subscriptions on a user with no rows is a no-op, not an error', async () => {
+      await subscribe(V1_TEST_SUBSCRIPTION).expect(200);
+
+      await expect(notifications.removeAllSubscriptions(other.id)).resolves.toBeUndefined();
+
+      expect(await countSubscriptions()).toBe(1);
+    });
+
     it("500s on a body with no 'endpoint' — v1 raises an uncaught KeyError", async () => {
       const response = await subscribe({ keys: {} });
 

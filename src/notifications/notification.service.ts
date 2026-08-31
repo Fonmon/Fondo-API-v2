@@ -68,7 +68,13 @@ export class NotificationService {
     return UNSUBSCRIBE_OK;
   }
 
-  /** `remove_all_subscriptions(user_id)`. No v1 call site; see the repository comment. */
+  /**
+   * `remove_all_subscriptions(user_id)`.
+   *
+   * ⚠️ Called in v1 from `services/user.py:218` when a member turns notifications off —
+   * **Phase 3 must wire it into `PATCH /api/user/<id>` with `type=preferences`.** Phase 2
+   * ships it with no caller because the route does not exist yet, not because it is dead.
+   */
   async removeAllSubscriptions(userId: number): Promise<void> {
     await this.repository.deleteAllByUserId(userId);
   }

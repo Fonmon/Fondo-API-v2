@@ -126,9 +126,19 @@ export class NotificationSubscriptionRepository {
    * `NotificationSubscriptions.objects.filter(user_id=user_id).delete()`
    * (`remove_all_subscriptions`).
    *
-   * ⚠️ Nothing in v1 calls it — verified across `fondo_api/`. Ported because it is part of
-   * the service's surface and Phase 3's soft delete is the obvious future caller; recorded in
-   * `docs/phase-2-deviations.md` so it is not mistaken for dead code that crept in.
+   * ⚠️ **This has a live v1 caller** — `services/user.py:218`, inside
+   * `__update_user_preferences`:
+   *
+   * ```python
+   * remove_notifications = user_preference.notifications != obj['notifications']
+   * ...
+   * if remove_notifications and not user_preference.notifications:
+   *     self.__notification_service.remove_all_subscriptions(id)
+   * ```
+   *
+   * so a member switching notifications **off** deletes every push subscription they own, on
+   * every device. It is unreachable in Phase 2 only because `PATCH /api/user/<id>` does not
+   * exist yet: **Phase 3 must wire this call** (P2-D4, corrected after parity finding F5).
    */
   async deleteAllByUserId(userId: number): Promise<number> {
     return this.prisma.$executeRaw`
