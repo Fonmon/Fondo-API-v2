@@ -952,7 +952,7 @@ set, as defence in depth rather than as the primary control.
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
 | 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab` + C1–C4) | ✅ | n/a | ✅ **APPROVED** | n/a |
 | 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
-| 2 Mail + notifications | 🟡 **fixes shipped → re-test** | ✅ (F1–F5 addressed) | 🔄 **re-run** | ⬜ | ⬜ |
+| 2 Mail + notifications | 🔨 fixes shipped (`b1d58b0`) → **re-test** | ✅ | 🔨 re-run | ⬜ | ⬜ |
 | 3 Users + finance | ⬜ Blocked on P2 | — | — | — | — |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
 | 7 Scheduler *(resequenced)* | ⬜ Blocked on P4 | — | — | — | — |
