@@ -35,8 +35,27 @@ describe('FieldAllowlist', () => {
     }
   });
 
-  it('accepts an empty write', () => {
-    expect(() => FieldAllowlist.none().assert([])).not.toThrow();
+  /**
+   * Review finding S5. `rejected([])` is `[]`, so an empty allowlist used to let an empty
+   * write through — the silent no-op §5 D1 forbids for the `finance` section.
+   */
+  describe('fails closed on an empty allowlist', () => {
+    it('throws even when nothing is being written', () => {
+      expect(() => FieldAllowlist.none().assert([])).toThrow(DrfException);
+      expect(() => FieldAllowlist.of().assert([])).toThrow(DrfException);
+      expect(() => FieldAllowlist.from([]).assert([])).toThrow(DrfException);
+    });
+
+    it('reports emptiness explicitly', () => {
+      expect(FieldAllowlist.none().isEmpty()).toBe(true);
+      expect(FieldAllowlist.of('a').isEmpty()).toBe(false);
+    });
+
+    it('still accepts an empty write against a non-empty allowlist', () => {
+      // A PATCH that changes nothing inside a section the caller may write is a no-op, not
+      // a violation.
+      expect(() => FieldAllowlist.of('a', 'b').assert([])).not.toThrow();
+    });
   });
 
   it('deduplicates and sorts for diagnostics', () => {

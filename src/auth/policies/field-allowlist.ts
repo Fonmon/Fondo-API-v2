@@ -42,16 +42,37 @@ export class FieldAllowlist {
     return [...fields].filter((field) => !this.allowed.has(field));
   }
 
+  /** True when the caller may write nothing at all in this section. */
+  isEmpty(): boolean {
+    return this.allowed.size === 0;
+  }
+
   /**
-   * Throws `403` if any field is not permitted.
+   * Throws `403` if any field is not permitted, **or if this allowlist is empty**.
    *
    * ⚠️ Reject, never silently drop. A write the caller is not entitled to make must fail
    * loudly — §5 D1 states this explicitly for the `finance` section, and the same reasoning
    * applies to `role`: a silent no-op tells an attacker nothing and tells an honest client
    * that its update succeeded when it did not.
+   *
+   * ⚠️ **Empty means deny, including for an empty field set** (review finding S5). Before
+   * this, `FieldAllowlist.none().assert([])` passed, because `rejected([])` is `[]` — so a
+   * MEMBER submitting a `finance` section whose values happened to be unchanged got the
+   * silent no-op D1 explicitly forbids. Under the decided `changedFields` reading that is
+   * the *common* case, not an edge case: v1's client posts `personal` and `finance` in every
+   * body, so an ordinary profile save yields no changed finance fields at all.
+   *
+   * An empty allowlist is only ever produced for a section the caller has no rights over
+   * (`FieldAllowlist.none()`), so failing closed here cannot refuse a legitimate write.
+   * A *non*-empty allowlist still accepts an empty field set — a PATCH that changes nothing
+   * inside a section the caller may write is a no-op, not a violation.
+   *
+   * This is defence in depth, not the primary control: §7 "C8 resolved" puts the section
+   * gate first, so `assertUserPatchAllowed` refuses at the `body.type` level before any
+   * field comparison happens.
    */
   assert(fields: Iterable<string>): void {
-    if (this.rejected(fields).length > 0) {
+    if (this.isEmpty() || this.rejected(fields).length > 0) {
       throw DrfException.permissionDenied();
     }
   }
