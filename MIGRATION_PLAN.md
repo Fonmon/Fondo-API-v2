@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-08-31 | v1.4 | **Phase 2 parity failures fixed; back to `manual-tester`.** All five findings addressed at the HTTP edge, nothing in the mail/hstore/SQS core touched. **C14 closed** — `app.enableCors()` removed and `corsheaders 2.4.0` ported, so a bare `OPTIONS` is authenticated again (it was a 204 for anyone). **C9 closed in full, now rather than in Phase 3** — v1's 22 `url()` patterns are transcribed in `django-url-conf.ts` and resolved **before the guards**, which closes S7, P2-D5 and F2 together and is **fail-closed**: a path v1 does not serve cannot reach a v2 controller. F3 (`QueryDict` last-value) fixed; most of F4 matched, the rest registered as **P2-D8**. **P2-D4 withdrawn — its premise was false**: `remove_all_subscriptions` is live in v1 and **Phase 3 must wire it**. **P2-D5 withdrawn** (fixed, not deviated). P1-D2's v2 column corrected. Two new cross-cutting rules: **14** (the URL conf) and a third clause on rule 12 (`OPTIONS` is a real, guarded method). |
 | 2026-08-31 | v1.3 | **Phase 2 parity: FAIL** (`docs/parity-phase-2.md`). The *substance* is exact — every SES payload, SQS body, hstore row and the full role matrix are byte-identical, including a 35 KB body carrying all 94 live rows. All five failures are at the **HTTP edge**, three unregistered. Returned to `nestjs-developer` per the standing pipeline. **F2 folds into C9**; **F1** is new and severe. P1-D2's v2 column corrected. **P2-D4's premise is false** — `remove_all_subscriptions` is live, which changes Phase 3. |
 | 2026-08-31 | v1.2 | **Phase 2 implemented** (`feat/phase-2-notifications`): SES mail + the six Spanish templates, the hstore `NotificationSubscriptionRepository`, SQS publishing with bounded retry, and `POST /api/notification/<subscribe|unsubscribe>`. **C10–C13 closed** (C11 with one registered residual); C9 still open. Deviations P2-D1–P2-D7 registered in `docs/phase-2-deviations.md`. ⚠️ Three findings for this plan: `json.dumps` ≠ `JSON.stringify` (separators + `ensure_ascii`) is a byte-parity rule that belongs in §4 alongside 5b/5c; adding `ORDER BY id` to the subscription read would **break** parity (heap order is the wire order, verified live); and `{% host %}` has **zero** call sites in v1's templates. |
 | 2026-08-31 | v1.2 | **Phase 2 implemented** (`c72cc7c`); C10–C13 closed alongside. New cross-cutting **rule 5d**: CPython `json.dumps` ≠ `JSON.stringify` (separators + `ensure_ascii`) — this diverges on *every* notification, since all v1 bodies are accented Spanish, and Phase 7 publishes through the same path. Subscription queries must emit **no `ORDER BY`** (verified: heap order ≠ id order on `fondodev`). Handed to `manual-tester`. |
@@ -347,6 +348,16 @@ emit on write paths.
 - `update_user` dispatch on `obj['type']` → `personal` / `finance` / `preferences`, returning
   200/404/409. Finance writes **only changed fields** and recomputes
   `available_quota = total_quota - utilized_quota`.
+- ⚠️ **The `preferences` branch deletes push subscriptions** — added v1.4 after parity finding
+  **F5**, which falsified P2-D4's claim that `remove_all_subscriptions` was dead code.
+  `services/user.py:208-218` compares the stored `notifications` flag with the submitted one
+  and, when it goes **`true → false`**, calls
+  `self.__notification_service.remove_all_subscriptions(id)` — every subscription that member
+  owns, on every device. Phase 2 ported the method (`NotificationService.removeAllSubscriptions`,
+  two DB-backed e2e cells) but could not wire it, because this route did not exist. **Wire it
+  here, on the transition only**, not on every preferences save. It is irreversible from the
+  server's side (the browser only re-subscribes on service-worker activation), which the tester
+  escalated to `business-analyst`.
 - `activate_user`: match `(id, key_activation, identification)`, set password (Django format),
   `is_active = true`, null the key.
 - `DELETE` = **soft delete** (`is_active = false`), role ≤ 0.
@@ -674,8 +685,29 @@ Verified in every phase's parity report, not just the phase that introduces them
     Phases 3–8 needs an `@All()` fallback** (`DrfException.methodNotAllowed()` is the reusable
     piece) or it will 404 where v1 405s. Note the `Allow` header lists *implemented* handlers — a
     different set from *permitted* ones.
+    ⚠️ **Third clause, added v1.4 after finding F1:** `OPTIONS` is one of those methods, and on a
+    DRF API it is **authenticated and permission-checked** like any other (rule 13). Express-side
+    CORS helpers answer it in middleware — `app.enableCors()` answered *every* `OPTIONS` with a
+    204 before the router, the guards and the `@All()` fallback, i.e. it silently disabled
+    authentication on that verb. Only a **genuine preflight** (`Access-Control-Request-Method`
+    present) may short-circuit. See `DjangoCorsMiddleware`.
+    ⚠️ **And a corollary:** anything that shapes a response must be registered in `AppModule`,
+    **never in `main.ts`** — every e2e suite builds the app from `AppModule`, so `main.ts` is
+    unexercised. F1 lived behind a green test asserting the very behaviour it broke.
 13. **`OPTIONS` on a guarded v1 view is authenticated and permission-checked**, and returns DRF's
     browsable-API metadata document when allowed. Registered as deviation P1-D2.
+14. ⚠️ **v1's URL conf is part of the contract, and Express cannot express it.** Django resolves
+    an ordered list of **anchored, case-sensitive** regexes *before* authentication; Express
+    matches case-insensitively, non-strictly, and (since v5) without inline parameter patterns.
+    v1's table is transcribed in `src/common/http/django-url-conf.ts` and enforced by
+    `DjangoUrlResolverMiddleware` ahead of the guards, together with `CommonMiddleware`'s
+    `APPEND_SLASH` 301. It is **fail-closed**: a path absent from the table cannot reach a
+    controller. **Adding a route in any phase means adding its v1 pattern**; a v2-only route
+    (`/health`) is an explicit entry. This replaces the trailing-slash "rule" S7 asked for —
+    v1 has no rule, only an inconsistent table (`^api/loan/?$` but `^api/loan/(?P<id>[0-9]+)$`,
+    with `^api/activity/(?P<id>[0-9]+)/?$` the lone exception), so it is transcribed, not
+    summarised.
+
 11. ⚠️ **All 21 FKs are `DEFERRABLE INITIALLY DEFERRED`** and Prisma cannot express it; the
     baseline SQL is hand-patched. Keep the patch on any future baseline regeneration — without it
     CI databases enforce FKs at statement time while production enforces at commit, so multi-table
@@ -886,8 +918,8 @@ Tracked to closure, not carried forward silently. Source:
 | C11 | `express.json({strict:false})` plus a DRF-shaped non-dict body error; correct the mislabelled parse-error branch and register the >2.5 MB JSON tightening. | P1 · R4/R5 | ✅ **Closed in P2**, with one registered residual: `strict:false` set and six e2e cells pin DRF's `Invalid data. Expected a dictionary, but got <type>.`; the parse-error message now branches on which parser ran; the >2.5 MB JSON tightening is registered. **Residual:** CPython accepts `NaN`/`Infinity` and `JSON.parse` does not — closing that needs a hand-written JSON parser, not a flag. |
 | C12 | **Add `express` and `multer` to `dependencies`.** Both are phantom (transitive) today, so a hoisting change could hand the adapter and the middleware **two different Express instances** — silently unsetting C2's `json replacer`, so every money field would render `"1000"` instead of `1000`. | P1 · R7 | ✅ **Closed in P2** — `express@5.2.1` and `multer@2.2.0` added to `dependencies` at the versions platform-express resolves. |
 | C13 | One e2e cell proving **403 precedes 415/400** on a guarded route. `test/role-matrix.e2e-spec.ts` builds a partial module without `AppModule`, so it keeps Nest's default parser and never exercises the DRF pipeline — acceptable, but it leaves the ordering unproven. | P1 · R8 | ✅ **Closed in P2** — `test/notification.e2e-spec.ts` → *C13*: a permission-denied caller sending `text/plain` (and separately a malformed JSON body) to `POST /api/notification/subscribe` gets **403**, plus a positive control proving the same requests are 415/400 for an allowed caller. Real guarded route, real body-reading handler. |
-| C14 | ⚠️ **`app.enableCors()` (`src/main.ts:41`) terminates every `OPTIONS` with 204 before the router, guards and `@All()` fallback** — with or without an `Origin` header. So a bare `OPTIONS /api/notification/subscribe` is **401/403 in v1 and 204 in v2**, i.e. **auth is bypassed entirely on that verb**. v1's `corsheaders` short-circuits a *genuine* preflight (200) but **not** a bare OPTIONS — that asymmetry is the spec. Also corrects **P1-D2**, whose v2 column claimed 405. | P2 · F1 | 🔴 **Blocking Phase 2** |
-| C9 | **S7 — detail-route trailing slashes.** ⚠️ **Now three instances of one gap**, all needing the same pre-guard URL layer: trailing slashes (S7), v1's `[a-zA-Z]+` operation constraint living in the URL regex (P2-D5), and **case-insensitive routing (F2)** — Express defaults to `caseSensitive: false`, so `POST /API/notification/subscribe` **matches and writes a row** where v1 404s. That widening reaches every Phase 3–8 route, soft delete included. `GET /api/loan/5/` is a Django **404** (v1's detail regexes have no `/?`), but Express's non-strict routing serves it. Note the asymmetry: v1's *collection* routes **do** carry `/?` (`^api/loan/?$`), so only detail routes diverge. | P1 · S7 | ⬜ **Open** — my transcription miss, not the developer's. Needs a §4 rule or an accepted deviation **before Phases 3–8 add detail routes**. |
+| C14 | ⚠️ **`app.enableCors()` terminated every `OPTIONS` with 204 before the router, guards and `@All()` fallback** — with or without an `Origin` header, so a bare `OPTIONS /api/notification/subscribe` was 401/403 in v1 and 204 in v2: **auth bypassed on that verb**. | P2 · F1 | ✅ **Closed** — `enableCors` removed; `DjangoCorsMiddleware` ports `corsheaders 2.4.0` under v1's settings and short-circuits **only** a genuine preflight (which v1 does without requiring `Origin`, and on any path). Bare `OPTIONS` now 401/403; preflight 200 with `Content-Length: 0`, `Vary: Origin`, `Max-Age: 86400`. Registered in `AppModule`, so the e2e suites exercise it. P1-D2's v2 column corrected in `docs/phase-1-deviations.md`. |
+| C9 | **S7 — detail-route trailing slashes**, plus P2-D5 (the `[a-zA-Z]+` operation constraint) and F2 (case-insensitive routing): three instances of one gap, all needing a pre-guard URL layer. | P1 · S7 | ✅ **Closed in P2, in full** (see `docs/phase-2-deviations.md` §2.11 for why not in P3). All 22 v1 `url()` patterns transcribed in `django-url-conf.ts` with the line each came from; `DjangoUrlResolverMiddleware` resolves before the guards and also does `APPEND_SLASH`. **Fail-closed.** `POST /API/notification/subscribe` no longer writes a row, `/api/loan/5/` and `/api/user/5/` 404 as in v1, `POST /password_reset` 301s. 53 unit + 15 e2e cells; the whole `urls.py` swept against the live v1. |
 
 *(C9 was raised in the first review's Phase 1 gate and lost when I transcribed the conditions
 into this table. `nestjs-developer` correctly flagged it rather than acting outside its brief.)*
@@ -920,7 +952,7 @@ set, as defence in depth rather than as the primary control.
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
 | 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab` + C1–C4) | ✅ | n/a | ✅ **APPROVED** | n/a |
 | 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
-| 2 Mail + notifications | 🔴 **parity FAIL → back to dev** | ✅ | ❌ **FAIL** (F1–F5) | ⬜ | ⬜ |
+| 2 Mail + notifications | 🟡 **fixes shipped → re-test** | ✅ (F1–F5 addressed) | 🔄 **re-run** | ⬜ | ⬜ |
 | 3 Users + finance | ⬜ Blocked on P2 | — | — | — | — |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
 | 7 Scheduler *(resequenced)* | ⬜ Blocked on P4 | — | — | — | — |

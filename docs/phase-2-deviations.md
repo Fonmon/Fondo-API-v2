@@ -11,6 +11,14 @@ it must expect as a non-failure, plus how to run the parity checks), and whoever
 `NotificationPublisher` (SQS); `POST /api/notification/<subscribe|unsubscribe>`.
 Also closed: review conditions **C10**, **C11**, **C12**, **C13**.
 
+**Revision 2 (2026-08-31), after the `manual-tester` FAIL** (`docs/parity-phase-2.md`): the
+substance of the phase was unchanged — every SES payload, SQS body, hstore row and the whole
+role matrix were already byte-identical — and all five findings were at the HTTP edge. Fixed
+here: **F1/C14** (`app.enableCors()` bypassed auth on `OPTIONS`), **F2 + P2-D5 + S7/C9** (one
+pre-guard URL layer), **F3** (`QueryDict` last-value semantics) and most of **F4** (response
+headers). **P2-D4 was factually wrong** and is corrected below (F5). New registrations:
+**P2-D8**. Withdrawn: **P2-D5** (now fixed rather than deviated).
+
 ---
 
 ## 1. Registered deviations from v1
@@ -20,10 +28,11 @@ Also closed: review conditions **C10**, **C11**, **C12**, **C13**.
 | **P2-D1** | `send_mail` **mutates the caller's `bcc` list** in place (`bcc.remove(recipient)`), and its `bcc=[]` default argument is Python's shared-mutable-default. | v2 copies the array and never mutates the caller's. | Unobservable. `.remove` only ever *shortens* the shared default, so it stays empty; and all three call sites pass a freshly built list from `get_users_attr('email', [0,2])` (`services/loan.py:98,101`) or a literal. The **removal semantics** are ported exactly — `list.remove` deletes only the first occurrence, which matters because two pairs of live members share an email address. |
 | **P2-D2** | `save_subscription` does `UserProfile.objects.get(id=user_id)` before inserting, purely to obtain the FK; a missing profile raises `DoesNotExist` → 500. | v2 skips the lookup and lets the foreign key enforce it → 500. | Same status, one query fewer. Unreachable in practice: `RolesGuard` already 403s a user with no `fondo_api_userprofile` row (Phase 1). Body differs only in the way already registered as **D13** (Django's HTML error page vs v2's JSON/empty). |
 | **P2-D3** | `subscription['endpoint']` with a `None` value would be stored as SQL NULL and queried with `IS NULL`. | v2 returns **500** for `{"endpoint": null}`. | Reproducing it needs a *different SQL statement* for a payload no browser can produce (`PushSubscription.endpoint` is non-nullable in the Push API). A non-`null` non-string endpoint **is** reproduced — coerced with `pythonStr`, matching `HStoreField.get_prep_value`. |
-| **P2-D4** | `NotificationService.remove_all_subscriptions` exists. | Ported, but **no caller** — as in v1, where it is also dead (verified across `fondo_api/`). | Kept so the service surface matches and Phase 3's soft delete has the obvious hook. Flagged so it is not read as code that crept in. |
-| **P2-D5** | v1's URL regex is `^api/notification/(?P<operation>[a-zA-Z]+)/?$`. An operation containing a digit fails **URL resolution**, so Django 404s **before authentication runs**. | v2 matches any segment in the router and rejects a non-`[a-zA-Z]+` operation inside the handler → same 404 **status** for an authenticated caller, but an **unauthenticated** `POST /api/notification/sub1` is a **401** where v1 is a 404. | Express 5 / path-to-regexp v8 dropped inline parameter patterns, so the constraint cannot live in the route. Fixing the ordering needs a URL-pattern layer that runs before the guards — which is exactly the shape of the open **C9** work (trailing slashes), deliberately deferred to Phase 3 where v1's URL table gets transcribed properly. **Routed to C9, not left silent.** |
+| ~~**P2-D4**~~ | ~~`NotificationService.remove_all_subscriptions` exists.~~ | ~~Ported, but **no caller** — as in v1, where it is also dead.~~ | ⚠️ **WITHDRAWN — the premise was false** (parity finding **F5**). v1 calls it at `fondo_api/services/user.py:218`, from `__update_user_preferences`: `if remove_notifications and not user_preference.notifications: self.__notification_service.remove_all_subscriptions(id)`. So a member turning notifications **off** deletes every push subscription they own, on every device. My grep missed the call because it goes through the private `self.__notification_service` attribute. Nothing about the Phase 2 code changes — it still ships with no caller, because `PATCH /api/user/<id>` is Phase 3 — but this is **not a deviation at all**, and the corrected instruction is: **Phase 3 must wire the call** in the `preferences` branch, or it silently drops the behaviour. The method is now covered by two DB-backed e2e cells (`test/notification.e2e-spec.ts` → *remove_all_subscriptions …*) so Phase 3 only has to connect it. Also escalated to `business-analyst` by the tester — the deletion is irreversible server-side. |
+| ~~**P2-D5**~~ | ~~v1's URL regex is `^api/notification/(?P<operation>[a-zA-Z]+)/?$`, so an operation containing a digit 404s **before authentication**.~~ | ~~v2 matched any segment and rejected it in the handler → 404 for an authenticated caller, **401** for an unauthenticated one.~~ | ✅ **WITHDRAWN — fixed, not deviated.** The pre-guard URL layer (C9, below) enforces `[a-zA-Z]+` where v1 enforces it, in the URL conf, so an unauthenticated `POST /api/notification/sub1` is now a **404 in both**. The in-handler check is deleted rather than kept as belt-and-braces: two places to state one rule is how the two got out of step in the first place. |
 | **P2-D6** | `NotificationSubscriptions.objects.filter(user_id__in=…)` emits no `ORDER BY`; the row order in the SQS body is PostgreSQL's heap order. | v2 emits the same `IN (…)` with no `ORDER BY`. | Recorded as a deviation *from the obvious implementation*, not from v1 — see §2.3. Adding `ORDER BY id` would have **broken** parity. |
 | **P2-D7** | v1's SQS publish happens in a Celery worker with **no retry**; a failure is logged and the message lost. | v2 publishes inline with **3 attempts and exponential backoff** (200 ms, 400 ms). | Plan Phase 2, condition 1 — authorised in advance. Strictly an improvement; the swallow semantics at the boundary are unchanged (condition 2). |
+| **P2-D8** | Response headers v1 emits that v2 does not, and vice versa (parity finding **F4**). | **Most are now matched**, not deviated: `X-Frame-Options: SAMEORIGIN`, `Vary: Origin`, `Vary: Accept`, `Allow: <view methods>`, `Content-Type: application/json` **without** `; charset=utf-8`, and **no** `Content-Type` at all on a zero-byte DRF body — plus `X-Powered-By` and `ETag` removed. **Three residuals are accepted**: (1) v1's error *bodies* are Django's HTML pages where v2 sends JSON or nothing — already **D13**, and the `Content-Type: text/html` that goes with them follows the body; (2) transport headers differ because the servers differ — v1 sends `Server: gunicorn/19.9.0` and `Connection: close`, v2 sends no `Server` and keeps the connection alive; (3) v1 answers a bare `OPTIONS /api-token-auth` with DRF's metadata document, v2 with a 405 — that is **P1-D2**, unchanged. | Everything cheap and observable was matched, because "the response differs and nobody wrote it down" is exactly what the parity gate exists to catch. The residuals are properties of the *server*, not of the API: no client can depend on `Server`, and D13/P1-D2 are separately registered and already accepted. |
 
 Nothing else in Phase 2 departs from v1.
 
@@ -130,6 +139,22 @@ fallback v2 would answer 404 where v1 answers 403. **Every Phase 3–8 controlle
 same fallback for the same reason** — plan rule 12 states the 405 motivation; this is the
 stronger one.
 
+⚠️ **Corrected in revision 2 (parity finding F1).** The paragraph above was true of the
+*controller* and false of the *process*: `main.ts` called `app.enableCors()`, and the `cors`
+package answers **every** `OPTIONS` with a 204 from middleware — before the router, the
+guards and this fallback. So the 403 claimed here for `OPTIONS` was a **204 for anyone**, on
+a route where v1 authenticates. Two lessons, both acted on:
+
+* **A response-shaping decision that lives in `main.ts` is untested.** Every e2e suite builds
+  the app from `AppModule`, so nothing in `main.ts` is exercised — the `OPTIONS` cell in
+  `notification.e2e-spec.ts` passed the whole time. The CORS, clickjacking, URL-resolution and
+  parsing middlewares are now all registered in `AppModule.configure`, and `main.ts` does
+  nothing but validate the environment, listen, and log.
+* **`OPTIONS` is not a formality on a guarded API.** v1's asymmetry — `corsheaders`
+  short-circuits a *genuine* preflight (`Access-Control-Request-Method` present) with a 200
+  and lets a bare `OPTIONS` fall through to authentication — is now ported in
+  `DjangoCorsMiddleware` and pinned by `test/http-edge.e2e-spec.ts`.
+
 ### 2.9 `pending_test_send_notification` was not revived as written
 
 v1's fifth notification test is prefixed `pending_` and never runs. It patches
@@ -147,6 +172,51 @@ so. Phases 3, 4 and 6 must call `sendNotification` **after** their `$transaction
 committed — v1's three `.delay()` sites all sit outside `transaction.atomic()`, and moving the
 publish inside would let an SQS outage roll back loan creations.
 
+### 2.11 C9's scope: the whole URL layer now, not the detail routes in Phase 3
+
+The brief left the choice open — build the layer now, or say why it belongs with Phase 3's
+detail routes. **Now**, for four reasons:
+
+1. **Two of C9's three instances are already live.** F2 (`POST /API/notification/subscribe`
+   wrote a row) and P2-D5 are Phase 2 routes, failing today. Fixing those two without the
+   table means two ad-hoc patches that the Phase 3 layer would then delete.
+2. **The table is not incremental work.** v1's URL conf is 22 lines in two files. Transcribing
+   the four that exist today costs the same as transcribing all 22, and the other 18 are the
+   spec Phases 3–8 have to hit anyway. Splitting it means reading `urls.py` twice.
+3. **Fail-closed only works if it is total.** The value of the layer is that a path v1 does not
+   serve cannot reach a v2 controller. A partial table would have to fail *open* for everything
+   not yet transcribed, which is the current behaviour and therefore no protection at all —
+   and the phase that adds a route is exactly the phase least likely to notice that its
+   trailing-slash variant now resolves.
+4. **The damage is worst in Phase 3.** `DELETE /api/user/5/` is an inert 404 in v1 and a real
+   soft delete in v2, and `key_activation` is null for all 15 live users, so a soft delete is
+   not reversible through the API (plan D14). Landing the layer *with* Phase 3 means the
+   window exists during Phase 3's own parity run; landing it now means it never exists.
+
+The cost is a table with 18 entries for routes v2 does not serve yet. Those entries are inert
+— they let the request through to the Nest router, which 404s it exactly as it does today —
+and each one carries the v1 line it was transcribed from, so the phase that implements the
+route can check it in place rather than inventing it.
+
+**What Phases 3–8 must do:** nothing, except notice. Every v1 route is already in the table.
+Adding a *new* v2-only route (as `/health` is) means adding an entry, and forgetting produces
+an immediate 404 in that phase's own tests.
+
+### 2.12 The repeated-form-field fix reproduces `QueryDict`, not "the last value wins"
+
+F3 looked cosmetic (`endpoint=a&endpoint=b` stored `"['a', 'b']"` instead of `b`) but the
+mechanism matters for Phases 3 and 4, whose bulk uploads are multipart: DRF's `request.data`
+is a `QueryDict`, so **every** consumer — `data['x']`, `data.items()`, and therefore
+`HStoreField.get_prep_value` — sees the last value, while `express.urlencoded` and multer's
+`appendField` both produce an array. The collapse happens once, in the parsing middleware,
+for form and multipart bodies only (JSON needs nothing: CPython and JS agree that a duplicated
+object key keeps the last).
+
+⚠️ The other half of `MultiValueDict`, `getlist`, is deliberately **not** reproduced: no v1
+view calls it (grepped across `fondo_api/`, tests excluded), so nothing depends on the values
+being discarded. If a Phase 3–8 handler ever needs them, `collapseMultiValueFields` is the
+single place that has to change.
+
 ---
 
 ## 3. Review conditions closed
@@ -158,9 +228,17 @@ publish inside would let an SQS outage roll back loan creations.
 | **C12** | Add `express` and `multer` to `dependencies`. | Added at the exact versions `@nestjs/platform-express@12.0.1` resolves — `express@5.2.1`, `multer@2.2.0` — so npm cannot dedupe them apart and hand the adapter and the middleware two Express instances (which would silently unset C2's `json replacer` and render `"1000"` where DRF renders `1000`). |
 | **C13** | One e2e cell proving 403 precedes 415/400 on a guarded route. | `test/notification.e2e-spec.ts` → *C13 — the guard runs before the parser*. Three cells against a **real** guarded route with a **real** body-reading handler (`POST /api/notification/subscribe`, no `@DrfNoRequestData()`): a denied caller sending `text/plain` gets 403, a denied caller sending `{` gets 403, and a **positive control** proves the same two requests are 415 and 400 for an allowed caller — so the 403 is genuinely winning a race rather than the parser being inert. The denied caller is an `auth_user` row with no `fondo_api_userprofile` sibling, which is v1's own 403-for-everyone case. |
 
-**C9 left open**, as briefed. P2-D5 above is a second instance of the same underlying gap
-(v1's URL patterns are not expressible in Express 5 routes) and should be folded into the C9
-work item in Phase 3.
+| **C14** | `app.enableCors()` terminates every `OPTIONS` with a 204 before the router, the guards and the `@All()` fallback — auth bypassed on that verb. | ✅ **Closed.** `app.enableCors()` removed; `DjangoCorsMiddleware` (`src/common/http/django-cors.middleware.ts`) is a port of `corsheaders 2.4.0` under v1's settings, registered in `AppModule`. A **genuine preflight** (`Access-Control-Request-Method` present — v1 does **not** require `Origin`, and does **not** require the URL to resolve) is short-circuited with an empty **200**, `Content-Type: text/html; charset=utf-8`, `Vary: Origin` and, when an `Origin` is present, `Access-Control-Allow-Origin: *` + the allow-headers/methods list + `Max-Age: 86400`. Every other `OPTIONS` reaches the guards: **401** unauthenticated, **403** for every role. 12 unit cells + 7 e2e cells; the whole matrix re-diffed against the running v1 byte for byte. |
+| **C9** | S7 (per-route trailing slashes), P2-D5 (the `[a-zA-Z]+` operation constraint) and F2 (case-insensitive routing) — one pre-guard URL layer. | ✅ **Closed, in full, now rather than in Phase 3** — see §2.11 for the reasoning. `src/common/http/django-url-conf.ts` transcribes **all 22** of v1's `url()` patterns (`api/urls.py` + `fondo_api/urls.py`), each with the v1 line it came from, and `DjangoUrlResolverMiddleware` resolves against it before any guard runs, including `CommonMiddleware`'s `APPEND_SLASH` 301. Fail-closed: a path not in the table cannot reach a controller. 53 unit cells + 15 e2e cells. |
+
+### 3.1 What `nestjs-reviewer` should look at first
+
+The URL table is a **transcription**, and transcriptions are where this migration has been
+wrong before (the `username != email` lockout, the Babel grouping, P2-D4 below). It is worth
+reading `django-url-conf.ts` next to `~/Projects/Fondo-API/fondo_api/urls.py` line by line.
+Each `allow` string in it was read off a live v1 response rather than derived from the view
+class, and every trailing-slash cell in `django-url-conf.spec.ts` was verified with a request
+to the running v1.
 
 ---
 
@@ -216,13 +294,36 @@ It is skipped without that variable. It only `SELECT`s.
 
 ### 4.4 Expected diffs that are **not** failures
 
-* **P2-D5** — unauthenticated `POST /api/notification/sub1`: v1 404 (Django HTML), v2 401.
+* ~~**P2-D5**~~ — **no longer a diff**: unauthenticated `POST /api/notification/sub1` is now
+  a **404 in both**, raised by the URL layer before the guards. Only the 404 *body* differs
+  (D13).
 * **D13** (Phase 0) — every error body that v1 renders as an HTML Django page (unknown URL,
   uncaught 500) is JSON or empty in v2.
 * **500 bodies.** `POST /api/notification/subscribe` with a body that has no `endpoint` is a
   500 in both, but v1 returns Django's HTML page and v2 returns a zero-byte body.
 * **C11's residual** — `POST /api-token-auth` with body `NaN`: v1 400 `non_field_errors …
   got float`, v2 400 `{"detail":"JSON parse error - …"}`.
+
+### 4.4b What changed since the FAIL, and what to re-drive
+
+| Finding | Now | Cheapest way to see it |
+|---|---|---|
+| **F1** | bare `OPTIONS /api/notification/subscribe`: **401** unauthenticated, **403** for every role incl. ADMIN. A genuine preflight (`Access-Control-Request-Method`) is still a **200** with `Content-Length: 0` — *even without an `Origin`, and even on a URL that does not resolve*, both of which are v1's behaviour. | `curl -i -X OPTIONS …` with and without the header, against both ports |
+| **F2** | `POST /API/notification/subscribe` → **404**, **no row**. So is every other mis-cased path. | the same request that wrote row 1550 |
+| **P2-D5** | `POST /api/notification/sub1` → **404 in both**, authenticated or not | unauthenticated `curl` |
+| **S7 / C9** | v1's whole URL table is enforced pre-guard, including `/api/loan/5/` → 404, `/api/user/5/` → 404, `/api/activity/5/` → **200-path** (the one detail route with `/?`), and `POST /password_reset` → **301** to `/password_reset/` | worth sweeping every row of `fondo_api/urls.py` with `--path-as-is`, both slashed and bare |
+| **F3** | a repeated `endpoint` field stores the **last** value, form and multipart alike | the duplicate-field body from §7 of the report |
+| **F4** | `Vary`, `Allow`, `X-Frame-Options`, `Content-Type` (no charset; **absent** on zero-byte bodies) all match; `X-Powered-By` and `ETag` are gone. Residuals registered as **P2-D8** | diff the header block of any response, ignoring `Server`/`Date`/`Connection` |
+| **F5** | doc corrected; `remove_all_subscriptions` now has two DB-backed e2e cells and a Phase 3 instruction | read P2-D4 above |
+
+⚠️ **Two things worth adversarial attention**, because they are new code rather than fixes:
+
+1. **The URL table is fail-closed.** If it is wrong in the *restrictive* direction, v2 404s a
+   URL v1 serves — the opposite failure from F2 and just as bad. Sweeping every pattern in
+   `fondo_api/urls.py` against both apps (a 401 from v1 means "resolved") is the direct check.
+2. **`Location` on the `APPEND_SLASH` 301** is built from the raw request target rather than
+   Django's decoded-then-`iri_to_uri`-re-encoded path. They agree for the four routes that can
+   reach that branch; a percent-encoded probe would show the difference.
 
 ### 4.5 Worth checking specifically
 
@@ -255,6 +356,23 @@ It is skipped without that variable. It only `SELECT`s.
    methods, one of which (`pending_test_send_notification`) never runs — already noted in the
    plan's `pending_test_` bullet, but the row count and the bullet disagree. Resolution
    recorded in §2.9 above: not revived as written.
-6. **Phase 3's `create_user` rollback now has a verified counterpart.** `MailService.sendMail`
+6. **A pre-guard URL layer is a cross-cutting rule, not a Phase 2 detail** (§2.11). Suggested
+   as §4 rule 14: *v1's URL conf is transcribed in `django-url-conf.ts` and enforced before
+   the guards; a path absent from it cannot reach a controller. Adding a route means adding
+   its v1 pattern.* This subsumes S7/C9 and removes the need for a trailing-slash "rule",
+   which v1 does not have.
+7. **Rule 12 needs a third clause.** It covers Nest-404-vs-DRF-405 and (via §2.8) the 403
+   case. The `OPTIONS` case is a *third*: Express frameworks answer `OPTIONS` in middleware by
+   default, and on a DRF API `OPTIONS` is an authenticated, permission-checked method. Any
+   `cors`-style middleware must therefore be scoped to genuine preflights.
+8. **Anything that shapes a response belongs in `AppModule`, never in `main.ts`** — the e2e
+   suites build the app from `AppModule` and cannot see `main.ts`. That gap is the entire
+   mechanism of F1: a green suite asserting `OPTIONS → 403` while production answered 204.
+   Worth a sentence in §4 next to rule 12.
+9. **P2-D4's correction changes Phase 3's scope** (F5): `PATCH /api/user/<id>` with
+   `type=preferences` must call `removeAllSubscriptions(id)` when `notifications` goes
+   `true → false`, and only then (v1 compares the stored value with the submitted one first).
+
+10. **Phase 3's `create_user` rollback now has a verified counterpart.** `MailService.sendMail`
    returns `false` for *any* failure including a template miss, and never throws. Three unit
    tests pin it (SES rejects, SES throws synchronously, template unknown).
