@@ -1,8 +1,8 @@
 import { All, Body, Controller, HttpCode, HttpStatus, Param, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
+import { drfOptionsMetadata, type DrfSimpleMetadata } from '../common/http/drf-metadata';
 import { DrfNoRequestData } from '../common/http/drf-parser.interceptor';
-import { DrfException } from '../common/http/drf.exception';
 import { UserService } from './user.service';
 
 /**
@@ -47,11 +47,17 @@ export class UserActivateController {
     await this.users.activateUser(parseActivationId(rawId), body);
   }
 
-  /** Unlike the guarded views, this one really does reach DRF's 405. */
+  /**
+   * Unlike the guarded views, this one really does reach DRF's 405 — and DRF's `OPTIONS`
+   * handler, which the guarded views never do (`list_permissions` has no `OPTIONS` key, so
+   * `APIRolePermission`'s bare `except` denies it for every role). v1 answers `OPTIONS` here
+   * with `SimpleMetadata`'s 172-byte document; parity finding **F4**.
+   */
   @DrfNoRequestData()
+  @HttpCode(HttpStatus.OK)
   @All(':id')
-  methodNotAllowed(@Req() request: Request): never {
-    throw DrfException.methodNotAllowed(request.method, 'POST, OPTIONS');
+  methodNotAllowed(@Req() request: Request): DrfSimpleMetadata {
+    return drfOptionsMetadata(request.method, 'UserActivateView', 'POST, OPTIONS');
   }
 }
 

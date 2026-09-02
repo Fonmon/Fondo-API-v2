@@ -765,8 +765,15 @@ Verified in every phase's parity report, not just the phase that introduces them
     ⚠️ **And a corollary:** anything that shapes a response must be registered in `AppModule`,
     **never in `main.ts`** — every e2e suite builds the app from `AppModule`, so `main.ts` is
     unexercised. F1 lived behind a green test asserting the very behaviour it broke.
-13. **`OPTIONS` on a guarded v1 view is authenticated and permission-checked**, and returns DRF's
-    browsable-API metadata document when allowed. Registered as deviation P1-D2.
+13. **`OPTIONS` is a real, authenticated, permission-checked method.** On a **guarded** view it
+    is always a **403**: `list_permissions` has no `OPTIONS` key for any of the 14 views, so
+    `APIRolePermission`'s bare `except` denies it for every role, ADMIN included. On the two
+    views that clear `permission_classes` (`ObtainAuthToken`, `UserActivateView`) it reaches
+    `APIView.options()` and returns `SimpleMetadata`'s four-key document — 164 and 172 bytes,
+    reproduced verbatim in `src/common/http/drf-metadata.ts` (parity finding **F4**;
+    deviation P1-D2 withdrawn). Authentication still runs first, so a broken token 401s there
+    too. What v2 does **not** ship is the browsable API's HTML rendering under
+    `Accept: text/html` — registered as **P3-D8**.
 14. ⚠️ **v1's URL conf is part of the contract, and Express cannot express it.** Django resolves
     an ordered list of **anchored, case-sensitive** regexes *before* authentication; Express
     matches case-insensitively, non-strictly, and (since v5) without inline parameter patterns.

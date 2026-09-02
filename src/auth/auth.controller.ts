@@ -1,7 +1,7 @@
 import { All, Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
+import { drfOptionsMetadata, type DrfSimpleMetadata } from '../common/http/drf-metadata';
 import { DrfNoRequestData } from '../common/http/drf-parser.interceptor';
-import { DrfException } from '../common/http/drf.exception';
 import { AuthService, type AuthTokenResponse } from './auth.service';
 import { Public } from './decorators/public.decorator';
 
@@ -38,18 +38,22 @@ export class AuthController {
    * Declared **after** {@link login} so Express matches the POST route first; `@All` would
    * otherwise swallow it.
    *
-   * ⚠️ Registered deviation P1-D2: v1 answers `OPTIONS` with DRF's browsable-API metadata
-   * document (`200`), not a 405. v2 does not ship the browsable API, so OPTIONS lands here.
+   * ⚠️ **`OPTIONS` is not one of them.** `APIView` implements `options()`, and
+   * `permission_classes = ()` means nothing refuses it first, so v1 answers **200** with
+   * `SimpleMetadata`'s document — 164 bytes, captured from the live stack and reproduced by
+   * {@link drfOptionsMetadata}. v2 answered 405 (parity finding **F4**); deviation P1-D2,
+   * which registered that 405, is **withdrawn**.
    *
    * `@DrfNoRequestData()` closes review condition **C10**: `APIView.dispatch` resolves
    * `http_method_not_allowed` and raises without ever touching `request.data`, so a `PUT`
    * carrying a `text/plain` body is a **405**, not the 415 the parser interceptor would
-   * otherwise raise first.
+   * otherwise raise first. `options()` does not read it either.
    */
   @Public()
   @DrfNoRequestData()
+  @HttpCode(HttpStatus.OK)
   @All('api-token-auth')
-  methodNotAllowed(@Req() request: Request): never {
-    throw DrfException.methodNotAllowed(request.method, 'POST, OPTIONS');
+  methodNotAllowed(@Req() request: Request): DrfSimpleMetadata {
+    return drfOptionsMetadata(request.method, 'ObtainAuthToken', 'POST, OPTIONS');
   }
 }

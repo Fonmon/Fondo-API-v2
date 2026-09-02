@@ -332,6 +332,43 @@ describe('Phase 1 — token authentication', () => {
       expect(response.headers.allow).toBe('POST, OPTIONS');
     });
 
+    /**
+     * Parity finding **F4**. `APIView` implements `options()` and `ObtainAuthToken` clears
+     * `permission_classes`, so nothing refuses it: v1 answers 200 with `SimpleMetadata`'s
+     * document. Body captured from the live v1; deviation **P1-D2**, which registered v2's
+     * 405 here, is withdrawn.
+     */
+    it('answers OPTIONS with DRF’s metadata document, 164 bytes (F4)', async () => {
+      const response = await request(app.getHttpServer()).options('/api-token-auth');
+
+      expect(response.status).toBe(200);
+      expect(response.text).toBe(
+        '{"name":"Obtain Auth Token","description":"","renders":["application/json"],' +
+          '"parses":["application/x-www-form-urlencoded","multipart/form-data","application/json"]}',
+      );
+      expect(response.headers['content-length']).toBe('164');
+      expect(response.headers['content-type']).toBe('application/json');
+      expect(response.headers.allow).toBe('POST, OPTIONS');
+      // JSONRenderer only — the one view in the service without `Vary: Accept`.
+      expect(response.headers.vary).toBe('Origin');
+    });
+
+    it('still authenticates OPTIONS — a bad token 401s before options() runs', async () => {
+      // `permission_classes = ()` clears permissions, never authenticators. The control that
+      // F4 did not widen the exemption F3 makes for the *Django* views.
+      const response = await request(app.getHttpServer())
+        .options('/api-token-auth')
+        .set('Authorization', `Token ${'0'.repeat(40)}`);
+
+      expect(response.status).toBe(401);
+      expect(response.body).toEqual({ detail: 'Invalid token.' });
+    });
+
+    it('serves the same document on the slashed form of the route', async () => {
+      const response = await request(app.getHttpServer()).options('/api-token-auth/').expect(200);
+      expect(response.headers['content-length']).toBe('164');
+    });
+
     describe('C10 / R1 — the 405 fallback never reads the body', () => {
       // `APIView.dispatch` resolves `http_method_not_allowed` and raises from there;
       // `request.data` is never touched, so no parser is ever negotiated. Without

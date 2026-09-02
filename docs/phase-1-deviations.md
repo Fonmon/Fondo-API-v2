@@ -14,7 +14,7 @@ The DRF response bodies this phase had to pin are in
 | # | v1 behavior | v2 behavior | Rationale |
 |---|---|---|---|
 | **P1-D1** | `GET /health` does not exist. | Marked `@Public()`. | Phase 1 makes the guards global and default-deny; without this the Phase 0 liveness probe would 401. The route already had no v1 counterpart (P0-D2). |
-| **P1-D2** | `OPTIONS /api-token-auth` returns DRF's browsable-API metadata document: `200 {"name":"Obtain Auth Token","description":"","renders":[…],"parses":[…]}`. | `405 {"detail":"Method \"OPTIONS\" not allowed."}` with `Allow: POST, OPTIONS`. | v2 ships no browsable API and no `OPTIONS` metadata layer. ⚠️ **Corrected 2026-08-31** (parity finding F1): this row previously described a v2 behaviour that was not happening. `app.enableCors()` answered **every** `OPTIONS` with a **204** before the router, so the real v2 response was 204, not the 405 documented here — and the same middleware bypassed authentication on `OPTIONS` for *every* route (condition C14). The CORS middleware is now a port of v1's `corsheaders`, which short-circuits only a **genuine preflight**; a bare `OPTIONS` reaches the route, so this deviation is now real as written and pinned by an e2e cell. Revisit only if a client turns out to depend on the metadata document. |
+| ~~**P1-D2**~~ | `OPTIONS /api-token-auth` returns DRF's browsable-API metadata document: `200 {"name":"Obtain Auth Token","description":"","renders":[…],"parses":[…]}`. | **Implemented, 2026-09-02 — deviation withdrawn.** v2 answers the same 200 and the same 164 bytes; `OPTIONS /api/user/activate/<id>` answers `UserActivateView`'s 172-byte document likewise. | ⚠️ **Withdrawn** (parity finding **F4**). It was registered as "v2 ships no browsable API and no `OPTIONS` metadata layer", but the metadata document is not the browsable API — it is `SimpleMetadata.determine_metadata`, four static keys read off the view's own class attributes, and both documents are constants. Reproducing them cost less than carrying the deviation, and carrying it would have meant extending it to every public view a later phase adds. `src/common/http/drf-metadata.ts` holds both, captured from the live v1 rather than derived. The **residual** is the browsable API proper, now registered as **P3-D8**. Earlier correction (2026-08-31, parity finding F1) stands: before that, `app.enableCors()` answered every `OPTIONS` with a 204 before the router, bypassing authentication on that verb for every route (condition C14). |
 | **P1-D3** | Django's `PBKDF2PasswordHasher` transparently **upgrades** a hash on login when `must_update` is true (different algorithm or iteration count). | v2 verifies and never rehashes. | Every `auth_user` row in `fondodev` is already `pbkdf2_sha256$150000`, so `must_update` is false for all of them and the two behaviors are observationally identical today. Rehash-on-login is on the post-cutover backlog (plan §9) and would be a *write* to a table v1 also owns. |
 | **P1-D4** | `check_password` supports `pbkdf2_sha1`, `argon2` and `bcrypt_sha256` as well (Django's default `PASSWORD_HASHERS` list). | Only `pbkdf2_sha256` verifies; anything else returns `false`, i.e. a normal failed login. | No such row exists (verified across all 15 `auth_user` rows), v1 never writes one, and three unexercised code paths in a credential check are a liability. A future foreign hash degrades to "wrong password", not to a crash. |
 
@@ -170,8 +170,12 @@ the API.
    v2 returns `{"message": …}` (Phase 0's filter). Pre-existing and probably not worth
    fixing, but `manual-tester` will see it, so it should be registered somewhere.
 
-9. **`OPTIONS` on a guarded v1 view is authenticated and permission-checked** and returns
-   DRF's metadata document when allowed. v2 has no equivalent (P1-D2).
+9. **`OPTIONS` on a guarded v1 view is authenticated and permission-checked**, and would
+   return DRF's metadata document if it were ever allowed. It never is: `list_permissions`
+   has no `OPTIONS` key for **any** view, so `APIRolePermission`'s bare `except` denies it for
+   every role, ADMIN included — measured. v2 matches. The document is reachable only on the
+   two views that clear `permission_classes`, and since 2026-09-02 v2 serves it there too
+   (P1-D2 withdrawn, parity finding F4).
 
 10. **The plan says "14 view classes × each method in `list_permissions`".** The captured
     ground truth deliberately goes wider — 14 × **5 methods** × 4 roles = 280 — because the

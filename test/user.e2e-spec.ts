@@ -1189,6 +1189,52 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
     expect(response.headers.allow).toBe('POST, OPTIONS');
   });
 
+  /**
+   * Parity finding **F4**, the Phase 3 half. `OPTIONS` is reachable here for the same reason
+   * the 405 is: `permission_classes = []`, so `APIRolePermission` never gets to deny it.
+   * Body captured from the live v1.
+   */
+  describe('F4 — OPTIONS on the activation route is DRF’s metadata document', () => {
+    it('answers 200 with the 172-byte document', async () => {
+      const response = await request(app.getHttpServer())
+        .options('/api/user/activate/1')
+        .expect(200);
+
+      expect(response.text).toBe(
+        '{"name":"User Activate","description":"","renders":["application/json","text/html"],' +
+          '"parses":["application/json","application/x-www-form-urlencoded","multipart/form-data"]}',
+      );
+      expect(response.headers['content-length']).toBe('172');
+      expect(response.headers['content-type']).toBe('application/json');
+      expect(response.headers.allow).toBe('POST, OPTIONS');
+      expect(response.headers.vary).toBe('Accept, Origin');
+    });
+
+    it('does not depend on the id existing — no row is read', async () => {
+      await request(app.getHttpServer()).options('/api/user/activate/999999').expect(200);
+    });
+
+    it('401s OPTIONS carrying a broken token, as DRF authenticates first', async () => {
+      const response = await request(app.getHttpServer())
+        .options('/api/user/activate/1')
+        .set('Authorization', `Token ${'0'.repeat(40)}`);
+
+      expect(response.status).toBe(401);
+      expect(response.body).toEqual({ detail: 'Invalid token.' });
+    });
+
+    it('leaves a GUARDED view’s OPTIONS a 403 — list_permissions has no OPTIONS key', async () => {
+      // The control: v1 denies `OPTIONS` on every guarded view for every role, ADMIN
+      // included, through `APIRolePermission`'s bare `except`. F4 must not have widened that.
+      const response = await request(app.getHttpServer()).options('/api/user/power').set(asAdmin());
+
+      expect(response.status).toBe(403);
+      expect(response.body).toEqual({
+        detail: 'You do not have permission to perform this action.',
+      });
+    });
+  });
+
   // ==========================================================================
   // PATCH /api/user — the monthly TSV
   // ==========================================================================
