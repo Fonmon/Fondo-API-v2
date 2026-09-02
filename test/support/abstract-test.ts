@@ -40,7 +40,10 @@ export interface SeededUser {
 const passwords = new DjangoPasswordService();
 
 /**
- * Deletes every row Phases 1-2 can touch, in FK-safe order.
+ * Deletes every row Phases 1-3 can touch, in FK-safe order.
+ *
+ * Phase 3 added `fondo_api_power`, `fondo_api_schedulertask` (the birthday task) and
+ * `fondo_api_savingaccount` (read by `UserFinanceSerializer.get_total_savingaccounts`).
  *
  * The e2e database is disposable (`test/test-database.ts`) and never the shared dev one, but
  * suites still start from a clean slate so ordering between files cannot matter.
@@ -54,6 +57,7 @@ export async function resetDatabase(prisma: PrismaService): Promise<void> {
   await assertDisposableDatabase(TEST_DATABASE_URL);
   await prisma.$executeRawUnsafe(
     'TRUNCATE TABLE authtoken_token, fondo_api_notificationsubscriptions, ' +
+      'fondo_api_schedulertask, fondo_api_power, fondo_api_savingaccount, ' +
       'fondo_api_userfinance, fondo_api_userpreference, fondo_api_userprofile, auth_user ' +
       'RESTART IDENTITY CASCADE',
   );

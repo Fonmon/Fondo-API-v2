@@ -323,8 +323,11 @@ export class UserService {
    * `get_users_attr(attr, roles=None)` — the ids or emails of the active members, in the same
    * unordered form as {@link getUsersBirthdate}.
    */
-  async getUserIds(roles?: readonly number[]): Promise<number[]> {
-    const users = await this.prisma.userProfile.findMany({
+  async getUserIds(
+    roles?: readonly number[],
+    client: UserProfileReader = this.prisma,
+  ): Promise<number[]> {
+    const users = await client.userProfile.findMany({
       where: {
         auth_user: { is_active: true },
         ...(roles === undefined ? {} : { role: { in: [...roles] } }),
@@ -649,7 +652,9 @@ export class UserService {
     const thisYear = new Date().getFullYear();
     const runDate = birthdayInYear(user.birthdate, thisYear);
 
-    const userIds = await this.getUserIds();
+    // Read through the transaction client: v1 runs this inside `transaction.atomic()`, so it
+    // must see the same snapshot as the write that follows it.
+    const userIds = await this.getUserIds(undefined, tx);
     // D20: `list.remove` raises ValueError when the value is absent, which it is for every
     // inactive member. `indexOf` + `splice` reproduces "remove the first occurrence" without
     // the exception.
@@ -704,11 +709,12 @@ export class UserService {
     identification: bigint | null,
     obj: Record<string, unknown>,
     quiet = false,
+    client: UserSqlClient = this.prisma,
   ): Promise<boolean> {
     const finance =
       id !== null
-        ? await this.readFinance({ user_id: id })
-        : await this.readFinance({ user: { identification: identification as bigint } });
+        ? await this.readFinance({ user_id: id }, client)
+        : await this.readFinance({ user: { identification: identification as bigint } }, client);
 
     if (finance === null) {
       if (quiet) {
@@ -734,7 +740,7 @@ export class UserService {
 
     const total = toDjangoInt(totalQuota, 'total_quota');
     const utilized = toDjangoInt(utilizedQuota, 'utilized_quota');
-    await this.prisma.userFinance.update({
+    await client.userFinance.update({
       where: { id: finance.id },
       data: {
         contributions: toDjangoInt(contributions, 'contributions'),
@@ -934,7 +940,10 @@ export class UserService {
    */
   async bulkUpdateUsers(fileContents: Buffer): Promise<void> {
     const lines = djangoFileLines(fileContents);
-    await this.prisma.$transaction(async () => {
+    // ⚠️ The transaction client has to be threaded all the way down: a `this.prisma` call
+    // inside an interactive transaction runs on a **different** connection and survives the
+    // rollback, which would leave the first half of a rejected monthly file applied.
+    await this.prisma.$transaction(async (tx) => {
       for (const line of lines) {
         const data = line.trim().split('\t');
         const identification = toDjangoInt(requireColumn(data, 0), 'identification');
@@ -944,7 +953,7 @@ export class UserService {
           contributions: parseMoneyColumn(data, 3),
           utilized_quota: parseMoneyColumn(data, 4),
         };
-        const found = await this.updateUserFinance(null, identification, info, true);
+        const found = await this.updateUserFinance(null, identification, info, true, tx);
         if (!found) {
           this.logger.error(`User with identification: ${identification}, not exists`);
         }
@@ -975,7 +984,10 @@ export class UserService {
    * only writer and it runs inside a transaction — so the application-level rule is the whole
    * of the fix until then.
    */
-  private async readFinance(where: Prisma.UserFinanceWhereInput): Promise<{
+  private async readFinance(
+    where: Prisma.UserFinanceWhereInput,
+    client: UserSqlClient = this.prisma,
+  ): Promise<{
     id: number;
     contributions: bigint;
     balance_contributions: bigint;
@@ -984,7 +996,7 @@ export class UserService {
     utilized_quota: bigint;
     last_modified: Date;
   } | null> {
-    return this.prisma.userFinance.findFirst({ where, orderBy: { id: 'asc' } });
+    return client.userFinance.findFirst({ where, orderBy: { id: 'asc' } });
   }
 
   /** {@link readFinance}'s counterpart for `UserPreference` — same D11 reasoning. */
@@ -1000,6 +1012,22 @@ export class UserService {
     });
   }
 }
+
+/**
+ * Either the pooled client or an interactive-transaction client.
+ *
+ * ⚠️ Not cosmetic: Prisma's `$transaction(async tx => …)` hands out a client bound to the
+ * transaction's connection, and anything still calling `this.prisma` inside the callback runs
+ * on a *different* connection — committed independently and immune to the rollback. That is
+ * how `bulk_update_users`' `@transaction.atomic` stopped being atomic the first time, caught by
+ * the malformed-line regression cell.
+ */
+type UserSqlClient =
+  Pick<PrismaService, 'userFinance'> | Pick<Prisma.TransactionClient, 'userFinance'>;
+
+/** Same reasoning as {@link UserSqlClient}, for the `user_ids` read inside the atomic block. */
+type UserProfileReader =
+  Pick<PrismaService, 'userProfile'> | Pick<Prisma.TransactionClient, 'userProfile'>;
 
 /** Internal marker so the bare-except port does not log a legitimate 404 as a failure. */
 class PreferencesNotFound extends Error {}
