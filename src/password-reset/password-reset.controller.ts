@@ -1,6 +1,6 @@
 import { All, Controller, HttpStatus, Param, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { Public } from '../auth/decorators/public.decorator';
+import { DjangoView } from '../auth/decorators/django-view.decorator';
 import { DjangoStack, onBeforeHeaders } from '../common/http/before-headers';
 import { patchVaryHeaders } from '../common/http/django-cors.middleware';
 import { DrfNoRequestData } from '../common/http/drf-parser.interceptor';
@@ -98,7 +98,17 @@ import { PasswordResetService } from './password-reset.service';
  * That is why the depths below are `VIEW`, `SESSION` and `CSRF` rather than one convenient
  * constant.
  */
-@Public()
+/**
+ * ⚠️ `@DjangoView()`, **not** `@Public()`.
+ *
+ * `@Public()` is `permission_classes = []` — a DRF view with its permissions cleared, whose
+ * authenticators still run. These four are not DRF views at all, so an
+ * `Authorization: Token …` header is a header Django ignores. v2 answered **401** for an
+ * invalid or inactive token on all four routes (parity finding **F3**), which locked a member
+ * with a stale token out of the one page they need when their session breaks. See
+ * `django-view.decorator.ts`.
+ */
+@DjangoView()
 @Controller()
 export class PasswordResetController {
   /** `django.contrib.auth.views.INTERNAL_RESET_URL_TOKEN`. */

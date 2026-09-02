@@ -12,10 +12,15 @@ export const IS_PUBLIC_KEY = 'fondo:isPublic';
  * still fails the request with 401 even on a public route. Verified against the running v1
  * stack; {@link TokenAuthGuard} reproduces it.
  *
- * Exactly three routes carry this in v1 and no more (`MIGRATION_PLAN.md` Phase 1):
+ * Exactly two routes carry this in v1 and no more (`MIGRATION_PLAN.md` Phase 1):
  *  * `POST /api-token-auth` (`ObtainAuthToken.permission_classes = ()`) — Phase 1,
- *  * `POST /api/user/activate/<id>` (`UserActivateView`) — Phase 3,
- *  * `POST /password_reset/` (`PasswordResetView`, a Django view outside DRF) — Phase 3.
+ *  * `POST /api/user/activate/<id>` (`UserActivateView`) — Phase 3.
+ *
+ * ⚠️ The four password-reset routes are **not** in that list, although this comment used to
+ * say they were. `permission_classes` is a DRF attribute and they are `django.contrib.auth`
+ * views: there is nothing to clear, and — the part that mattered — no authenticator to run
+ * either. They carry `@DjangoView()` instead; see `django-view.decorator.ts` and parity
+ * finding **F3**.
  *
  * `GET /health` also carries it: it is a v2-only route (deviation P0-D2) with no v1
  * counterpart, and it must answer before any credential exists.

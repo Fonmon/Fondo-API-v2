@@ -2,6 +2,7 @@ import { InternalServerErrorException, Logger, type ExecutionContext } from '@ne
 import { Reflector } from '@nestjs/core';
 import type { DjangoUrlPattern, ResolvedViewName } from '../../common/http/django-url-conf';
 import { DrfException } from '../../common/http/drf.exception';
+import { IS_DJANGO_VIEW_KEY } from '../decorators/django-view.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { V1_VIEW_KEY } from '../decorators/v1-view.decorator';
 import { ALL_ROLES, Role } from '../permissions/roles';
@@ -21,10 +22,20 @@ function user(role: Role | null, id = 7): AuthenticatedUser {
 /**
  * A Reflector stub keyed the way `getAllAndOverride` is called: handler first, then class.
  */
-function reflectorFor(metadata: { isPublic?: boolean; v1View?: string }): Reflector {
+function reflectorFor(metadata: {
+  isPublic?: boolean;
+  v1View?: string;
+  isDjangoView?: boolean;
+}): Reflector {
   return {
     getAllAndOverride: (key: string) =>
-      key === IS_PUBLIC_KEY ? metadata.isPublic : key === V1_VIEW_KEY ? metadata.v1View : undefined,
+      key === IS_PUBLIC_KEY
+        ? metadata.isPublic
+        : key === V1_VIEW_KEY
+          ? metadata.v1View
+          : key === IS_DJANGO_VIEW_KEY
+            ? metadata.isDjangoView
+            : undefined,
   } as unknown as Reflector;
 }
 
@@ -254,5 +265,50 @@ describe('RolesGuard (IsAuthenticated + APIRolePermission)', () => {
     const guard = new RolesGuard(reflectorFor({}));
     const context = { getType: () => 'ws' } as unknown as ExecutionContext;
     expect(guard.canActivate(context)).toBe(true);
+  });
+
+  /**
+   * Parity finding **F3**, permission half. A `django.contrib.auth` view has no
+   * `permission_classes` for `permission_classes = []` to clear — DRF is not in its stack —
+   * so an anonymous request must reach it, and so must an authenticated one, with the same
+   * result. The exemption is granted only when the URL table agrees the route has no DRF
+   * layer; otherwise the guard runs, which is the fail-closed direction.
+   */
+  describe('F3 — a plain Django view is not permission-checked either', () => {
+    const djangoRoute = (): DjangoUrlPattern => route('PasswordResetView');
+
+    it('lets an anonymous request through, with no 401', () => {
+      const guard = new RolesGuard(reflectorFor({ isDjangoView: true }));
+
+      expect(guard.canActivate(contextFor('GET', undefined, djangoRoute()))).toBe(true);
+    });
+
+    it('lets an authenticated request through without consulting the role matrix', () => {
+      const guard = new RolesGuard(reflectorFor({ isDjangoView: true }));
+
+      for (const role of ALL_ROLES) {
+        expect(guard.canActivate(contextFor('PUT', user(role), djangoRoute()))).toBe(true);
+      }
+    });
+
+    it('ignores the decorator on a DRF route — the exemption needs both halves', () => {
+      const guard = new RolesGuard(reflectorFor({ isDjangoView: true, v1View: 'UserView' }));
+      const drfRoute: DjangoUrlPattern = {
+        regex: /^api\/user\/?$/,
+        view: 'UserView',
+        drf: { allow: 'GET, POST, PATCH, HEAD, OPTIONS', varyAccept: true },
+      };
+
+      // `UserView.POST` is ADMIN-only, so a MEMBER must still be refused.
+      expect(() => guard.canActivate(contextFor('POST', user(Role.MEMBER), drfRoute))).toThrow(
+        DrfException,
+      );
+    });
+
+    it('ignores the decorator when the URL layer resolved nothing', () => {
+      const guard = new RolesGuard(reflectorFor({ isDjangoView: true }));
+
+      expect(() => guard.canActivate(contextFor('GET', user(Role.ADMIN)))).toThrow(DrfException);
+    });
   });
 });

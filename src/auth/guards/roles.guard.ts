@@ -9,6 +9,7 @@ import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import type { RequestWithDjangoRoute } from '../../common/http/django-url-conf';
 import { DrfException } from '../../common/http/drf.exception';
+import { isPlainDjangoView } from '../decorators/django-view.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { V1_VIEW_KEY } from '../decorators/v1-view.decorator';
 import { isRoleAllowed, type V1ViewName } from '../permissions/permission-matrix';
@@ -73,6 +74,12 @@ export class RolesGuard implements CanActivate {
 
   canActivate(context: ExecutionContext): boolean {
     if (context.getType() !== 'http') {
+      return true;
+    }
+
+    // A plain Django view has no `permission_classes` to clear, because DRF is not in its
+    // stack at all. Same exemption `TokenAuthGuard` makes, for the same reason (F3).
+    if (isPlainDjangoView(this.reflector, context)) {
       return true;
     }
 

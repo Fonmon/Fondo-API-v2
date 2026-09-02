@@ -1,7 +1,9 @@
 import { Injectable, type CanActivate, type ExecutionContext } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { DrfException } from '../../common/http/drf.exception';
 import { AuthService } from '../auth.service';
+import { isPlainDjangoView } from '../decorators/django-view.decorator';
 import type { RequestWithUser } from '../types/authenticated-user';
 
 /**
@@ -24,16 +26,31 @@ import type { RequestWithUser } from '../types/authenticated-user';
  *
  * This guard therefore never denies for "no credentials"; it only ever throws for a header
  * that claims to carry a token and fails to.
+ *
+ * ⚠️ **And only on DRF routes.** `authentication_classes` is a DRF concept; the four
+ * `django.contrib.auth` password-reset views have no DRF layer at all, so an `Authorization`
+ * header there is an ordinary header Django ignores. `@DjangoView()` marks those controllers
+ * and this guard steps aside for them — parity finding **F3**, where a bad token turned the
+ * account-recovery page into a 401. See {@link isPlainDjangoView} for why the decorator alone
+ * is not enough to earn the exemption.
  */
 @Injectable()
 export class TokenAuthGuard implements CanActivate {
   /** `TokenAuthentication.keyword`. */
   static readonly KEYWORD = 'token';
 
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly reflector: Reflector,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     if (context.getType() !== 'http') {
+      return true;
+    }
+
+    // Not a DRF view -> no `authentication_classes` -> the header is never read (F3).
+    if (isPlainDjangoView(this.reflector, context)) {
       return true;
     }
 

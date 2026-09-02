@@ -567,6 +567,99 @@ describe('Phase 3 — password reset', () => {
   });
 
   /**
+   * Parity finding **F3**, the 24 diverging cells reproduced.
+   *
+   * These four routes are `django.contrib.auth` views: DRF is not in their stack, so there is
+   * no `TokenAuthentication` to run and an `Authorization` header — invalid, or valid but
+   * belonging to a deactivated member — is a header Django ignores. v2 answered **401**,
+   * which is the account-recovery path refusing exactly the member who needs it.
+   *
+   * Measured on the live v1: 200 / 200 / 403 for `{GET, OPTIONS, PUT}` on each route,
+   * identical with and without the header. The `PUT` 403 is the CSRF failure page, i.e. the
+   * request reached the view layer.
+   */
+  describe('F3 — the reset pages are never authenticated', () => {
+    const ROUTES = [
+      '/password_reset/',
+      '/password_reset/done/',
+      '/reset/done/',
+      '/reset/MTM/aaaaa-bbbbbbbb/',
+    ] as const;
+
+    /** `{method: expected status}` — v1's, for every one of the four routes. */
+    const EXPECTED: ReadonlyArray<readonly ['get' | 'options' | 'put', number]> = [
+      ['get', 200],
+      ['options', 200],
+      ['put', 403],
+    ];
+
+    const withoutCsrfField = (html: string): string =>
+      html.replace(/name="csrfmiddlewaretoken" value="[^"]*"/g, 'name="csrfmiddlewaretoken"');
+
+    let invalidToken: string;
+    let inactiveToken: string;
+
+    beforeAll(async () => {
+      invalidToken = 'deadbeef';
+      const inactive = await seedUser(prisma, {
+        email: 'f3.inactive@mail.com',
+        identification: 700099n,
+        role: Role.MEMBER,
+        isActive: false,
+      });
+      const key = 'f'.repeat(40);
+      await prisma.authToken.create({
+        data: { key, user_id: inactive.id, created: new Date() },
+      });
+      inactiveToken = key;
+    });
+
+    it.each(ROUTES)('%s answers identically with or without a broken token', async (path) => {
+      for (const [method, expected] of EXPECTED) {
+        const anonymous = await request(app.getHttpServer())[method](path);
+        expect(anonymous.status).toBe(expected);
+
+        for (const token of [invalidToken, inactiveToken]) {
+          const authenticated = await request(app.getHttpServer())
+            [method](path)
+            .set('Authorization', `Token ${token}`);
+
+          expect(authenticated.status).toBe(expected);
+          expect(authenticated.headers['www-authenticate']).toBeUndefined();
+          // The form's `csrfmiddlewaretoken` is a fresh mask of the secret on every render,
+          // so it is normalised — the same normalisation the parity harness applies.
+          expect(withoutCsrfField(authenticated.text)).toBe(withoutCsrfField(anonymous.text));
+        }
+      }
+    });
+
+    it('serves the reset form itself, not a 401 body, to a stale token', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/password_reset/')
+        .set('Authorization', 'Token deadbeef')
+        .expect(200);
+
+      expect(response.headers['content-type']).toBe('text/html; charset=utf-8');
+      expect(response.text).toContain('csrfmiddlewaretoken');
+      expect(response.body).toEqual({});
+    });
+
+    it('still 401s a broken token on the DRF routes — the exemption is not global', async () => {
+      // The control for F3: `@Public()` DRF views keep DRF's authenticators.
+      await request(app.getHttpServer())
+        .post('/api-token-auth')
+        .set('Authorization', 'Token deadbeef')
+        .send({ username: MEMBER_EMAIL, password: 'x' })
+        .expect(401);
+      await request(app.getHttpServer())
+        .post('/api/user/activate/1')
+        .set('Authorization', 'Token deadbeef')
+        .send({})
+        .expect(401);
+    });
+  });
+
+  /**
    * Parity finding **F2**. `HttpResponseRedirect` is an ordinary `HttpResponse`, so all three
    * redirects this controller emits carry Django's default `Content-Type: text/html;
    * charset=utf-8` with `Content-Length: 0` — an empty *HTML* body. v2 sent none, which is

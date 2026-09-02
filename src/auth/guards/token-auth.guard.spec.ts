@@ -1,5 +1,8 @@
 import type { ExecutionContext } from '@nestjs/common';
+import type { Reflector } from '@nestjs/core';
+import type { DjangoUrlPattern } from '../../common/http/django-url-conf';
 import { DrfException } from '../../common/http/drf.exception';
+import { IS_DJANGO_VIEW_KEY } from '../decorators/django-view.decorator';
 import type { AuthService } from '../auth.service';
 import { Role } from '../permissions/roles';
 import type { RequestWithUser } from '../types/authenticated-user';
@@ -10,9 +13,25 @@ const KEY = 'a'.repeat(40);
 function httpContext(request: Record<string, unknown>): ExecutionContext {
   return {
     getType: () => 'http',
+    getHandler: () => () => undefined,
+    getClass: () => class {},
     switchToHttp: () => ({ getRequest: () => request }),
   } as unknown as ExecutionContext;
 }
+
+/** A Reflector stub: `true` only for `@DjangoView()`, which is all this guard reads. */
+function reflectorFor(isDjangoView = false): Reflector {
+  return {
+    getAllAndOverride: (key: string) => (key === IS_DJANGO_VIEW_KEY ? isDjangoView : undefined),
+  } as unknown as Reflector;
+}
+
+/** What `DjangoUrlResolverMiddleware` attaches for one of the four auth pages. */
+const PASSWORD_RESET_ROUTE: DjangoUrlPattern = {
+  regex: /^password_reset\/$/,
+  view: 'PasswordResetView',
+  drf: null,
+};
 
 type Authentication = NonNullable<Awaited<ReturnType<AuthService['authenticateByTokenKey']>>>;
 
@@ -102,13 +121,19 @@ describe('extractTokenKey (rest_framework/authentication.py:TokenAuthentication)
 });
 
 describe('TokenAuthGuard', () => {
-  function guardWith(result: Authentication | null): {
+  function guardWith(
+    result: Authentication | null,
+    isDjangoView = false,
+  ): {
     guard: TokenAuthGuard;
     authenticateByTokenKey: jest.Mock;
   } {
     const authenticateByTokenKey = jest.fn().mockResolvedValue(result);
     const authService = { authenticateByTokenKey } as unknown as AuthService;
-    return { guard: new TokenAuthGuard(authService), authenticateByTokenKey };
+    return {
+      guard: new TokenAuthGuard(authService, reflectorFor(isDjangoView)),
+      authenticateByTokenKey,
+    };
   }
 
   it('passes an anonymous request through untouched', async () => {
@@ -155,5 +180,76 @@ describe('TokenAuthGuard', () => {
     const { guard } = guardWith(null);
     const context = { getType: () => 'rpc' } as unknown as ExecutionContext;
     await expect(guard.canActivate(context)).resolves.toBe(true);
+  });
+
+  /**
+   * Parity finding **F3**. `authentication_classes` is DRF's; the four password-reset views
+   * are `django.contrib.auth` views with no DRF layer, so the header is never read. Measured
+   * on the live v1: `GET /password_reset/` with `Authorization: Token deadbeef` is a **200**,
+   * byte-identical to the same request with no header.
+   */
+  describe('F3 — a plain Django view has no authenticators to run', () => {
+    it('never looks the token up on a @DjangoView() route, however broken the header', async () => {
+      for (const authorization of [`Token ${KEY}`, 'Token', 'Token a b', 'Token ñ']) {
+        const { guard, authenticateByTokenKey } = guardWith(null, true);
+        const request: Record<string, unknown> = {
+          headers: { authorization },
+          djangoRoute: PASSWORD_RESET_ROUTE,
+        };
+
+        await expect(guard.canActivate(httpContext(request))).resolves.toBe(true);
+        expect(authenticateByTokenKey).not.toHaveBeenCalled();
+        expect((request as RequestWithUser).authUser).toBeUndefined();
+      }
+    });
+
+    it('does not attach a user even for a VALID token — the view cannot see one', async () => {
+      const { guard, authenticateByTokenKey } = guardWith(authentication(), true);
+      const request: Record<string, unknown> = {
+        headers: { authorization: `Token ${KEY}` },
+        djangoRoute: PASSWORD_RESET_ROUTE,
+      };
+
+      await expect(guard.canActivate(httpContext(request))).resolves.toBe(true);
+      expect(authenticateByTokenKey).not.toHaveBeenCalled();
+      expect((request as RequestWithUser).authUser).toBeUndefined();
+    });
+
+    it('ignores the decorator when the URL table says the route IS a DRF view', async () => {
+      // Fail-closed: the exemption needs both halves to agree, so a decorator that drifted
+      // onto a DRF controller leaves authentication running rather than silently off.
+      const { guard, authenticateByTokenKey } = guardWith(null, true);
+      const request: Record<string, unknown> = {
+        headers: { authorization: `Token ${KEY}` },
+        djangoRoute: {
+          regex: /^api-token-auth\/?$/,
+          view: 'ObtainAuthToken',
+          drf: { allow: 'POST, OPTIONS', varyAccept: false },
+        } satisfies DjangoUrlPattern,
+      };
+
+      await expect(guard.canActivate(httpContext(request))).rejects.toBeInstanceOf(DrfException);
+      expect(authenticateByTokenKey).toHaveBeenCalledWith(KEY);
+    });
+
+    it('ignores the decorator when no route resolved at all', async () => {
+      const { guard, authenticateByTokenKey } = guardWith(null, true);
+
+      await expect(
+        guard.canActivate(httpContext({ headers: { authorization: `Token ${KEY}` } })),
+      ).rejects.toBeInstanceOf(DrfException);
+      expect(authenticateByTokenKey).toHaveBeenCalledWith(KEY);
+    });
+
+    it('ignores the decorator on a v2-only route (view: null, e.g. /health)', async () => {
+      const { guard, authenticateByTokenKey } = guardWith(null, true);
+      const request: Record<string, unknown> = {
+        headers: { authorization: `Token ${KEY}` },
+        djangoRoute: { regex: /^health\/?$/, view: null, drf: null } satisfies DjangoUrlPattern,
+      };
+
+      await expect(guard.canActivate(httpContext(request))).rejects.toBeInstanceOf(DrfException);
+      expect(authenticateByTokenKey).toHaveBeenCalledWith(KEY);
+    });
   });
 });
