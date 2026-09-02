@@ -346,6 +346,82 @@ export class UserService {
     return users.map((user) => user.auth_user.email);
   }
 
+  /**
+   * `get_user_by_email(email)` — **deviation D17**, and the one that fixes a live failure.
+   *
+   * ```python
+   * def get_user_by_email(self, email):
+   *     try:
+   *         user = User.objects.get(email=email)
+   *         return user
+   *     except:
+   *         return None
+   * ```
+   *
+   * ⚠️ `auth_user.email` has **no unique constraint**, and `fondodev` has two pairs of members
+   * sharing one — children enrolled under a parent's address (ids 7 & 14, 10 & 13). `.get()`
+   * therefore raises `MultipleObjectsReturned`, the bare `except` swallows it, and
+   * `PasswordResetView` redirects to the success page anyway. **Four of fifteen members cannot
+   * reset their password today and are told it worked.**
+   *
+   * ✅ **Q27 answered: the link goes to the account whose `username` equals the email.** So
+   * `criss9413@hotmail.com` resets id 7 (the parent) and not id 14, and `mhjc123@hotmail.com`
+   * resets id 10 and not id 13. The two custodial accounts become admin-assisted reset only —
+   * which is correct for accounts whose owners are 5 and 14 years old and who have no email
+   * address of their own.
+   *
+   * The rule in full:
+   *
+   * | matches | v1 | v2 |
+   * |---|---|---|
+   * | 0 | `None`, redirect to the success page | same |
+   * | 1 | that user | that user — **even if `username != email`**, which D15 now makes possible |
+   * | >1 | `None` (silently) | the one whose `username === email`; `None` if there is no such row, logged |
+   *
+   * ⚠️ No `is_active` filter, as in v1: a deactivated member still receives a link, and then
+   * cannot log in with the new password. Two of the fifteen are inactive. Left alone because
+   * changing it would hide an account's existence differently from v1 and the redirect is
+   * unconditional either way.
+   */
+  async getUserByEmail(email: string): Promise<{
+    id: number;
+    username: string;
+    email: string;
+    password: string;
+    last_login: Date | null;
+    first_name: string;
+    last_name: string;
+  } | null> {
+    const matches = await this.prisma.authUser.findMany({
+      where: { email },
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        password: true,
+        last_login: true,
+        first_name: true,
+        last_name: true,
+      },
+    });
+    if (matches.length === 0) {
+      return null;
+    }
+    if (matches.length === 1) {
+      return matches[0];
+    }
+    const canonical = matches.find((candidate) => candidate.username === email);
+    if (canonical === undefined) {
+      this.logger.warn(
+        `Password reset for "${email}" is ambiguous: ${matches.length} accounts share it and ` +
+          'none has it as its username. No email sent (D17).',
+      );
+      return null;
+    }
+    return canonical;
+  }
+
   /** `get_profile(user_id)` — `UserProfile.objects.get(id=user_id)`, `null` on a miss. */
   async getProfile(userId: number): Promise<UserProfileRow | null> {
     return this.prisma.userProfile.findUnique({

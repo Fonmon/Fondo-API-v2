@@ -16,6 +16,7 @@ import { JsonBigIntSetup } from './common/http/json-bigint';
 import { HealthModule } from './health/health.module';
 import { MailModule } from './mail/mail.module';
 import { NotificationModule } from './notifications/notification.module';
+import { PasswordResetModule } from './password-reset/password-reset.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { UserModule } from './users/user.module';
 
@@ -48,6 +49,7 @@ import { UserModule } from './users/user.module';
     MailModule,
     NotificationModule,
     UserModule,
+    PasswordResetModule,
     // Registered now so Phase 7 only has to add the cron provider. Declares no jobs yet.
     ScheduleModule.forRoot(),
     HealthModule,

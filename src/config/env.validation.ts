@@ -1,4 +1,4 @@
-import { envSchema, type Env } from './env.schema';
+import { validatedEnvSchema, type Env } from './env.schema';
 
 export class EnvValidationError extends Error {
   constructor(public readonly issues: string[]) {
@@ -18,7 +18,7 @@ export class EnvValidationError extends Error {
  * an undefined value halfway through a request.
  */
 export function validateEnv(raw: Record<string, unknown>): Env {
-  const result = envSchema.safeParse(raw);
+  const result = validatedEnvSchema.safeParse(raw);
   if (!result.success) {
     const issues = result.error.issues.map((issue) => {
       const path = issue.path.join('.') || '(root)';

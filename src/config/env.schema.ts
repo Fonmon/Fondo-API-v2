@@ -67,6 +67,23 @@ export const envSchema = z.object({
    */
   ALLOWED_HOST_DOMAIN: z.string().optional(),
 
+  // --- signing -------------------------------------------------------------
+  /**
+   * v1's `settings.SECRET_KEY`, which `api/settings/production.py:11` reads from this exact
+   * variable. `development.py` and `test.py` hardcode literals instead.
+   *
+   * **v2 does not share Django's token format** (plan, Phase 3: "v2 uses its own token
+   * scheme"), so this is not needed for interoperability — reset links issued by v1 stop
+   * working at cutover either way. It is needed because v2's own password-reset token is an
+   * HMAC and an HMAC needs a key, and reusing the variable the deployment **already sets**
+   * beats inventing a second one the operator has to remember.
+   *
+   * Optional here and required in production by {@link envSchema}'s refinement: v1 with an
+   * unset `DJANGO_SECRET_KEY` raises `ImproperlyConfigured` the first time anything signs, so
+   * v2 refusing to boot is the same failure moved earlier.
+   */
+  DJANGO_SECRET_KEY: z.string().min(1).optional(),
+
   // --- outbound links ------------------------------------------------------
   /**
    * Used by the `{% host %}` template tag in every Spanish email.
@@ -83,6 +100,23 @@ export const envSchema = z.object({
   LANGUAGE_LOCALE: z.literal('es').default('es'),
   /** v1: `settings.TIME_ZONE = 'America/Bogota'` with `USE_TZ = True`. */
   TIME_ZONE: z.string().trim().min(1).default('America/Bogota'),
+});
+
+/**
+ * `DJANGO_SECRET_KEY` is mandatory in production and only there — mirroring v1, where
+ * `development.py` and `test.py` carry a literal and only `production.py` reads the
+ * environment.
+ */
+export const validatedEnvSchema = envSchema.superRefine((env, ctx) => {
+  const environment = env.ENVIRONMENT ?? env.NODE_ENV;
+  if (environment === 'production' && env.DJANGO_SECRET_KEY === undefined) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['DJANGO_SECRET_KEY'],
+      message:
+        'DJANGO_SECRET_KEY is required in production — password-reset tokens are signed with it',
+    });
+  }
 });
 
 export type Env = z.infer<typeof envSchema>;

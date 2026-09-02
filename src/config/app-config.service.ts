@@ -82,6 +82,27 @@ export class AppConfigService {
     return this.config.get('NOTIFICATIONS_QUEUE_URL', { infer: true });
   }
 
+  /**
+   * v1's `settings.SECRET_KEY`. Signs v2's password-reset tokens.
+   *
+   * Outside production `envSchema` allows it to be absent, exactly as v1's `development.py` /
+   * `test.py` supply a literal rather than reading the environment; the fallback below is that
+   * literal's equivalent and is **never** reachable in production, where the schema refuses to
+   * boot without a real value.
+   */
+  get secretKey(): string {
+    const configured = this.config.get('DJANGO_SECRET_KEY', { infer: true });
+    if (configured !== undefined) {
+      return configured;
+    }
+    /* istanbul ignore next -- production cannot reach this; the env schema refuses to boot */
+    if (this.environment === 'production') {
+      throw new Error('DJANGO_SECRET_KEY is not configured');
+    }
+    // v1's `api/settings/development.py:13` hardcodes its own literal for the same reason.
+    return 'fondo-api-v2-development-secret-key';
+  }
+
   /** Value of the `{% host %}` template tag in the Spanish emails. */
   get hostUrlApp(): string {
     return this.get('HOST_URL_APP');
