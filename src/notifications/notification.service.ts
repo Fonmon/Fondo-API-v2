@@ -1,5 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { pythonStr, type PythonEncodable } from '../common/utils/hstore.codec';
+import { bogotaWallClockToInstant } from '../common/utils/timezone.util';
+import type { PlainDate } from '../common/utils/date.util';
+import {
+  SchedulerTaskRepository,
+  type SchedulerTaskPayload,
+} from '../scheduler/scheduler-task.repository';
 import { NotificationPublisher } from './notification-publisher';
 import { NotificationSubscriptionRepository } from './notification-subscription.repository';
 
@@ -10,15 +16,18 @@ export const UNSUBSCRIBE_NOT_FOUND = 404;
 /**
  * `fondo_api/services/notification.py:NotificationService`.
  *
- * The scheduling half (`schedule_notification`, `remove_sch_notitfications`) belongs to the
- * `SchedulerTask` hstore column and lands in **Phase 7** together with
- * `SchedulerTaskRepository`; only the subscription and send halves are here.
+ * ✅ **The scheduling half landed in Phase 3, not Phase 7** — review finding **S9**,
+ * condition **C24**. `schedule_notification` and `remove_sch_notitfications` are called from
+ * `services/user.py:281-282` (`PATCH /api/user/<id>`, this phase) and from
+ * `services/loan.py` (Phase 4), both of which run *before* Phase 7's runner exists. The
+ * write half is here; {@link SchedulerTaskRepository} owns the SQL and the hstore encoding.
  */
 @Injectable()
 export class NotificationService {
   constructor(
     private readonly repository: NotificationSubscriptionRepository,
     private readonly publisher: NotificationPublisher,
+    private readonly schedulerTasks: SchedulerTaskRepository,
   ) {}
 
   /**
@@ -77,6 +86,59 @@ export class NotificationService {
    */
   async removeAllSubscriptions(userId: number): Promise<void> {
     await this.repository.deleteAllByUserId(userId);
+  }
+
+  /**
+   * `schedule_notification(run_date, payload, repeat=0)`.
+   *
+   * ```python
+   * tasks = SchedulerTask.objects.filter(payload__owner_id=payload["owner_id"],
+   *                                      payload__type=payload["type"],
+   *                                      run_date__year=run_date.year, ... ,
+   *                                      processed=False)
+   * if len(tasks) == 0:
+   *     run_date = make_aware(run_date)
+   *     SchedulerTask.objects.create(type=0, run_date=run_date, payload=payload, repeat=repeat)
+   * ```
+   *
+   * Three things the shape of this signature is protecting:
+   *
+   *  * **`runDate` is a wall-clock date, not an instant.** v1 builds
+   *    `datetime(birthdate.year, birthdate.month, birthdate.day)` — naive local midnight —
+   *    dedupes on *its* calendar parts, and only then calls `make_aware`. Taking a `PlainDate`
+   *    (plus optional hour/minute) makes it impossible to hand this an instant and have the
+   *    dedupe silently compare the wrong day near midnight.
+   *  * **The dedupe is same-day, not same-instant**, and is scoped to unprocessed rows. Two
+   *    calls on the same day for the same `(owner_id, type)` write one row; the second is a
+   *    silent no-op (plan §4 rule 9, idempotent-under-retry).
+   *  * **`repeat` defaults to 0 (`NONE`)**, as in v1. The birthday task passes `4` (`YEARLY`).
+   */
+  async scheduleNotification(
+    runDate: PlainDate & { hour?: number; minute?: number },
+    payload: SchedulerTaskPayload,
+    repeat = 0,
+  ): Promise<void> {
+    const alreadyScheduled = await this.schedulerTasks.existsUnprocessedOnDay(
+      payload.owner_id,
+      payload.type,
+      runDate.year,
+      runDate.month,
+      runDate.day,
+    );
+    if (alreadyScheduled) {
+      return;
+    }
+    await this.schedulerTasks.create(bogotaWallClockToInstant(runDate), payload, repeat);
+  }
+
+  /**
+   * `remove_sch_notitfications(notification_type, owner_id)` — v1's spelling, kept only in the
+   * doc; the method name is corrected here because nothing external calls it by name.
+   *
+   * @returns the number of rows deleted.
+   */
+  async removeSchNotifications(notificationType: string, ownerId: number): Promise<number> {
+    return this.schedulerTasks.deleteByOwnerAndType(ownerId, notificationType);
   }
 
   /**

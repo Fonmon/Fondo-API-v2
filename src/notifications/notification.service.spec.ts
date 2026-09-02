@@ -2,6 +2,7 @@ import type { PushSubscription } from '../common/utils/hstore.codec';
 import type { NotificationPublisher } from './notification-publisher';
 import { NotificationService, UNSUBSCRIBE_NOT_FOUND, UNSUBSCRIBE_OK } from './notification.service';
 import type { NotificationSubscriptionRepository } from './notification-subscription.repository';
+import type { SchedulerTaskRepository } from '../scheduler/scheduler-task.repository';
 
 /**
  * `fondo_api/services/notification.py:NotificationService`, unit level.
@@ -37,6 +38,11 @@ describe('NotificationService', () => {
     findPushSubscriptionsByUserIds: jest.Mock;
   };
   let publisher: { publish: jest.Mock };
+  let schedulerTasks: {
+    existsUnprocessedOnDay: jest.Mock;
+    create: jest.Mock;
+    deleteByOwnerAndType: jest.Mock;
+  };
   let service: NotificationService;
 
   beforeEach(() => {
@@ -49,9 +55,15 @@ describe('NotificationService', () => {
       findPushSubscriptionsByUserIds: jest.fn().mockResolvedValue([]),
     };
     publisher = { publish: jest.fn().mockResolvedValue(true) };
+    schedulerTasks = {
+      existsUnprocessedOnDay: jest.fn().mockResolvedValue(false),
+      create: jest.fn().mockResolvedValue(undefined),
+      deleteByOwnerAndType: jest.fn().mockResolvedValue(0),
+    };
     service = new NotificationService(
       repository as unknown as NotificationSubscriptionRepository,
       publisher as unknown as NotificationPublisher,
+      schedulerTasks as unknown as SchedulerTaskRepository,
     );
   });
 
@@ -177,6 +189,72 @@ describe('NotificationService', () => {
       publisher.publish.mockResolvedValue(false);
 
       await expect(service.sendNotification([1], 'x', '/')).resolves.toBeUndefined();
+    });
+  });
+
+  /**
+   * `schedule_notification` / `remove_sch_notitfications` — Phase **7a**, landed here because
+   * `PATCH /api/user/<id>` calls both (`services/user.py:281-282`). Review finding **S9**,
+   * condition **C24**.
+   */
+  describe('scheduleNotification', () => {
+    const payload = {
+      type: 'birthdate',
+      owner_id: 5,
+      user_ids: [2, 4, 3],
+      target: '/',
+      message: 'Hoy está cumpliendo años N@CHO Montañez Herrera',
+    };
+
+    it('dedupes on (owner_id, type, local calendar day, not processed)', async () => {
+      await service.scheduleNotification({ year: 2027, month: 8, day: 25 }, payload, 4);
+
+      expect(schedulerTasks.existsUnprocessedOnDay).toHaveBeenCalledWith(
+        5,
+        'birthdate',
+        2027,
+        8,
+        25,
+      );
+    });
+
+    it('writes the task at local midnight Bogota, i.e. 05:00Z', async () => {
+      await service.scheduleNotification({ year: 2027, month: 8, day: 25 }, payload, 4);
+
+      expect(schedulerTasks.create).toHaveBeenCalledTimes(1);
+      const [runDate, written, repeat] = schedulerTasks.create.mock.calls[0] as [
+        Date,
+        typeof payload,
+        number,
+      ];
+      // The live row reads `2027-08-25 05:00:00+00`.
+      expect(runDate.toISOString()).toBe('2027-08-25T05:00:00.000Z');
+      expect(written).toBe(payload);
+      expect(repeat).toBe(4);
+    });
+
+    it('is a silent no-op when an unprocessed task already exists for that day', async () => {
+      schedulerTasks.existsUnprocessedOnDay.mockResolvedValue(true);
+
+      await service.scheduleNotification({ year: 2027, month: 8, day: 25 }, payload, 4);
+
+      expect(schedulerTasks.create).not.toHaveBeenCalled();
+    });
+
+    it('defaults repeat to 0 (NONE), as v1 does', async () => {
+      await service.scheduleNotification({ year: 2027, month: 8, day: 25 }, payload);
+
+      const call = schedulerTasks.create.mock.calls[0] as [Date, unknown, number];
+      expect(call[2]).toBe(0);
+    });
+  });
+
+  describe('removeSchNotifications', () => {
+    it('deletes every task for that owner and type, processed or not', async () => {
+      schedulerTasks.deleteByOwnerAndType.mockResolvedValue(3);
+
+      await expect(service.removeSchNotifications('birthdate', 5)).resolves.toBe(3);
+      expect(schedulerTasks.deleteByOwnerAndType).toHaveBeenCalledWith(5, 'birthdate');
     });
   });
 });
