@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-09-02 | v2.0 | ✅ **PHASE 2 CLOSED — Approved with conditions.** Reviewer re-derived claims inside the v1 image rather than re-running suites. Nine should-fix findings → **C19–C27**, graded by deadline. Three change Phase 3's shape: **S3 is a real vulnerability** (`ALLOWED_HOSTS` dropped; Phase 3's `PasswordResetView` builds the emailed link from the request host → reset-link poisoning), **S2** (the table resolves paths not views, so `/api/user/<x>` overlaps could evaluate under the wrong view's rules), **S1** (response hooks run FIFO — the reverse of Django — and the model has no notion of depth). |
 | 2026-08-31 | v1.8 | **C18/N4 closed**; Phase 2 to `nestjs-reviewer`. Two method corrections that outlive this phase: **supertest silently strips fragments**, so a supertest regression cell passes against the broken code — raw-socket helper now in `test/http-edge.e2e-spec.ts`; and **`pg_dump` md5 is not a valid fixture guard** (`synchronize_seqscans = on` rotates rows — three dumps of unmodified data gave three md5s, verified). Use the sorted content hash + `count(distinct xmin::text)` instead. |
 | 2026-08-31 | v1.7 | ✅ **Phase 2 parity: PASS (round 3).** N1–N3 fixed and verified; nothing regressed across 152 sweep requests, 6 `cmp`-identical SQS bodies, the 94-row decode scan and the full role matrix. One new non-gating diff **N4** (gunicorn drops a literal `#` fragment; v2 keeps it) → C18. Two corrections folded in: **`Vary: Cookie` affects three kept routes, not one**, and `GET /reset/<uid>/<token>/` **writes a `django_session` row** — a DB side effect on a GET that v2 has no model for. Both are Phase 3 scope. |
 | 2026-08-31 | v1.6 | **Phase 2 parity round-2 diffs fixed; back to `manual-tester` for round 3.** **C15/N1 closed by a split, not a swap** — v1's `APPEND_SLASH` 301 is *above* `corsheaders` and its URL-resolution 404 is *below* it, so `DjangoAppendSlashMiddleware` + `DjangoUrlResolverMiddleware` now sit either side of `DjangoCorsMiddleware`; `AppModule.configure` carries v1's whole eight-row `MIDDLEWARE` list. **C16/N2 closed** — `escape_uri_path`/`iri_to_uri`/`escape_leading_slashes` ported (`django-uri-encoding.ts`), so the 301 `Location` is the decoded-then-re-encoded path. **C17/N3 closed now rather than at the P3 gate** — the resolver re-targets Nest's router at `PATH_INFO`, which needed the middleware mount moved from `{*path}` to `/`. Rule 14 gains both sub-rules. **O1 registered** (P2-D8 residual 4) plus a new residual 5 (a non-ASCII raw request target: Node answers 400 before any middleware, gunicorn/Django serves it). ⚠️ **Phase 3 note:** `GET /password_reset/` answers `Vary: Cookie, Origin` and sets a `csrftoken` cookie — a **kept** route, so `DrfViewHeaders` must widen when the auth pages land. |
@@ -945,6 +946,24 @@ the Babel four-digit grouping — were both cases where a plausible-looking assu
 until someone read the source or the live data. That is exactly what a review pass is for, and it
 is cheapest at the end of the phase that introduced it.
 
+### Phase 2 review conditions (C19–C27)
+
+From [`docs/review-phase-2.md`](docs/review-phase-2.md). Graded by deadline, not severity.
+
+**Before Phase 3's first controller:**
+
+| # | Condition |
+|---|---|
+| **C19** | ⚠️ **S3 — `ALLOWED_HOSTS` is dropped.** The `CommonMiddleware` port omits the one part that is not a no-op. Measured live: `Host: evil.test` → v1 **400** on every route, v2 serves. Confirmed: production sets `ALLOWED_HOSTS = [ALLOWED_HOST_DOMAIN, '127.0.0.1']` (`api/settings/production.py:13`), and Phase 3's `PasswordResetView` builds the emailed link's domain from `get_current_site(request)` (`views/auth.py:37-42`). **In Phase 3 this becomes reset-link poisoning: an attacker sets the `Host` header and the victim's reset token is delivered to a domain they control.** Fix before any Phase 3 route ships. |
+| **C20** | **S2 — the URL table resolves paths, never views**, and `roles.guard.ts:66` trusts Express declaration order. v1's four `/api/user/…` routes have different rules — `UserAppsView` declares only `POST` (so `DELETE` is deny-all via the bare `except`) while `UserDetailView.DELETE` is ADMIN-allowed. A mis-resolution turns a routing detail into an **authorization** decision. Bind the resolved v1 view identity, not the path. |
+| **C21** | **S1 — response hooks run FIFO, the reverse of Django's response phase**, and the doc at `before-headers.ts:31-33` asserts the opposite. Unobservable today; Phase 3 makes it observable. The model also has no notion of **depth**, so it cannot express `/password_reset/`'s `Vary: Cookie, Origin` (view-level `csrf_protect`, below all eight slots), and `skipBeforeHeadersHooks` means "all" where Django means "below me". |
+
+**Within Phase 3:** C22 (S4 — the SQS retry budget is **9**, not the 3 P2-D7 records, with no request timeout, now on the HTTP request thread), C23 (S5 — the hstore codec fails **open** on an absent `keys`/`user_ids` where v1 raises `KeyError`; invisible to any black-box round), C24 (S9 — plan defect: Phases 3 and 4 both write `SchedulerTask` rows that Phase 7 owns and runs *after*).
+
+**Before the next parity round:** C25 (S6 — `resetDatabase` is one `TEST_DATABASE_URL` away from truncating the parity fixture), C26 (S7 — the parity report's `pg_dump` md5 guard is not evidence), C27 (S8 — supertest also silently rewrites dot-segments, backslashes and spaces; existing cells survive but the trap is open for Phases 3–8).
+
+**Consider C5** (not a condition): the 22-pattern table is correct *only* because Django 2.2.25+ uses `re.fullmatch` for `$`-terminated patterns (the CVE-2021-44420 fix) — Python's `$` otherwise matches before a trailing newline, and `POST /…/subscribe%0A` is reachable. Correct but version-dependent and undocumented; pin it with two cells.
+
 ### Open review conditions
 
 Tracked to closure, not carried forward silently. Source:
@@ -1004,8 +1023,8 @@ set, as defence in depth rather than as the primary control.
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
 | 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab` + C1–C4) | ✅ | n/a | ✅ **APPROVED** | n/a |
 | 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
-| 2 Mail + notifications | 🔨 parity PASS → **in review** | ✅ | ✅ **PASS** (r3) | 🔨 | ⬜ |
-| 3 Users + finance | ⬜ Blocked on P2 | — | — | — | — |
+| 2 Mail + notifications | ✅ **CLOSED — APPROVED** (`fe261fc`) | ✅ | ✅ PASS r3 | ✅ **Approved w/ conditions** | ⬜ |
+| 3 Users + finance | 🟡 **Next** — blocked on C19–C21 + Q26/Q27 | — | — | — | — |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
 | 7 Scheduler *(resequenced)* | ⬜ Blocked on P4 | — | — | — | — |
 | 5 Activities | ⬜ Blocked on P3 | — | — | — | — |
