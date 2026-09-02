@@ -102,9 +102,19 @@ export class AppModule implements NestModule {
    * `/password_reset` and a **200** on `/nope/nope` — no single middleware placed on one side
    * of {@link DjangoCorsMiddleware} can produce both.
    *
-   * Requests run down the list; responses run back up it, which is what
-   * `onBeforeHeaders`/`skipBeforeHeadersHooks` reproduce — 7 and 8 decorate everything the
-   * layers below them return, and nothing decorates 3's redirect.
+   * ## Registration order is the *request* order, and the reverse of the response order
+   *
+   * Requests run down the list; responses run back up it. So the order below is the order
+   * these classes' **request** phases run, and their response phases run in the opposite
+   * order — which is why `onBeforeHeaders` takes an explicit `DjangoStack` depth and sorts by
+   * it rather than trusting this list (condition **C21**, finding **S1**). `DjangoCorsMiddleware`
+   * is registered fourth of six and its response phase runs first of all the middlewares;
+   * the comment that used to claim registration order *was* the response order was wrong,
+   * and stopped being harmless the moment Phase 3 adds a second `Vary`-touching layer.
+   *
+   * `skipBeforeHeadersHooks` likewise takes a depth: `CommonMiddleware`'s 301 skips only what
+   * is *below* slot 3, and the C19 `DisallowedHost` 400 skips slot 3's own response phase as
+   * well, because Django raises it rather than returning it.
    *
    * ## Mounted at `/`, not at a wildcard
    *

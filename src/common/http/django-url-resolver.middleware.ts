@@ -1,6 +1,6 @@
 import { Inject, Injectable, type NestMiddleware } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
-import { onBeforeHeaders } from './before-headers';
+import { DjangoStack, onBeforeHeaders } from './before-headers';
 import { patchVaryHeaders } from './django-cors.middleware';
 import {
   DJANGO_URL_CONF_TOKEN,
@@ -99,7 +99,12 @@ export class DjangoUrlResolverMiddleware implements NestMiddleware {
       patchVaryHeaders(response, ['Accept']);
     }
 
-    onBeforeHeaders(response, (finished) => {
+    // `DjangoStack.VIEW`: replacing the response for a 500 happens in
+    // `convert_exception_to_response` around `_get_response`, below all eight middlewares —
+    // so the strip must run *before* slot 8 patches `Vary: Origin` onto it (C21). Same depth
+    // as `normaliseDrfContentType`, and disjoint from it: this touches `Allow` and `Vary`,
+    // that one touches `Content-Type`.
+    onBeforeHeaders(response, DjangoStack.VIEW, (finished) => {
       // An unhandled exception never reaches `finalize_response`: Django builds a fresh
       // `HttpResponse` for the 500 and DRF's headers are lost with the old one. Verified —
       // v1's 500 carries `Vary: Origin` and `X-Frame-Options` (added later, by the

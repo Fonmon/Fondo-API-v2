@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import { onBeforeHeaders } from './before-headers';
+import { DjangoStack, onBeforeHeaders } from './before-headers';
 import { DjangoAppendSlashMiddleware } from './django-append-slash.middleware';
 import { DJANGO_URL_CONF } from './django-url-conf';
 
@@ -156,8 +156,10 @@ describe('DjangoAppendSlashMiddleware', () => {
       // Belt and braces: with the fixed order nothing has registered a hook yet, but a
       // future reorder must not start decorating this response.
       const response = fakeResponse();
-      onBeforeHeaders(response, (finished) => {
+      onBeforeHeaders(response, DjangoStack.CORS, (finished: Response) => {
         finished.setHeader('Vary', 'Origin');
+      });
+      onBeforeHeaders(response, DjangoStack.X_FRAME_OPTIONS, (finished: Response) => {
         finished.setHeader('X-Frame-Options', 'SAMEORIGIN');
       });
       middleware.use(

@@ -1,6 +1,6 @@
 import { Injectable, type NestMiddleware } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
-import { onBeforeHeaders } from './before-headers';
+import { DjangoStack, onBeforeHeaders } from './before-headers';
 
 /**
  * The rest of v1's response-header surface, in one place — parity finding **F4**.
@@ -32,6 +32,21 @@ import { onBeforeHeaders } from './before-headers';
  * which Phases 3-8 return from a dozen handlers — carries **no** `Content-Type` at all.
  * Verified live on `POST /api/notification/unsubscribe` (404) and `.../suscribe` (405).
  *
+ * ## Three hooks, three depths — condition **C21**
+ *
+ * The four rows above do not all live at the same place in v1's stack, and since the response
+ * phase is ordered by depth they cannot be registered as one hook any more:
+ *
+ * | what | depth | why |
+ * |---|---|---|
+ * | `X-Frame-Options: SAMEORIGIN` | {@link DjangoStack.X_FRAME_OPTIONS} (7) | it *is* slot 7 |
+ * | DRF's `Content-Type` rules | {@link DjangoStack.VIEW} | `Response.rendered_content`, below all eight |
+ * | drop `X-Powered-By` / `ETag` | {@link DjangoStack.TRANSPORT} | not Django at all — undoing Express, above slot 1 so no short-circuit can skip it |
+ *
+ * Nothing observable changes today (the three touch disjoint headers, and the 500 fixup they
+ * now interleave with only removes `Allow` and `Accept`), which is the point: the model is
+ * made right while it is still cheap to check.
+ *
  * ## Why a response hook rather than `app.disable(...)`
  *
  * `x-powered-by` and `etag` are Express *application* settings, and the only handle on the
@@ -43,22 +58,27 @@ import { onBeforeHeaders } from './before-headers';
 @Injectable()
 export class DjangoResponseHeadersMiddleware implements NestMiddleware {
   use(_request: Request, response: Response, next: NextFunction): void {
-    onBeforeHeaders(response, applyDjangoResponseHeaders);
+    onBeforeHeaders(response, DjangoStack.VIEW, normaliseDrfContentType);
+    onBeforeHeaders(response, DjangoStack.X_FRAME_OPTIONS, applyXFrameOptions);
+    onBeforeHeaders(response, DjangoStack.TRANSPORT, dropExpressHeaders);
     next();
   }
 }
 
-function applyDjangoResponseHeaders(response: Response): void {
-  // `django.middleware.clickjacking.XFrameOptionsMiddleware` with `X_FRAME_OPTIONS`
-  // unset -> its default, `SAMEORIGIN`. It never overwrites a header the view set.
+/**
+ * `django.middleware.clickjacking.XFrameOptionsMiddleware` with `X_FRAME_OPTIONS` unset ->
+ * its default, `SAMEORIGIN`. It never overwrites a header the view set.
+ */
+function applyXFrameOptions(response: Response): void {
   if (response.getHeader('X-Frame-Options') === undefined) {
     response.setHeader('X-Frame-Options', 'SAMEORIGIN');
   }
+}
 
+/** Headers v1 never emits because it is not Express. Not a ported middleware. */
+function dropExpressHeaders(response: Response): void {
   response.removeHeader('X-Powered-By');
   response.removeHeader('ETag');
-
-  normaliseDrfContentType(response);
 }
 
 /** `Response.rendered_content`: `application/json` with no charset, and none at all if empty. */

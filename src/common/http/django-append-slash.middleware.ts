@@ -1,6 +1,6 @@
 import { Inject, Injectable, type NestMiddleware } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
-import { skipBeforeHeadersHooks } from './before-headers';
+import { DjangoStack, skipBeforeHeadersHooks } from './before-headers';
 import {
   DJANGO_URL_CONF_TOKEN,
   decodePathInfo,
@@ -44,9 +44,11 @@ import { splitQuery } from './request-target';
  *
  * `CommonMiddleware` returns its 301 from `process_request`, so the response never passes
  * through the middlewares *below* it: v1's 301 carries no `Vary`, no `X-Frame-Options` and no
- * `Access-Control-*`, even with an `Origin` header. Registered first, this middleware reaches
- * that branch before anything has registered a `onBeforeHeaders` hook; the
- * {@link skipBeforeHeadersHooks} call keeps it true if the order is ever changed back.
+ * `Access-Control-*`, even with an `Origin` header. Registered near the top, this middleware
+ * reaches that branch before anything has registered a `onBeforeHeaders` hook; the
+ * {@link skipBeforeHeadersHooks} call keeps it true if the order is ever changed back, and
+ * since condition **C21** it says *how far* down to skip — everything below slot 3, with
+ * slots 2 and 1 unaffected.
  *
  * ⚠️ In `DEBUG` mode Django raises `RuntimeError` for a POST/PUT/PATCH here instead of
  * redirecting. v1 deploys with `DEBUG = False` (`api/settings/production.py:16`), so the 301
@@ -90,7 +92,9 @@ export class DjangoAppendSlashMiddleware implements NestMiddleware {
    * through `iri_to_uri`, which leaves an already-encoded query alone.
    */
   private redirectWithSlash(response: Response, pathInfo: string, rawQuery: string): void {
-    skipBeforeHeadersHooks(response);
+    // Slot 3's own response phase still runs on this one (it is *returned* from
+    // `process_request`, not raised) — hence `COMMON` rather than `SESSION` (C21).
+    skipBeforeHeadersHooks(response, DjangoStack.COMMON);
 
     const query = rawQuery === '' ? '' : `?${iriToUri(rawQuery)}`;
     const location = escapeLeadingSlashes(`${escapeUriPath(pathInfo)}/${query}`);

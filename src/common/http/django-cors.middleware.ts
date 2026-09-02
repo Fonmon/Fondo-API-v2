@@ -1,6 +1,6 @@
 import { Injectable, type NestMiddleware } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
-import { onBeforeHeaders } from './before-headers';
+import { DjangoStack, onBeforeHeaders } from './before-headers';
 
 /**
  * Port of `corsheaders.middleware.CorsMiddleware` (django-cors-headers **2.4.0**, the version
@@ -67,7 +67,9 @@ export class DjangoCorsMiddleware implements NestMiddleware {
       return;
     }
 
-    onBeforeHeaders(response, (finished) => {
+    // Slot 8: the deepest of v1's eight, so its response phase runs first of the eight and
+    // `Vary: Origin` lands *after* anything the view added and *before* slots 7-1 (C21).
+    onBeforeHeaders(response, DjangoStack.CORS, (finished) => {
       applyCorsResponseHeaders(request, finished);
     });
     next();

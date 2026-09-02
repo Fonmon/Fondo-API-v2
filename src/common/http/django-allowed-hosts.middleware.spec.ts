@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import type { AppConfigService } from '../../config/app-config.service';
-import { onBeforeHeaders } from './before-headers';
+import { DjangoStack, onBeforeHeaders } from './before-headers';
 import { DjangoAllowedHostsMiddleware } from './django-allowed-hosts.middleware';
 
 /**
@@ -109,8 +109,10 @@ describe('DjangoAllowedHostsMiddleware (C19)', () => {
     const response = fakeResponse();
     // Stand in for the hooks `DjangoResponseHeadersMiddleware` and `DjangoCorsMiddleware`
     // would have registered if this middleware had called next().
-    onBeforeHeaders(response, (finished) => {
+    onBeforeHeaders(response, DjangoStack.X_FRAME_OPTIONS, (finished: Response) => {
       finished.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    });
+    onBeforeHeaders(response, DjangoStack.CORS, (finished: Response) => {
       finished.setHeader('Vary', 'Origin');
     });
 
