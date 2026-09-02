@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ApiExceptionFilter } from './api-exception.filter';
 import { ApiException } from '../http/api.exception';
+import { isDrfRendered } from '../http/drf-finalize-response';
 import { DrfException } from '../http/drf.exception';
 
 interface CapturedResponse {
@@ -218,5 +219,41 @@ describe('ApiExceptionFilter — DRF envelopes (Phase 1)', () => {
     const { host, captured } = makeHost();
     filter.catch(DrfException.permissionDenied(), host);
     expect(captured.jsonBody).not.toHaveProperty('message');
+  });
+
+  /**
+   * Parity finding **F1**. `DjangoUrlResolverMiddleware` strips `Allow` and `Vary: Accept`
+   * off a 500 because Django's exception handler builds a fresh response — but only an
+   * *uncaught* exception takes that path. The two parity classes are marked here, at the one
+   * place v2 renders a DRF `Response`.
+   */
+  describe('marks the responses DRF would have run finalize_response over', () => {
+    function responseOf(host: ArgumentsHost): Parameters<typeof isDrfRendered>[0] {
+      return host.switchToHttp().getResponse<Parameters<typeof isDrfRendered>[0]>();
+    }
+
+    it('marks an ApiException — v1 `Response(status=...)`, including the 500', () => {
+      const { host } = makeHost();
+      filter.catch(ApiException.empty(HttpStatus.INTERNAL_SERVER_ERROR), host);
+      expect(isDrfRendered(responseOf(host))).toBe(true);
+    });
+
+    it('marks a DrfException — DRF’s own exception_handler returns a Response', () => {
+      const { host } = makeHost();
+      filter.catch(DrfException.permissionDenied(), host);
+      expect(isDrfRendered(responseOf(host))).toBe(true);
+    });
+
+    it('does NOT mark an unhandled exception — Django threw that response away', () => {
+      const { host } = makeHost();
+      filter.catch(new TypeError('boom'), host);
+      expect(isDrfRendered(responseOf(host))).toBe(false);
+    });
+
+    it('does NOT mark a bare Nest HttpException — no v1 counterpart to keep headers for', () => {
+      const { host } = makeHost();
+      filter.catch(new NotFoundException(), host);
+      expect(isDrfRendered(responseOf(host))).toBe(false);
+    });
   });
 });

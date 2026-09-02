@@ -9,6 +9,7 @@ import {
   type DjangoUrlPattern,
   type RequestWithDjangoRoute,
 } from './django-url-conf';
+import { isDrfRendered } from './drf-finalize-response';
 import { escapeUriPath } from './django-uri-encoding';
 import { splitQuery } from './request-target';
 
@@ -108,11 +109,19 @@ export class DjangoUrlResolverMiddleware implements NestMiddleware {
     // as `normaliseDrfContentType`, and disjoint from it: this touches `Allow` and `Vary`,
     // that one touches `Content-Type`.
     onBeforeHeaders(response, DjangoStack.VIEW, (finished) => {
-      // An unhandled exception never reaches `finalize_response`: Django builds a fresh
+      // An **unhandled** exception never reaches `finalize_response`: Django builds a fresh
       // `HttpResponse` for the 500 and DRF's headers are lost with the old one. Verified —
-      // v1's 500 carries `Vary: Origin` and `X-Frame-Options` (added later, by the
-      // response middlewares) but neither `Allow` nor `Accept` in `Vary`.
-      if (finished.statusCode >= 500) {
+      // `GET /api/user?page=abc` carries `Vary: Origin` and `X-Frame-Options` (added later,
+      // by the response middlewares) but neither `Allow` nor `Accept` in `Vary`.
+      //
+      // ⚠️ A 500 a DRF view **returns** is the opposite case and must keep both. v1 has one:
+      // `UserAppsView.post`'s `except Exception: return Response(status=500)`, which
+      // `finalize_response` renders like any other DRF response —
+      // `Vary: Accept, Origin` and `Allow: POST, OPTIONS`, measured. Stripping on the status
+      // code alone conflated the two and lost those headers on seven different inputs
+      // (parity finding **F1**), so the test is "did Django throw this response away", not
+      // "is it a 500".
+      if (finished.statusCode >= 500 && !isDrfRendered(finished)) {
         finished.removeHeader('Allow');
         removeVaryField(finished, 'Accept');
       }

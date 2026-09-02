@@ -1416,6 +1416,64 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
     expect(response.text).toBe('');
   });
 
+  /**
+   * Parity finding **F1**. `UserAppsView.post`'s `except Exception: return Response(status=500)`
+   * is a **DRF** response, so `finalize_response` puts the view's `default_response_headers`
+   * on it. Measured on the live v1 (`api.settings.production`, gunicorn):
+   *
+   * ```
+   * HTTP/1.1 500 Internal Server Error
+   * Vary: Accept, Origin
+   * Allow: POST, OPTIONS
+   * Content-Length: 0
+   * ```
+   *
+   * v2 used to strip both headers off every 500, which is right only for the *uncaught* kind
+   * (`GET /api/user?page=abc`, asserted below). Every input that reaches this `except` is
+   * covered by one of the seven cells the tester listed; three of them are asserted here.
+   */
+  describe('F1 — the caught 500 keeps Allow and Vary: Accept', () => {
+    it.each([
+      ['a page below 1 (Paginator.EmptyPage)', { type: 'get', obj: 'requested', page: 0 }],
+      ['a missing `page`', { type: 'get', obj: 'requested' }],
+      ['a missing `type`', { obj: 'requested', page: 1 }],
+    ])('%s', async (_case, body) => {
+      const response = await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(asAdmin())
+        .send(body)
+        .expect(500);
+
+      expect(response.text).toBe('');
+      expect(response.headers.allow).toBe('POST, OPTIONS');
+      expect(response.headers.vary).toBe('Accept, Origin');
+      // Still the zero-byte DRF body, so still no Content-Type (P3-D6's other half).
+      expect(response.headers['content-type']).toBeUndefined();
+    });
+
+    it('still strips them from an uncaught 500 — Django threw that response away', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/user?page=abc')
+        .set(asAdmin())
+        .expect(500);
+
+      expect(response.headers.allow).toBeUndefined();
+      expect(response.headers.vary).toBe('Origin');
+    });
+
+    it('keeps them on the 500 that swallowed DRF’s 415, too', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(asAdmin())
+        .set('Content-Type', 'text/plain')
+        .send('not json at all')
+        .expect(500);
+
+      expect(response.headers.allow).toBe('POST, OPTIONS');
+      expect(response.headers.vary).toBe('Accept, Origin');
+    });
+  });
+
   /** `test_get_powers_empty` */
   it('test_get_powers_empty: an empty page 2 still reports num_pages 1', async () => {
     const response = await request(app.getHttpServer())

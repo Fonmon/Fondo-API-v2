@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { ApiException, type MessageBody } from '../http/api.exception';
+import { markDrfRendered } from '../http/drf-finalize-response';
 import { DrfException } from '../http/drf.exception';
 
 /**
@@ -43,11 +44,16 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const request = http.getRequest<Request>();
 
     if (exception instanceof ApiException) {
+      // A port of DRF's `Response(...)`, so `finalize_response` ran and the view's
+      // `default_response_headers` stay on it — including on a 500 (parity finding F1).
+      markDrfRendered(response);
       this.send(response, exception.getStatus(), exception.body);
       return;
     }
 
     if (exception instanceof DrfException) {
+      // DRF's `exception_handler` returns a `Response` too; same reasoning as above.
+      markDrfRendered(response);
       for (const [name, value] of Object.entries(exception.drfHeaders)) {
         response.setHeader(name, value);
       }

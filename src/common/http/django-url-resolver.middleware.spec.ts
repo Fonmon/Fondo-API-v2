@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { DJANGO_URL_CONF, type RequestWithDjangoRoute } from './django-url-conf';
 import { DjangoUrlResolverMiddleware } from './django-url-resolver.middleware';
+import { markDrfRendered } from './drf-finalize-response';
 
 /**
  * The resolver half of the URL layer: the 404, DRF's per-view headers, and — finding **N3**,
@@ -126,6 +127,43 @@ describe('DjangoUrlResolverMiddleware', () => {
       const { response } = run('/password_reset/');
       expect(response.headers.Allow).toBeUndefined();
       expect(response.headers.Vary).toBeUndefined();
+    });
+  });
+
+  /**
+   * Parity finding **F1**. The strip models `convert_exception_to_response` replacing the
+   * response object, which only happens for an **uncaught** exception. A 500 a DRF view
+   * *returned* went through `finalize_response` and keeps `Allow` and `Vary: Accept` —
+   * `UserAppsView.post`'s `except Exception: return Response(status=500)` is the one v1 has,
+   * and it is measurably `Vary: Accept, Origin` / `Allow: POST, OPTIONS` on the live stack.
+   */
+  describe('F1 — the 500 strip asks who built the response, not what the status is', () => {
+    it('strips Allow and Vary: Accept from a 500 Django built', () => {
+      const { response } = run('/api/user/power');
+      response.statusCode = 500;
+      response.writeHead(500);
+
+      expect(response.headers.Allow).toBeUndefined();
+      expect(response.headers.Vary).toBeUndefined();
+    });
+
+    it('keeps both on a 500 DRF rendered', () => {
+      const { response } = run('/api/user/power');
+      response.statusCode = 500;
+      markDrfRendered(response);
+      response.writeHead(500);
+
+      expect(response.headers.Allow).toBe('POST, OPTIONS');
+      expect(response.headers.Vary).toBe('Accept');
+    });
+
+    it('leaves a non-500 alone either way', () => {
+      const { response } = run('/api/user/power');
+      response.statusCode = 403;
+      response.writeHead(403);
+
+      expect(response.headers.Allow).toBe('POST, OPTIONS');
+      expect(response.headers.Vary).toBe('Accept');
     });
   });
 
