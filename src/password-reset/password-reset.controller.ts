@@ -514,9 +514,30 @@ export class PasswordResetController {
     response.status(HttpStatus.OK).end(body);
   }
 
-  /** `django.shortcuts.redirect(to)` — a **302**, `Location` verbatim, empty body. */
+  /**
+   * `django.shortcuts.redirect(to)` — a **302**, `Location` verbatim, empty body.
+   *
+   * ⚠️ `HttpResponseRedirect` is an `HttpResponse` like any other, so it carries Django's
+   * default `Content-Type: text/html; charset=utf-8` **and** `Content-Length: 0` — an empty
+   * *HTML* body, not an absent one. That is not the DRF rule two methods up: DRF deletes
+   * `Content-Type` when the rendered body is empty, Django never does. Measured on the live
+   * v1 for all three redirects this controller emits (`POST /password_reset/`,
+   * `GET /reset/<uid>/<valid token>/`, and the successful `POST …/set-password/`):
+   *
+   * ```
+   * HTTP/1.1 302 Found
+   * Content-Type: text/html; charset=utf-8
+   * Location: /password_reset/done/
+   * Content-Length: 0
+   * ```
+   *
+   * v2 sent no `Content-Type` at all — parity finding **F2**. Both headers are set
+   * explicitly rather than left to Express, which emits neither for a bodiless `end()`.
+   */
   private redirect(response: Response, location: string): void {
     response.setHeader('Location', location);
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    response.setHeader('Content-Length', '0');
     response.status(HttpStatus.FOUND).end();
   }
 }

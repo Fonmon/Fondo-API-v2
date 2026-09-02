@@ -566,6 +566,67 @@ describe('Phase 3 — password reset', () => {
     });
   });
 
+  /**
+   * Parity finding **F2**. `HttpResponseRedirect` is an ordinary `HttpResponse`, so all three
+   * redirects this controller emits carry Django's default `Content-Type: text/html;
+   * charset=utf-8` with `Content-Length: 0` — an empty *HTML* body. v2 sent none, which is
+   * DRF's empty-body rule leaking onto a Django view that does not have it. Measured on the
+   * live v1 for each of the three.
+   */
+  describe('F2 — every 302 carries Django’s default Content-Type', () => {
+    const expectDjangoRedirect = (response: request.Response, location: string): void => {
+      expect(response.status).toBe(302);
+      expect(response.headers.location).toBe(location);
+      expect(response.headers['content-type']).toBe('text/html; charset=utf-8');
+      expect(response.headers['content-length']).toBe('0');
+      expect(response.text).toBe('');
+    };
+
+    it('POST /password_reset/ — the anti-enumeration redirect', async () => {
+      const { cookie, field } = csrfPair();
+      const response = await request(app.getHttpServer())
+        .post('/password_reset/')
+        .set('Cookie', `csrftoken=${cookie}`)
+        .type('form')
+        .send({ email: 'nobody@mail.com', csrfmiddlewaretoken: field });
+
+      expectDjangoRedirect(response, '/password_reset/done/');
+    });
+
+    it('GET /reset/<uid>/<valid token>/ — the two-step hop', async () => {
+      const token = tokens.makeToken(await currentUser());
+      const response = await request(app.getHttpServer()).get(
+        `/reset/${uidOf(memberId)}/${token}/`,
+      );
+
+      expectDjangoRedirect(response, `/reset/${uidOf(memberId)}/set-password/`);
+    });
+
+    it('POST /reset/<uid>/set-password/ — the successful password change', async () => {
+      const token = tokens.makeToken(await currentUser());
+      const { cookie, field } = csrfPair();
+      const response = await request(app.getHttpServer())
+        .post(`/reset/${uidOf(memberId)}/set-password/`)
+        .set('Cookie', [`csrftoken=${cookie}`, `_password_reset_token=${token}`])
+        .type('form')
+        .send({
+          new_password1: 'una-clave-para-f2',
+          new_password2: 'una-clave-para-f2',
+          csrfmiddlewaretoken: field,
+        });
+
+      expectDjangoRedirect(response, '/reset/done/');
+    });
+
+    it('the APPEND_SLASH 301 still carries it too — the control that did not regress', async () => {
+      const response = await request(app.getHttpServer()).get('/password_reset').expect(301);
+
+      expect(response.headers.location).toBe('/password_reset/');
+      expect(response.headers['content-type']).toBe('text/html; charset=utf-8');
+      expect(response.headers['content-length']).toBe('0');
+    });
+  });
+
   describe('the two static pages', () => {
     it('GET /password_reset/done/ renders the Spanish confirmation', async () => {
       const response = await request(app.getHttpServer())
