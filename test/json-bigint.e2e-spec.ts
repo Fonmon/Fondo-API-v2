@@ -43,10 +43,16 @@ class BigIntProbeController {
   }
 }
 
-/** The synthetic stand-in for Phase 3's `GET /api/user/<id>`; not a v1 URL. */
+/**
+ * The synthetic stand-in for Phase 3's `GET /api/user/<id>`; not a v1 URL.
+ *
+ * `view: null` because there is no v1 view behind it (condition **C20** narrowed the field
+ * to the 21 real view names). Both probe routes are therefore `@Public()` — a `null` view can
+ * carry no permission rule, and `RolesGuard` 500s a guarded route that resolves to one.
+ */
 const PROBE_ROUTE: DjangoUrlPattern = {
   regex: /^__bigint\/[a-z]+$/,
-  view: 'BigIntProbeController (test only)',
+  view: null,
   drf: null,
 };
 

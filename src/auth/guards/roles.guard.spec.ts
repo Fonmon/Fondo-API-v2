@@ -1,5 +1,6 @@
-import type { ExecutionContext } from '@nestjs/common';
+import { InternalServerErrorException, Logger, type ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import type { DjangoUrlPattern, ResolvedViewName } from '../../common/http/django-url-conf';
 import { DrfException } from '../../common/http/drf.exception';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { V1_VIEW_KEY } from '../decorators/v1-view.decorator';
@@ -27,13 +28,40 @@ function reflectorFor(metadata: { isPublic?: boolean; v1View?: string }): Reflec
   } as unknown as Reflector;
 }
 
-function contextFor(method: string, authUser?: AuthenticatedUser): ExecutionContext {
+/**
+ * The pattern `DjangoUrlResolverMiddleware` would have attached (condition **C20**). Only
+ * `view` matters to the guard.
+ */
+function route(view: ResolvedViewName | null): DjangoUrlPattern {
+  return { regex: /^never$/, view, drf: null };
+}
+
+/**
+ * `resolvedView` stands in for `request.djangoRoute`. It defaults to `metadata.v1View`
+ * because *agreeing* is the normal case; the cells that matter to C20 set it explicitly.
+ */
+function contextFor(
+  method: string,
+  authUser?: AuthenticatedUser,
+  djangoRoute?: DjangoUrlPattern,
+): ExecutionContext {
   return {
     getType: () => 'http',
     getHandler: () => () => undefined,
     getClass: () => class {},
-    switchToHttp: () => ({ getRequest: () => ({ method, authUser }) }),
+    switchToHttp: () => ({
+      getRequest: () => ({ method, authUser, djangoRoute, originalUrl: '/probe' }),
+    }),
   } as unknown as ExecutionContext;
+}
+
+/** The common case: the URL table and the controller name the same v1 view. */
+function agreeing(
+  view: ResolvedViewName,
+  method: string,
+  authUser?: AuthenticatedUser,
+): ExecutionContext {
+  return contextFor(method, authUser, route(view));
 }
 
 describe('RolesGuard (IsAuthenticated + APIRolePermission)', () => {
@@ -104,13 +132,15 @@ describe('RolesGuard (IsAuthenticated + APIRolePermission)', () => {
 
     it('403s a @V1View name that is registered but has no rule for the method', () => {
       const guard = new RolesGuard(reflectorFor({ v1View: 'LoanView' }));
-      expect(() => guard.canActivate(contextFor('DELETE', user(Role.ADMIN)))).toThrow(DrfException);
+      expect(() => guard.canActivate(agreeing('LoanView', 'DELETE', user(Role.ADMIN)))).toThrow(
+        DrfException,
+      );
     });
 
     it('403s an authenticated user with no fondo_api_userprofile row', () => {
       const guard = new RolesGuard(reflectorFor({ v1View: 'LoanView' }));
       try {
-        guard.canActivate(contextFor('GET', user(null)));
+        guard.canActivate(agreeing('LoanView', 'GET', user(null)));
         throw new Error('expected a 403');
       } catch (error) {
         expect((error as DrfException).getStatus()).toBe(403);
@@ -121,7 +151,7 @@ describe('RolesGuard (IsAuthenticated + APIRolePermission)', () => {
   describe('role rules', () => {
     it.each(ALL_ROLES)('allows role %d on LoanView GET (rule 3)', (role) => {
       const guard = new RolesGuard(reflectorFor({ v1View: 'LoanView' }));
-      expect(guard.canActivate(contextFor('GET', user(role)))).toBe(true);
+      expect(guard.canActivate(agreeing('LoanView', 'GET', user(role)))).toBe(true);
     });
 
     it.each([
@@ -132,10 +162,91 @@ describe('RolesGuard (IsAuthenticated + APIRolePermission)', () => {
     ] as const)('LoanView PATCH (rule [0,2]) for role %d -> %s', (role, allowed) => {
       const guard = new RolesGuard(reflectorFor({ v1View: 'LoanView' }));
       if (allowed) {
-        expect(guard.canActivate(contextFor('PATCH', user(role)))).toBe(true);
+        expect(guard.canActivate(agreeing('LoanView', 'PATCH', user(role)))).toBe(true);
       } else {
-        expect(() => guard.canActivate(contextFor('PATCH', user(role)))).toThrow(DrfException);
+        expect(() => guard.canActivate(agreeing('LoanView', 'PATCH', user(role)))).toThrow(
+          DrfException,
+        );
       }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // C20 / S2 — the view identity comes from the URL table, not from the Nest route
+  // ---------------------------------------------------------------------------
+
+  describe('C20 — the guard authorises on the view Django’s resolver picked', () => {
+    let logged: string[];
+
+    beforeEach(() => {
+      logged = [];
+      jest.spyOn(Logger.prototype, 'error').mockImplementation((message: unknown) => {
+        logged.push(String(message));
+      });
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('500s when the resolved view and the declared @V1View disagree', () => {
+      // The Phase 3 case, made concrete. v1 resolves `DELETE /api/user/power` to
+      // `UserAppsView` — measured live, `Allow: POST, OPTIONS` — which declares no DELETE and
+      // is therefore a 403 for every role including ADMIN. A `:id`-first Nest controller
+      // would hand it to `UserDetailView.DELETE`, where role <= 0 lets an ADMIN through.
+      const guard = new RolesGuard(reflectorFor({ v1View: 'UserDetailView' }));
+
+      expect(() =>
+        guard.canActivate(contextFor('DELETE', user(Role.ADMIN), route('UserAppsView'))),
+      ).toThrow(InternalServerErrorException);
+      expect(logged.join('\n')).toContain("resolves to 'UserAppsView'");
+      expect(logged.join('\n')).toContain("@V1View('UserDetailView')");
+    });
+
+    it('does not silently substitute the resolved view’s rules for the declared one’s', () => {
+      // The tempting alternative — evaluate `UserAppsView`'s rules and 403 — would match v1's
+      // status while still running the wrong handler. A 500 is the honest answer to "these
+      // two mappings disagree".
+      const guard = new RolesGuard(reflectorFor({ v1View: 'UserDetailView' }));
+
+      try {
+        guard.canActivate(contextFor('DELETE', user(Role.ADMIN), route('UserAppsView')));
+        throw new Error('expected a 500');
+      } catch (error) {
+        expect(error).not.toBeInstanceOf(DrfException);
+      }
+    });
+
+    it('500s a guarded route that resolves to a v2-only pattern (view: null)', () => {
+      const guard = new RolesGuard(reflectorFor({ v1View: 'LoanView' }));
+
+      expect(() => guard.canActivate(contextFor('GET', user(Role.ADMIN), route(null)))).toThrow(
+        InternalServerErrorException,
+      );
+      expect(logged.join('\n')).toContain('no v1 view');
+    });
+
+    it('403s — never allows — when the URL layer left no resolved route at all', () => {
+      const guard = new RolesGuard(reflectorFor({ v1View: 'LoanView' }));
+
+      // `LoanView.GET` is rule 3, i.e. allowed for every role; the only reason this denies is
+      // that nothing established which v1 view answers.
+      expect(() => guard.canActivate(contextFor('GET', user(Role.MEMBER)))).toThrow(DrfException);
+      expect(logged.join('\n')).toContain('no resolved v1 route');
+    });
+
+    it('does not log or throw for a controller that simply has no @V1View', () => {
+      // That is v1's own `KeyError` path, not a v2 wiring bug: 403, quietly.
+      const guard = new RolesGuard(reflectorFor({}));
+
+      expect(() => guard.canActivate(contextFor('GET', user(Role.ADMIN)))).toThrow(DrfException);
+      expect(logged).toEqual([]);
+    });
+
+    it('allows when the two agree, which is the whole point of the check being cheap', () => {
+      const guard = new RolesGuard(reflectorFor({ v1View: 'UserAppsView' }));
+
+      expect(guard.canActivate(agreeing('UserAppsView', 'POST', user(Role.MEMBER)))).toBe(true);
     });
   });
 

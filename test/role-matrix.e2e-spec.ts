@@ -6,12 +6,14 @@ import { AuthModule } from '../src/auth/auth.module';
 import { Role } from '../src/auth/permissions/roles';
 import { V1_ROLE_MATRIX } from '../src/auth/permissions/v1-role-matrix.fixture';
 import { ApiExceptionFilter } from '../src/common/filters/api-exception.filter';
+import { DjangoUrlResolverMiddleware } from '../src/common/http/django-url-resolver.middleware';
 import { AppConfigModule } from '../src/config/config.module';
 import { PrismaModule } from '../src/prisma/prisma.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import {
   MATRIX_BASE_PATH,
   MATRIX_CONTROLLERS,
+  MATRIX_URL_CONF,
   UNREGISTERED_CONTROLLER,
 } from './support/matrix-controllers';
 import {
@@ -54,6 +56,12 @@ describe('Phase 1 — the full v1 role matrix', () => {
 
     app = moduleFixture.createNestApplication();
     app.useGlobalFilters(new ApiExceptionFilter());
+    // Condition C20: `RolesGuard` authorises on the view the URL table resolved, so the
+    // replay has to go through the resolver. This module is deliberately *not* `AppModule`
+    // (the point is to exercise the guards on synthetic controllers), so the one middleware
+    // the guards now depend on is mounted by hand, against the widened table.
+    const resolver = new DjangoUrlResolverMiddleware(MATRIX_URL_CONF);
+    app.use(resolver.use.bind(resolver));
     await app.init();
 
     prisma = app.get(PrismaService);

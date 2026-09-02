@@ -34,7 +34,16 @@ export type PermissionMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
  *
  * `AlexaView`, `AuthView` (Alexa account-linking) and `UserActivateView` never appear in
  * v1's dict either: the first two are retired (plan §1) and the third clears its permission
- * classes entirely (`permission_classes = []`), which v2 expresses with `@Public()`.
+ * classes entirely (`permission_classes = []`), which v2 expresses with `@Public()`. Those,
+ * plus the four `django.contrib.auth` password-reset pages and `ObtainAuthToken`, are typed
+ * as `UnguardedV1View` in `common/http/django-url-conf.ts`, so the URL table can name them
+ * without them becoming permission keys.
+ *
+ * ⚠️ Condition **C20**: the key `RolesGuard` looks up here is the view **the URL table
+ * resolved**, not the `@V1View(...)` of whichever Nest route Express matched. Adding an entry
+ * below therefore also means adding (or already having) the corresponding pattern in
+ * `DJANGO_URL_CONF` with the same name — the two are linked at compile time through
+ * {@link V1ViewName}.
  */
 export const PERMISSION_MATRIX = Object.freeze({
   LoanView: {

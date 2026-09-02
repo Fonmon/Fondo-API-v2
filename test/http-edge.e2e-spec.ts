@@ -665,6 +665,31 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
     });
   });
   // ---------------------------------------------------------------------------
+  // Consider C5 — the URL table's `$` is only exact because Django >= 2.2.25
+  // ---------------------------------------------------------------------------
+
+  describe('C5 — a trailing %0A is a URL-conf 404, over the real transport', () => {
+    // gunicorn's `unquote_to_wsgi_str` puts a literal `\n` in `PATH_INFO`, so this is a
+    // reachable request target, not a theoretical one. Python's `$` matches before a trailing
+    // newline; Django 2.2.25+ uses `re.fullmatch` for `$`-terminated patterns (CVE-2021-44420)
+    // and 404s it. Live v1: 404 on all three. JS `$` agrees — by coincidence of that fix.
+    it.each(['/api/notification/subscribe%0A', '/password_reset/%0A', '/api-token-auth%0A'])(
+      '404s %s',
+      async (target) => {
+        const { status } = await rawRequest(target, 'POST');
+
+        expect(status).toBe(404);
+      },
+    );
+
+    it('serves the same targets without the %0A — the control', async () => {
+      // 401 (guarded, unauthenticated) and 301 (APPEND_SLASH), not 404.
+      expect((await rawRequest('/api/notification/subscribe', 'POST')).status).toBe(401);
+      expect((await rawRequest('/password_reset', 'POST')).status).toBe(301);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // C19 / S3 — ALLOWED_HOSTS: the branch of CommonMiddleware that is not a no-op
   // ---------------------------------------------------------------------------
 

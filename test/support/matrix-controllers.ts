@@ -1,6 +1,7 @@
 import { All, Controller, type Type } from '@nestjs/common';
 import { V1View } from '../../src/auth/decorators/v1-view.decorator';
 import { V1_VIEW_NAMES, type V1ViewName } from '../../src/auth/permissions/permission-matrix';
+import { DJANGO_URL_CONF, type DjangoUrlPattern } from '../../src/common/http/django-url-conf';
 
 /**
  * Stand-in controllers for the 14 v1 view classes, used only by `role-matrix.e2e-spec.ts`.
@@ -57,3 +58,29 @@ export const UNREGISTERED_CONTROLLER: Type<unknown> = matrixController(
 );
 
 export const MATRIX_BASE_PATH = '/__matrix';
+
+/**
+ * v1's URL table, widened with one synthetic pattern per matrix controller — condition
+ * **C20**.
+ *
+ * `RolesGuard` now authorises on the view `DjangoUrlResolverMiddleware` resolved, not on the
+ * `@V1View(...)` of whichever Nest route Express matched, and it fails closed when the two
+ * disagree or when no route was resolved at all. So the 280-cell replay has to run through
+ * the real URL layer, which is an improvement in its own right: it is now proof that the
+ * table, the router and the matrix agree, rather than proof about the matrix alone.
+ *
+ * Built from {@link V1_VIEW_NAMES}, so a view added to `list_permissions` gets a controller
+ * *and* a pattern or neither — they cannot drift apart.
+ */
+export const MATRIX_URL_CONF: readonly DjangoUrlPattern[] = [
+  ...DJANGO_URL_CONF,
+  ...V1_VIEW_NAMES.map((viewName): DjangoUrlPattern => ({
+    regex: new RegExp(`^__matrix/${viewName}$`),
+    view: viewName,
+    drf: null,
+  })),
+  // The rule-less route: it resolves (so it reaches the guard) but names no v1 view, which
+  // is what a v2-only path looks like. The controller carries no `@V1View`, so the guard
+  // denies on v1's own `KeyError` path before the identity check can fire.
+  { regex: /^__matrix\/UnregisteredView$/, view: null, drf: null },
+];

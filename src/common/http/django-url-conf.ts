@@ -37,6 +37,8 @@
  * @see `~/Projects/Fondo-API/api/urls.py` and `~/Projects/Fondo-API/fondo_api/urls.py`
  */
 
+import type { V1ViewName } from '../../auth/permissions/permission-matrix';
+
 /**
  * DRF's `APIView.default_response_headers`, per view. `null` for a plain Django view.
  *
@@ -87,13 +89,80 @@ export interface DrfViewHeaders {
   readonly varyAccept: boolean;
 }
 
+/**
+ * The v1 views this table can resolve to that have **no** entry in
+ * `fondo_api/permissions.py:list_permissions`, and therefore no role rule.
+ *
+ *  * the four `django.contrib.auth` password-reset pages are plain Django views, not DRF
+ *    `APIView`s, so `APIRolePermission` never runs on them;
+ *  * `ObtainAuthToken` sets `permission_classes = ()`;
+ *  * `UserActivateView` sets `permission_classes = []`;
+ *  * `AuthView` is Alexa account linking and is **not migrated** (plan §1) — it stays in the
+ *    table because `/api/authorize` still resolves in v1 and must not 404 differently here.
+ *
+ * Everything in this union must be `@Public()` on the v2 side (or have no v2 route at all).
+ * A route carrying `@V1View(...)` that resolves to one of these names is a wiring bug and
+ * {@link RolesGuard} fails it closed — see condition **C20**.
+ */
+export type UnguardedV1View =
+  | 'PasswordResetView'
+  | 'PasswordResetDoneView'
+  | 'PasswordResetConfirmView'
+  | 'PasswordResetCompleteView'
+  | 'ObtainAuthToken'
+  | 'AuthView'
+  | 'UserActivateView';
+
+/**
+ * The name of the v1 view a pattern resolves to — condition **C20**, finding **S2**.
+ *
+ * Typed rather than a free `string` so the URL table and
+ * `fondo_api/permissions.py:list_permissions` are linked at **compile** time: a pattern
+ * cannot claim a view the permission matrix has never heard of, and renaming a matrix entry
+ * breaks the table rather than silently unbinding a route from its rules.
+ */
+export type ResolvedViewName = V1ViewName | UnguardedV1View;
+
 export interface DjangoUrlPattern {
   /** The v1 regex, transcribed verbatim (Python named groups become plain groups). */
   readonly regex: RegExp;
-  /** The v1 view class, or the Django view for the auth pages. Documentation only. */
-  readonly view: string;
+  /**
+   * The v1 view class Django's resolver would pick for this pattern — **the** authorisation
+   * key, not documentation (condition **C20**). `null` only for a v2-only or synthetic route
+   * with no v1 counterpart, which must therefore be `@Public()`.
+   */
+  readonly view: ResolvedViewName | null;
   /** The headers DRF attaches to every response from this view. */
   readonly drf: DrfViewHeaders | null;
+}
+
+/**
+ * What {@link DjangoUrlResolverMiddleware} hands the guards: the pattern Django's resolver
+ * would have matched, so `RolesGuard` evaluates the rules of the view **v1** would have
+ * dispatched to rather than the one Express's declaration order happened to pick.
+ *
+ * ## Why this is not paranoia
+ *
+ * Django picks the view by *first pattern that matches*. Express matches by *declaration
+ * order with unconstrained `:params`*. Those are two different mappings, and on
+ * `/api/user/<x>` v1 has three patterns whose rules disagree (measured live — the `Allow`
+ * header names the view that answered):
+ *
+ * ```
+ * ^api/user/?$                      UserView        POST 0  GET 3  PATCH [0,2]
+ * ^api/user/(?P<app>-?[a-zA-Z]+)$   UserAppsView    POST 3            <- no DELETE
+ * ^api/user/(?P<id>-?[0-9]+)$       UserDetailView  GET 3  PATCH 3  DELETE 0
+ * ```
+ *
+ * `DELETE /api/user/power` is `UserAppsView` in v1 (`Allow: POST, OPTIONS`, verified), which
+ * declares no `DELETE`, so `APIRolePermission`'s bare `except` denies it for **every** role
+ * including ADMIN. A Phase 3 controller that declared `@Delete(':id')` before `@Post(':app')`
+ * would route it to `UserDetailView.DELETE` — ADMIN-allowed — and the difference would show
+ * up as a successful soft delete, not as a 404.
+ */
+export interface RequestWithDjangoRoute {
+  /** Set by {@link DjangoUrlResolverMiddleware} on every request it lets through. */
+  djangoRoute?: DjangoUrlPattern;
 }
 
 const DRF_JSON_ONLY = (allow: string): DrfViewHeaders => ({ allow, varyAccept: false });
@@ -200,7 +269,9 @@ export const DJANGO_URL_CONF: readonly DjangoUrlPattern[] = [
   // --- v2-only ------------------------------------------------------------------------
   // `GET /health` has no v1 counterpart (registered as P0-D2). Listed here because the
   // resolver is fail-closed: a path absent from this table cannot reach a controller.
-  { regex: /^health\/?$/, view: 'HealthController (v2 only, P0-D2)', drf: null },
+  // `view: null` — no v1 view, so no permission rule can key on it and `RolesGuard` refuses
+  // any controller that claims one here (condition C20). `/health` is `@Public()`.
+  { regex: /^health\/?$/, view: null, drf: null },
 ];
 
 /**
@@ -214,7 +285,7 @@ export const DJANGO_URL_CONF: readonly DjangoUrlPattern[] = [
  *
  * ```ts
  * .overrideProvider(DJANGO_URL_CONF_TOKEN)
- * .useValue([...DJANGO_URL_CONF, { regex: /^__bigint\/.+$/, view: 'probe', drf: null }])
+ * .useValue([...DJANGO_URL_CONF, { regex: /^__bigint\/.+$/, view: null, drf: null }])
  * ```
  *
  * An override is deliberately noisy: it is the one way a test can widen the URL surface, and

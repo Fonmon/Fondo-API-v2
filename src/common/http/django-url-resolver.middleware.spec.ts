@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import { DJANGO_URL_CONF } from './django-url-conf';
+import { DJANGO_URL_CONF, type RequestWithDjangoRoute } from './django-url-conf';
 import { DjangoUrlResolverMiddleware } from './django-url-resolver.middleware';
 
 /**
@@ -45,11 +45,16 @@ describe('DjangoUrlResolverMiddleware', () => {
   }
 
   function run(originalUrl: string): {
-    request: Request;
+    request: Request & RequestWithDjangoRoute;
     response: ReturnType<typeof fakeResponse>;
     nextCalled: boolean;
   } {
-    const request = { method: 'POST', originalUrl, url: originalUrl, headers: {} } as Request;
+    const request = {
+      method: 'POST',
+      originalUrl,
+      url: originalUrl,
+      headers: {},
+    } as Request & RequestWithDjangoRoute;
     const response = fakeResponse();
     let nextCalled = false;
     middleware.use(request, response, () => {
@@ -121,6 +126,32 @@ describe('DjangoUrlResolverMiddleware', () => {
       const { response } = run('/password_reset/');
       expect(response.headers.Allow).toBeUndefined();
       expect(response.headers.Vary).toBeUndefined();
+    });
+  });
+
+  describe('C20 — it publishes which v1 view answered, not just that one did', () => {
+    it('attaches the matched pattern to the request', () => {
+      const { request } = run('/api/notification/subscribe');
+
+      expect(request.djangoRoute?.view).toBe('NotificationView');
+    });
+
+    it('resolves /api/user/power to UserAppsView — the pattern order, not the segment shape', () => {
+      // Measured on live v1: `Allow: POST, OPTIONS` on that path, i.e. UserAppsView answered.
+      expect(run('/api/user/power').request.djangoRoute?.view).toBe('UserAppsView');
+      expect(run('/api/user/-power').request.djangoRoute?.view).toBe('UserAppsView');
+    });
+
+    it('resolves /api/user/5 and the -1 sentinel to UserDetailView', () => {
+      expect(run('/api/user/5').request.djangoRoute?.view).toBe('UserDetailView');
+      expect(run('/api/user/-1').request.djangoRoute?.view).toBe('UserDetailView');
+    });
+
+    it('leaves nothing attached when nothing resolved — the guard must not guess', () => {
+      const { request, nextCalled } = run('/nope/nope');
+
+      expect(nextCalled).toBe(false);
+      expect(request.djangoRoute).toBeUndefined();
     });
   });
 });

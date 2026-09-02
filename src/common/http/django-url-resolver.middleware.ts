@@ -7,6 +7,7 @@ import {
   decodePathInfo,
   resolveDjangoUrl,
   type DjangoUrlPattern,
+  type RequestWithDjangoRoute,
 } from './django-url-conf';
 import { escapeUriPath } from './django-uri-encoding';
 import { splitQuery } from './request-target';
@@ -31,6 +32,14 @@ import { splitQuery } from './request-target';
  * 3. **DRF's `default_response_headers`.** The matched view's `Allow` and `Vary: Accept` are
  *    attached here rather than in a controller, because in v1 they are on the 401 and 403 the
  *    *guards* produce, long before a handler runs (F4).
+ * 4. **The matched view's identity**, published on the request as `djangoRoute` — condition
+ *    **C20**, finding **S2**. Resolving *whether* a path is served is only half of what
+ *    Django's resolver does; the other half is *which view* answers, and that is the key
+ *    `fondo_api/permissions.py:list_permissions` is indexed by. Before this, the table
+ *    computed the answer and threw it away, and `RolesGuard` re-derived it from whichever
+ *    Nest route Express's declaration order had matched — two mappings with nothing keeping
+ *    them in agreement. See {@link RequestWithDjangoRoute} for the `/api/user/<x>` case where
+ *    they can disagree, and `RolesGuard` for what happens when they do.
  *
  * `CommonMiddleware`'s `APPEND_SLASH` 301 is **not** here: it belongs three middlewares above
  * the CORS short-circuit while resolution belongs below it, so it lives in
@@ -58,6 +67,10 @@ export class DjangoUrlResolverMiddleware implements NestMiddleware {
       this.notFound(response);
       return;
     }
+
+    // Django's resolver answers "which view", not just "is this served" (C20). Everything
+    // downstream — the guards especially — must key on *this*, not on the Nest route.
+    (request as Request & RequestWithDjangoRoute).djangoRoute = matched;
 
     normaliseRequestTarget(request, pathInfo, rawQuery);
     this.applyDrfViewHeaders(response, matched);

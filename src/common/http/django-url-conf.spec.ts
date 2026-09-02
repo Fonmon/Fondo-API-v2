@@ -130,6 +130,68 @@ describe('DJANGO_URL_CONF', () => {
     });
   });
 
+  describe('C20 — the table names the view, and first-match-wins decides which', () => {
+    // These four patterns share a prefix and have *different* permission rules, so which one
+    // matches is an authorisation decision. Each expectation is the view that answered on the
+    // live v1, identified by the `Allow` header it returned for that path.
+    it.each([
+      ['/api/user', 'UserView'],
+      ['/api/user/', 'UserView'],
+      ['/api/user/power', 'UserAppsView'],
+      ['/api/user/-power', 'UserAppsView'],
+      ['/api/user/5', 'UserDetailView'],
+      ['/api/user/-1', 'UserDetailView'],
+      ['/api/user/activate/5', 'UserActivateView'],
+    ])('%s resolves to %s', (path, view) => {
+      expect(resolveDjangoUrl(path)?.view).toBe(view);
+    });
+
+    it('keeps UserAppsView ahead of UserDetailView, as fondo_api/urls.py:21-22 does', () => {
+      const names = DJANGO_URL_CONF.map((entry) => entry.view);
+
+      expect(names.indexOf('UserAppsView')).toBeLessThan(names.indexOf('UserDetailView'));
+    });
+
+    it('gives every v2-only pattern a null view, so no rule can key on it', () => {
+      expect(resolveDjangoUrl('/health')?.view).toBeNull();
+    });
+  });
+
+  describe('Consider C5 — the `$` transcription depends on Django >= 2.2.25', () => {
+    // Python's `$` also matches immediately before a trailing newline, so `subscribe\n` would
+    // have matched `^…/(?P<operation>[a-zA-Z]+)/?$` under `re.match`. That input is reachable:
+    // gunicorn's `unquote_to_wsgi_str` turns `%0A` into a literal `\n` in `PATH_INFO` and
+    // Django's `get_path_info` passes it through — both verified inside the v1 image.
+    //
+    // It resolves to a 404 in v1 anyway, because **Django 2.2.25+ `RegexPattern.match` uses
+    // `re.fullmatch` for patterns ending in `$`** (the CVE-2021-44420 fix,
+    // `django/urls/resolvers.py`). JavaScript's `$` is `fullmatch`-like already, so the
+    // transcription is exact — but only against that Django version.
+    //
+    // ⚠️ These two cells exist so that a "simplification" of the table toward `search`-like
+    // semantics, or a downgrade below 2.2.25, fails loudly instead of silently widening the
+    // URL surface. Live v1 confirms 404 on all four of the paths below.
+    it.each([
+      '/api/notification/subscribe\n',
+      '/password_reset/\n',
+      '/api-token-auth\n',
+      '/api/loan\n',
+    ])('404s %j — a trailing newline is not a match (re.fullmatch)', (pathInfo) => {
+      expect(resolveDjangoUrl(pathInfo)).toBeNull();
+    });
+
+    it('reaches that path from a real request target: %0A decodes to a literal newline', () => {
+      expect(decodePathInfo('/api/notification/subscribe%0A')).toBe(
+        '/api/notification/subscribe\n',
+      );
+      expect(resolveDjangoUrl(decodePathInfo('/api/notification/subscribe%0A'))).toBeNull();
+    });
+
+    it('still resolves the same path without the newline — the control', () => {
+      expect(resolveDjangoUrl('/api/notification/subscribe')?.view).toBe('NotificationView');
+    });
+  });
+
   it('anchors every pattern at both ends — an unanchored one would widen the surface', () => {
     for (const entry of DJANGO_URL_CONF) {
       expect(entry.regex.source.startsWith('^')).toBe(true);
