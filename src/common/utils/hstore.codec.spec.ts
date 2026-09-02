@@ -246,8 +246,20 @@ describe('decodePushSubscription (NotificationService.send_notification)', () =>
     });
   });
 
-  it('throws when the keys entry is missing rather than publishing a broken payload', () => {
+  it('throws when the keys entry is SQL NULL rather than publishing a broken payload', () => {
     expect(() => decodePushSubscription({ endpoint: 'x', keys: null })).toThrow(TypeError);
+  });
+
+  // Condition C23 / finding S5: the *absent* case used to fail open — the loop simply never
+  // visited a key that was not there, so the subscription decoded without `keys` and
+  // `NotificationPublisher` published it. v1 raises `KeyError` and publishes nothing.
+  it('C23: throws a KeyError when the keys entry is absent, not only when it is NULL', () => {
+    expect(() => decodePushSubscription({ endpoint: 'x' })).toThrow("KeyError: 'keys'");
+  });
+
+  it('C23: an absent keys entry never yields a decoded object', () => {
+    const attempt = (): unknown => decodePushSubscription({ endpoint: 'x', expirationTime: null });
+    expect(attempt).toThrow("KeyError: 'keys'");
   });
 });
 
@@ -278,7 +290,12 @@ describe('decodeSchedulerPayload (NotificationExecuter.run)', () => {
     expect(decoded.owner_id).toBe('53');
   });
 
-  it('throws when user_ids is missing', () => {
+  it('throws when user_ids is SQL NULL', () => {
     expect(() => decodeSchedulerPayload({ type: 'x', user_ids: null })).toThrow(TypeError);
+  });
+
+  // Condition C23 / finding S5, the Phase 7 half of the same defect.
+  it('C23: throws a KeyError when user_ids is absent, not only when it is NULL', () => {
+    expect(() => decodeSchedulerPayload({ type: 'x' })).toThrow("KeyError: 'user_ids'");
   });
 });

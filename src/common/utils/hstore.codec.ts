@@ -319,11 +319,19 @@ export interface PushSubscription {
  * `JSON.stringify` reproduces v1's `json.dumps` byte for byte.
  */
 export function decodePushSubscription(map: HstoreMap): PushSubscription {
+  // ⚠️ Condition **C23**, review finding **S5**: v1 subscripts the key unconditionally, so a
+  // row *without* it raises `KeyError` before anything is published. Checking the key's
+  // presence up front — rather than only handling it if `Object.entries` yields it — is what
+  // makes the absent case fail closed like v1's instead of publishing a subscription with no
+  // `keys` field to the Lambda.
+  requireHstoreKey(map, 'keys');
+
   const decoded: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(map)) {
     if (key === 'keys') {
       if (value === null) {
-        throw new TypeError('Push subscription is missing its "keys" entry');
+        // Django stores Python `None` as SQL NULL; v1 then does `None.replace(...)`.
+        throw new TypeError("AttributeError: 'NoneType' object has no attribute 'replace'");
       }
       decoded[key] = JSON.parse(repairPythonReprToJson(value)) as Record<string, string>;
       continue;
@@ -331,6 +339,24 @@ export function decodePushSubscription(map: HstoreMap): PushSubscription {
     decoded[key] = value;
   }
   return decoded as unknown as PushSubscription;
+}
+
+/**
+ * `map[key]` with Python's subscript semantics — condition **C23**, finding **S5**.
+ *
+ * v1 writes `subscription['keys']` and `payload['user_ids']` with no `in` check, so an hstore
+ * row missing that key raises `KeyError` and the whole publish aborts. v2's decoders iterate
+ * `Object.entries`, which visits only the keys that *are* present, so an absent key used to
+ * decode to an object with the field simply missing — a fail-**open** divergence invisible to
+ * any black-box round, because all 94 live rows carry both keys.
+ *
+ * The message shape matches `readEndpoint` in `notification.service.ts:143`, which is the
+ * pattern the rest of the codebase uses for a ported `KeyError`.
+ */
+function requireHstoreKey(map: HstoreMap, key: string): void {
+  if (!Object.prototype.hasOwnProperty.call(map, key)) {
+    throw new Error(`KeyError: '${key}'`);
+  }
 }
 
 /** A scheduler task payload after decoding. Only `user_ids` is not a string. */
@@ -349,11 +375,18 @@ export interface SchedulerPayload {
  * dedupe compares it as text.
  */
 export function decodeSchedulerPayload(map: HstoreMap): SchedulerPayload {
+  // Condition **C23** — same fail-closed rule as `decodePushSubscription`; Phase 7 inherits
+  // this half when the executer starts reading `payload["user_ids"]`.
+  requireHstoreKey(map, 'user_ids');
+
   const decoded: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(map)) {
     if (key === 'user_ids') {
       if (value === null) {
-        throw new TypeError('Scheduler payload is missing its "user_ids" entry');
+        // v1: `json.loads(None)` -> TypeError, uncaught.
+        throw new TypeError(
+          'TypeError: the JSON object must be str, bytes or bytearray, not NoneType',
+        );
       }
       decoded[key] = JSON.parse(value) as number[];
       continue;

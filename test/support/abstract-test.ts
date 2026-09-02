@@ -4,6 +4,8 @@ import type { App } from 'supertest/types';
 import { DjangoPasswordService } from '../../src/auth/password/django-password.service';
 import { Role } from '../../src/auth/permissions/roles';
 import { PrismaService } from '../../src/prisma/prisma.service';
+import { assertDisposableDatabase } from '../shared-database-guard';
+import { TEST_DATABASE_URL } from '../test-database';
 
 /**
  * The v2 counterpart of `fondo_api/tests/abstract_test.py:AbstractTest`.
@@ -42,8 +44,14 @@ const passwords = new DjangoPasswordService();
  *
  * The e2e database is disposable (`test/test-database.ts`) and never the shared dev one, but
  * suites still start from a clean slate so ordering between files cannot matter.
+ *
+ * ⚠️ Condition **C25**: "disposable" is *checked*, not assumed. `assertDisposableDatabase`
+ * refuses a database Django owns, so a `TEST_DATABASE_URL` pointed at `fondodev` fails here
+ * instead of truncating the 94-row parity fixture. The check is memoised per URL, so this
+ * costs one round trip for the whole run.
  */
 export async function resetDatabase(prisma: PrismaService): Promise<void> {
+  await assertDisposableDatabase(TEST_DATABASE_URL);
   await prisma.$executeRawUnsafe(
     'TRUNCATE TABLE authtoken_token, fondo_api_notificationsubscriptions, ' +
       'fondo_api_userfinance, fondo_api_userpreference, fondo_api_userprofile, auth_user ' +

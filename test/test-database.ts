@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { Client } from 'pg';
+import { assertDisposableDatabase } from './shared-database-guard';
 
 /**
  * The e2e suite never touches the shared dev database. It provisions its own from the
@@ -7,6 +8,10 @@ import { Client } from 'pg';
  * is ever executed — on every database v1 created it is merely marked applied.
  *
  * Override with `TEST_DATABASE_URL`; CI points it at the throwaway Postgres container.
+ *
+ * ⚠️ **Whatever it is set to must survive `assertDisposableDatabase`** (condition **C25**).
+ * Everything in here TRUNCATEs, and the shared `fondodev` holds the irreplaceable parity
+ * fixture.
  */
 export const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL ??
@@ -20,8 +25,16 @@ function maintenanceUrl(databaseUrl: string): { adminUrl: string; databaseName: 
   return { adminUrl: url.toString(), databaseName };
 }
 
-/** Creates the test database if it does not exist, then applies the Prisma baseline. */
+/**
+ * Creates the test database if it does not exist, then applies the Prisma baseline.
+ *
+ * Condition **C25**: the target is proven disposable *before* either destructive step —
+ * `CREATE DATABASE` is harmless, but `prisma migrate deploy` and every subsequent
+ * `resetDatabase` are not.
+ */
 export async function provisionTestDatabase(): Promise<void> {
+  await assertDisposableDatabase(TEST_DATABASE_URL);
+
   const { adminUrl, databaseName } = maintenanceUrl(TEST_DATABASE_URL);
 
   const admin = new Client({ connectionString: adminUrl });
