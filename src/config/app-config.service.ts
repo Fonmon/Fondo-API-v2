@@ -31,6 +31,40 @@ export class AppConfigService {
     return this.get('PORT');
   }
 
+  /**
+   * v1's `settings.DEBUG`, which is a property of the settings *module*:
+   * `development.py:18` and `test.py:14` set `True`, `production.py:16` sets `False`.
+   *
+   * Read by the `ALLOWED_HOSTS` port only — `get_host()` substitutes a localhost-only
+   * allowlist when `DEBUG` is on and `ALLOWED_HOSTS` is empty. It is **not** a general
+   * "show stack traces" switch: v2 renders the same JSON error bodies in every environment.
+   */
+  get debug(): boolean {
+    return this.environment !== 'production';
+  }
+
+  /**
+   * v1's `settings.ALLOWED_HOSTS`, per settings module (condition **C19**):
+   *
+   * ```python
+   * development.py:15  ALLOWED_HOSTS = []
+   * test.py:11         ALLOWED_HOSTS = []
+   * production.py:13   ALLOWED_HOSTS = [os.environ.get('ALLOWED_HOST_DOMAIN'), '127.0.0.1']
+   * ```
+   *
+   * An unset `ALLOWED_HOST_DOMAIN` is dropped rather than rendered as a string: v1's `None`
+   * entry can never match, because `is_same_domain` returns `False` for a falsy pattern.
+   * Measured — production with the variable unset serves `Host: 127.0.0.1` and 400s
+   * `Host: localhost`. An *empty* value behaves identically, by the same guard.
+   */
+  get allowedHosts(): readonly string[] {
+    if (this.environment !== 'production') {
+      return [];
+    }
+    const domain = this.config.get('ALLOWED_HOST_DOMAIN', { infer: true });
+    return domain === undefined ? ['127.0.0.1'] : [domain, '127.0.0.1'];
+  }
+
   get databaseUrl(): string {
     return this.get('DATABASE_URL');
   }

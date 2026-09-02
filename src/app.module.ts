@@ -4,6 +4,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { AppConfigModule } from './config/config.module';
 import { AuthModule } from './auth/auth.module';
 import { ApiExceptionFilter } from './common/filters/api-exception.filter';
+import { DjangoAllowedHostsMiddleware } from './common/http/django-allowed-hosts.middleware';
 import { DjangoAppendSlashMiddleware } from './common/http/django-append-slash.middleware';
 import { DjangoCorsMiddleware } from './common/http/django-cors.middleware';
 import { DjangoResponseHeadersMiddleware } from './common/http/django-response-headers.middleware';
@@ -80,13 +81,20 @@ export class AppModule implements NestModule {
    * |---|---|---|
    * | 1 | `SecurityMiddleware` | no-op — no `SECURE_*` setting is configured |
    * | 2 | `SessionMiddleware` | not modelled; only the Phase 3 auth pages touch the session |
-   * | 3 | `CommonMiddleware` | {@link DjangoAppendSlashMiddleware} — the `APPEND_SLASH` 301 |
+   * | 3 | `CommonMiddleware` | {@link DjangoAllowedHostsMiddleware} (`get_host()` → 400), then {@link DjangoAppendSlashMiddleware} (the `APPEND_SLASH` 301) |
    * | 4 | `CsrfViewMiddleware` | not modelled; DRF views are CSRF-exempt (Phase 3 owns the forms) |
    * | 5 | `AuthenticationMiddleware` | not modelled; DRF authenticates per view |
    * | 6 | `MessageMiddleware` | not modelled; no view uses the messages framework |
    * | 7 | `XFrameOptionsMiddleware` | {@link DjangoResponseHeadersMiddleware} (+ the Express-isms v1 does not emit) |
    * | 8 | `corsheaders.CorsMiddleware` | {@link DjangoCorsMiddleware} |
    * | — | `BaseHandler._get_response` — URL resolution and the view, *below* all eight | {@link DjangoUrlResolverMiddleware}, then {@link DrfRequestParsingMiddleware} |
+   *
+   * Slot 3 is **two** classes for the same reason the URL layer is: they are the two steps
+   * of one `process_request`, in its order. `request.get_host()` runs first
+   * (`django/middleware/common.py:47`) and raises `DisallowedHost` → **400** ahead of the
+   * `APPEND_SLASH` check, the CORS preflight and the resolver — condition **C19**, and the
+   * control that stops Phase 3's `PasswordResetView` from emailing a reset link built from a
+   * forged `Host` header.
    *
    * The last row is why the URL layer is **two** middlewares (finding N1, condition C15).
    * `CommonMiddleware`'s 301 is emitted at depth 3, above CORS; the resolver's 404 is emitted
@@ -111,6 +119,7 @@ export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
     consumer
       .apply(
+        DjangoAllowedHostsMiddleware,
         DjangoAppendSlashMiddleware,
         DjangoResponseHeadersMiddleware,
         DjangoCorsMiddleware,

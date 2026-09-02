@@ -68,16 +68,26 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
    * writes the request line, so `POST /password_reset#frag` reaches the app as
    * `POST /password_reset` and the N4 cells below would pass against the unfixed code. This
    * sends the bytes verbatim, exactly as the raw-socket probe against v1 did.
+   *
+   * `headerLines` is a raw, already-CRLF-terminated header block, so a cell can forge a
+   * `Host:` (condition **C19**) — something supertest also cannot express, because Node
+   * derives the `Host` header from the connection.
    */
   async function rawRequest(
     target: string,
     method = 'POST',
-  ): Promise<{ status: number; location: string | undefined }> {
+    headerLines = 'Host: localhost\r\n',
+  ): Promise<{
+    status: number;
+    location: string | undefined;
+    headers: Record<string, string>;
+    body: string;
+  }> {
     const port = await listeningPort();
     const raw = await new Promise<string>((resolve, reject) => {
       const socket = connect(port, '127.0.0.1', () => {
         socket.write(
-          `${method} ${target} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n` +
+          `${method} ${target} HTTP/1.1\r\n${headerLines}Content-Length: 0\r\n` +
             'Connection: close\r\n\r\n',
         );
       });
@@ -92,14 +102,17 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
       socket.on('error', reject);
     });
 
-    const head = raw.split('\r\n\r\n')[0].split('\r\n');
+    const [rawHead, ...rest] = raw.split('\r\n\r\n');
+    const head = rawHead.split('\r\n');
     const status = Number(head[0].split(' ')[1]);
-    const location = head
-      .slice(1)
-      .find((line) => line.toLowerCase().startsWith('location:'))
-      ?.slice('location:'.length)
-      .trim();
-    return { status, location };
+    const headers: Record<string, string> = {};
+    for (const line of head.slice(1)) {
+      const separator = line.indexOf(':');
+      if (separator > 0) {
+        headers[line.slice(0, separator).toLowerCase()] = line.slice(separator + 1).trim();
+      }
+    }
+    return { status, location: headers['location'], headers, body: rest.join('\r\n\r\n') };
   }
 
   async function countSubscriptions(): Promise<number> {
@@ -649,6 +662,133 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
       const { status } = await rawRequest('/api/notification/subscribe#frag');
 
       expect(status).toBe(401);
+    });
+  });
+  // ---------------------------------------------------------------------------
+  // C19 / S3 — ALLOWED_HOSTS: the branch of CommonMiddleware that is not a no-op
+  // ---------------------------------------------------------------------------
+
+  describe('C19 — a forged Host is a 400 before anything else runs', () => {
+    // ⚠️ SECURITY REGRESSION CELLS. `CommonMiddleware.process_request` calls
+    // `request.get_host()` (django/middleware/common.py:47) before the APPEND_SLASH check,
+    // and `get_host()` raises `DisallowedHost` -> 400 for a host outside ALLOWED_HOSTS.
+    // Phase 3's `PasswordResetView` builds the emailed reset link's domain from that same
+    // call (`fondo_api/views/auth.py:37-42`), so deleting the middleware these cells cover
+    // reintroduces reset-link poisoning. Every status below was measured on the live v1.
+    //
+    // The suite runs with ENVIRONMENT=test, i.e. v1's `test.py`: `ALLOWED_HOSTS = []` with
+    // `DEBUG = True`, which `get_host()` turns into `['localhost', '127.0.0.1', '[::1]']`.
+    // Measured against `api.settings.development` (identical settings) on the live v1.
+    const preflight = (host: string): string =>
+      `Host: ${host}\r\nOrigin: http://x.test\r\nAccess-Control-Request-Method: GET\r\n`;
+
+    // `/api/notification/subscribe` rather than `/api/loan`: the loan route resolves in the
+    // URL table but has no v2 controller until Phase 4, so its 404 would mask the 400.
+    it('400s a guarded route — v1: 400 (Host: localhost -> 401), v2 before: served', async () => {
+      const { status } = await rawRequest(
+        '/api/notification/subscribe',
+        'POST',
+        'Host: evil.test\r\n',
+      );
+
+      expect(status).toBe(400);
+    });
+
+    it('400s ahead of the APPEND_SLASH 301 — v1: 400 (Host: localhost -> 301)', async () => {
+      const forged = await rawRequest('/password_reset', 'OPTIONS', preflight('evil.test'));
+      const allowed = await rawRequest('/password_reset', 'OPTIONS', preflight('localhost'));
+
+      expect(forged.status).toBe(400);
+      expect(forged.location).toBeUndefined();
+      expect(allowed.status).toBe(301);
+    });
+
+    it('400s ahead of the CORS preflight short-circuit — v1: 400 (Host: localhost -> 200)', async () => {
+      const forged = await rawRequest('/nope/nope', 'OPTIONS', preflight('evil.test'));
+      const allowed = await rawRequest('/nope/nope', 'OPTIONS', preflight('localhost'));
+
+      expect(forged.status).toBe(400);
+      expect(allowed.status).toBe(200);
+    });
+
+    it('400s ahead of authentication, credentials or not', async () => {
+      const anonymous = await rawRequest(
+        '/api/notification/subscribe',
+        'POST',
+        'Host: evil.test\r\n',
+      );
+      const authenticated = await rawRequest(
+        '/api/notification/subscribe',
+        'POST',
+        `Host: evil.test\r\nAuthorization: Token ${adminToken}\r\n`,
+      );
+
+      expect(anonymous.status).toBe(400);
+      expect(authenticated.status).toBe(400);
+    });
+
+    it('carries no Vary, no X-Frame-Options and no Access-Control-* — slots 4-8 never ran', async () => {
+      // v1's 400 is built by the exception wrapper around slot 3, so nothing below it
+      // decorates the response. Measured: Server/Date/Connection/Content-Type only.
+      const { status, headers } = await rawRequest(
+        '/api/notification/subscribe',
+        'POST',
+        preflight('evil.test'),
+      );
+
+      expect(status).toBe(400);
+      expect(headers['vary']).toBeUndefined();
+      expect(headers['x-frame-options']).toBeUndefined();
+      expect(headers['access-control-allow-origin']).toBeUndefined();
+      expect(headers['x-powered-by']).toBeUndefined();
+    });
+
+    it('renders the D13 JSON body where v1 renders `<h1>Bad Request (400)</h1>`', async () => {
+      const { headers, body } = await rawRequest(
+        '/api/notification/subscribe',
+        'POST',
+        'Host: evil.test\r\n',
+      );
+
+      expect(body).toBe('{"message":"Bad Request"}');
+      expect(headers['content-type']).toBe('application/json');
+    });
+
+    it.each([
+      ['localhost', 401],
+      ['LOCALHOST', 401],
+      ['localhost:9999', 401],
+      ['localhost.', 401],
+      ['127.0.0.1', 401],
+      ['[::1]', 401],
+      ['evil.test', 400],
+      ['local_host', 400],
+      ['localhost:', 400],
+      ['.localhost', 400],
+    ])('Host: %s -> %s, matching v1 exactly', async (host, expected) => {
+      const { status } = await rawRequest(
+        '/api/notification/subscribe',
+        'POST',
+        `Host: ${host}\r\n`,
+      );
+
+      expect(status).toBe(expected);
+    });
+
+    it('ignores X-Forwarded-Host — USE_X_FORWARDED_HOST is False in v1 (P2-D9)', async () => {
+      const { status } = await rawRequest(
+        '/api/notification/subscribe',
+        'POST',
+        'Host: localhost\r\nX-Forwarded-Host: evil.test\r\n',
+      );
+
+      expect(status).toBe(401);
+    });
+
+    it('does not disturb the supertest transport, which sends Host: 127.0.0.1:<port>', async () => {
+      const response = await request(server()).post('/api/notification/subscribe');
+
+      expect(response.status).toBe(401);
     });
   });
 });

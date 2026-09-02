@@ -48,6 +48,25 @@ export const envSchema = z.object({
    */
   NOTIFICATIONS_QUEUE_URL: z.string().trim().min(1).optional(),
 
+  // --- host allowlist ------------------------------------------------------
+  /**
+   * v1's `api/settings/production.py:13`:
+   * `ALLOWED_HOSTS = [os.environ.get('ALLOWED_HOST_DOMAIN'), '127.0.0.1']`.
+   *
+   * Deliberately **optional and untrimmed**, both for parity:
+   *  * `os.environ.get` yields `None` when unset, and `is_same_domain` refuses a falsy
+   *    pattern, so v1 with no `ALLOWED_HOST_DOMAIN` serves only `Host: 127.0.0.1` and 400s
+   *    everything else. That is already fail-closed and loudly visible, so v2 reproduces it
+   *    rather than refusing to boot — a required variable would be a *new* failure mode in
+   *    the one place this migration is porting a security control.
+   *  * trimming would make `' localhost'` an accepted spelling that v1 rejects.
+   *
+   * Accepts a bare domain (`fonmon.minagle.com`), Django's leading-dot subdomain wildcard
+   * (`.minagle.com`) or `*`. Only read in `production`; `development` and `test` set
+   * `ALLOWED_HOSTS = []`, which `DEBUG` then turns into localhost-only.
+   */
+  ALLOWED_HOST_DOMAIN: z.string().optional(),
+
   // --- outbound links ------------------------------------------------------
   /**
    * Used by the `{% host %}` template tag in every Spanish email.
