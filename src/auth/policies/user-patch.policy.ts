@@ -14,8 +14,9 @@ import type { AuthenticatedUser } from '../types/authenticated-user';
  * ```
  *
  * ⚠️ Note the fall-through: **any** unrecognised `type` is treated as `preferences`. That is
- * v1's behavior; {@link resolveSection} reproduces it, and Phase 3 owns the decision of
- * whether to keep it.
+ * v1's behavior and Phase 3 kept it — `{"type": "banana", "preferences": {...}}` writes
+ * preferences in both systems. A *missing* `type` is a different case: `obj['type']` raises
+ * `KeyError` and the request is a 500 (see {@link resolveSection}).
  */
 export type UserSection = 'personal' | 'finance' | 'preferences';
 
@@ -39,8 +40,12 @@ export function resolveSection(type: unknown): UserSection {
   if (type === 'finance') {
     return 'finance';
   }
-  // v1's fall-through: `return self.__update_user_preferences(...)` for anything else,
-  // including a missing `type`.
+  // v1's fall-through: `return self.__update_user_preferences(...)` for anything else.
+  //
+  // ⚠️ A **missing** `type` never gets here in v1: `obj['type']` raises `KeyError` inside
+  // `update_user`, uncaught, so the request is a 500. The caller checks the key's presence
+  // before calling this (`UserService.updateUser`); this function only classifies a `type`
+  // that exists.
   return 'preferences';
 }
 
@@ -51,7 +56,10 @@ export function resolveSection(type: unknown): UserSection {
  */
 export const ROLE_FIELD = 'role';
 
-/** The field `__update_user_finance` joins the treasurer's monthly TSV on (D16 / Q26). */
+/**
+ * The field `__update_user_finance` joins the treasurer's monthly TSV on — **D16, ADMIN-only
+ * since Q26 was answered**. See {@link PRIVILEGED_FIELDS}.
+ */
 export const IDENTIFICATION_FIELD = 'identification';
 
 /**
@@ -115,16 +123,21 @@ export const SECTION_FIELDS: Readonly<Record<UserSection, ReadonlySet<string>>> 
  *
  * `role` is ADMIN-only — the escalation D1 closes.
  *
- * ⏳ `identification` is **not** listed yet. D16 recommends making it ADMIN-only (it is the
- * join key of the treasurer's monthly TSV, and a miss is only logged —
- * `services/user.py:144` — so a member editing their own cédula silently freezes their own
- * contributions and quota), but that is **Q26, still open with the operator**. When it is
- * answered, add `[IDENTIFICATION_FIELD]: [Role.ADMIN]` (or `[Role.ADMIN, Role.TREASURER]`)
- * here — `userPatchAllowlist` takes the map as a parameter so both readings are already
- * tested.
+ * ✅ `identification` is ADMIN-only too — **D16, Q26 answered**. It is the join key of the
+ * treasurer's monthly TSV (`__update_user_finance` looks up `user__identification`) and a
+ * miss is only *logged* and skipped (`services/user.py:142-145`), so a member editing their
+ * own cédula silently freezes their own contributions, quota and available quota at the last
+ * upload — with no error visible to the treasurer and no notification to anyone. That is
+ * money-visible and unrecoverable without someone noticing, which is why it is restricted
+ * rather than merely audited.
+ *
+ * ⚠️ Both entries are gated by {@link changedFields}, not by presence: v1's client echoes the
+ * whole `personal` object back on every save, so a member re-submitting their *own,
+ * unchanged* cédula must not 403 (§7 "C8 resolved", rule 3).
  */
 export const PRIVILEGED_FIELDS: Readonly<Record<string, readonly Role[]>> = Object.freeze({
   [ROLE_FIELD]: [Role.ADMIN],
+  [IDENTIFICATION_FIELD]: [Role.ADMIN],
 });
 
 /**
@@ -267,6 +280,43 @@ export function changedFields(
   stored: Readonly<Record<string, unknown>>,
 ): string[] {
   return Object.keys(submitted).filter((key) => !valuesMatch(submitted[key], stored[key]));
+}
+
+/**
+ * {@link changedFields} restricted to the fields the dispatched section can actually write.
+ *
+ * ## Why the restriction is load-bearing, not a convenience
+ *
+ * v1's client builds its PATCH body from what `GET /api/user/<id>` returned, and that
+ * response's `user` object is `UserProfileSerializer`'s — which contains **`full_name`,
+ * `role_display` and `id`** alongside the six writable fields. None of those three is a
+ * column `__update_user_personal` writes; v1 simply never looks at them.
+ *
+ * A raw `changedFields(submitted, stored)` would report all three as changed (the stored
+ * record has no such keys) and {@link FieldAllowlist.assert} would 403 **every save by every
+ * member**. That is the same failure mode as reading the `role` check as "present" instead of
+ * "changed" (§5 D1 clarification 1), one level up, and it is only invisible in v1's test
+ * fixtures because those hand-write a minimal `personal` object.
+ *
+ * So: keys outside the section's writable set are ignored, exactly as v1 ignores them, and
+ * the positive allowlist still governs the keys that *are* writable — which is where `role`
+ * and `identification` live. The allowlist keeps its C6 role as defence in depth: it is built
+ * from `services/user.py`'s field list intersected with the caller's rights, never from the
+ * payload.
+ */
+export function changedSectionFields(
+  section: UserSection,
+  submitted: Readonly<Record<string, unknown>>,
+  stored: Readonly<Record<string, unknown>>,
+): string[] {
+  const writable = SECTION_FIELDS[section];
+  const relevant: Record<string, unknown> = {};
+  for (const key of Object.keys(submitted)) {
+    if (writable.has(key)) {
+      relevant[key] = submitted[key];
+    }
+  }
+  return changedFields(relevant, stored);
 }
 
 /** True when the two values are the same after normalising across the JSON/Prisma boundary. */

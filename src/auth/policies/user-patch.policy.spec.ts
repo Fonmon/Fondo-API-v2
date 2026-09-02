@@ -151,12 +151,13 @@ describe('§5 D1 — PATCH /api/user/<id> authorisation policy', () => {
     });
 
     it('still allows a member to edit the rest of their own personal section', () => {
+      // `identification` left out on purpose: D16/Q26 made it ADMIN-only, like `role`.
       expect(() =>
         assertUserPatchAllowed({
           actor: actor(Role.MEMBER),
           targetUserId: ME,
           section: 'personal',
-          fields: ['first_name', 'last_name', 'email', 'identification', 'birthdate'],
+          fields: ['first_name', 'last_name', 'email', 'birthdate'],
         }),
       ).not.toThrow();
     });
@@ -253,7 +254,7 @@ describe('§5 D1 — PATCH /api/user/<id> authorisation policy', () => {
       ).toEqual(['notifications', 'primary_color', 'secondary_color']);
     });
 
-    it('drops `role` for everyone but ADMIN, keeping the rest of `personal`', () => {
+    it('drops `role` and `identification` for everyone but ADMIN, keeping the rest', () => {
       expect(
         userPatchAllowlist({
           actor: actor(Role.MEMBER),
@@ -261,7 +262,16 @@ describe('§5 D1 — PATCH /api/user/<id> authorisation policy', () => {
           section: 'personal',
           fields: [],
         }).toArray(),
-      ).toEqual(['birthdate', 'email', 'first_name', 'identification', 'last_name']);
+      ).toEqual(['birthdate', 'email', 'first_name', 'last_name']);
+
+      expect(
+        userPatchAllowlist({
+          actor: actor(Role.ADMIN),
+          targetUserId: SOMEONE_ELSE,
+          section: 'personal',
+          fields: [],
+        }).toArray(),
+      ).toEqual(['birthdate', 'email', 'first_name', 'identification', 'last_name', 'role']);
     });
 
     it.each([
@@ -318,7 +328,7 @@ describe('§5 D1 — PATCH /api/user/<id> authorisation policy', () => {
         identification: [Role.ADMIN],
       };
 
-      it('is writable by a member today, because Q26 is still open', () => {
+      it('Q26 answered: a member may NOT change their own identification', () => {
         expect(
           userPatchAllowlist({
             actor: actor(Role.MEMBER),
@@ -326,10 +336,43 @@ describe('§5 D1 — PATCH /api/user/<id> authorisation policy', () => {
             section: 'personal',
             fields: [],
           }).permits('identification'),
+        ).toBe(false);
+      });
+
+      it('Q26 answered: a TREASURER may not either — the cell is [0], not [0, 2]', () => {
+        expect(
+          userPatchAllowlist({
+            actor: actor(Role.TREASURER),
+            targetUserId: ME,
+            section: 'personal',
+            fields: [],
+          }).permits('identification'),
+        ).toBe(false);
+      });
+
+      it("Q26 answered: an ADMIN may change anyone's identification", () => {
+        expect(
+          userPatchAllowlist({
+            actor: actor(Role.ADMIN),
+            targetUserId: SOMEONE_ELSE,
+            section: 'personal',
+            fields: [],
+          }).permits('identification'),
         ).toBe(true);
       });
 
-      it('becomes ADMIN-only by passing the D16 map, with no code change', () => {
+      it('403s a member who actually changes their own identification', () => {
+        expect(() =>
+          assertUserPatchAllowed({
+            actor: actor(Role.MEMBER),
+            targetUserId: ME,
+            section: 'personal',
+            fields: changedFields({ identification: 12345 }, { identification: 99999n }),
+          }),
+        ).toThrow(DrfException);
+      });
+
+      it('the same map is still injectable, so the [0, 2] reading stays one argument away', () => {
         expect(
           userPatchAllowlist(
             { actor: actor(Role.MEMBER), targetUserId: ME, section: 'personal', fields: [] },

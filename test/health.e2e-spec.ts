@@ -28,11 +28,10 @@ describe('Phase 0 application boot', () => {
     expect(response.body).toEqual({ status: 'ok', database: 'up' });
   });
 
-  it('ships no Phase 3-8 business endpoints yet', async () => {
-    // Users, loans, activities, saving accounts and files are Phases 3-8.
+  it('ships no Phase 4-8 business endpoints yet', async () => {
+    // Loans, activities, saving accounts, files and admin are Phases 4-8.
     for (const path of [
       '/api/loan',
-      '/api/user',
       '/api/activity/year',
       '/api/saving-account',
       '/api/file',
@@ -40,6 +39,20 @@ describe('Phase 0 application boot', () => {
     ]) {
       await request(app.getHttpServer()).get(path).expect(404);
     }
+  });
+
+  it('exposes the Phase 3 user routes, guarded', async () => {
+    // A route that exists answers 401 without credentials; one that does not answers 404.
+    await request(app.getHttpServer()).get('/api/user').expect(401);
+    await request(app.getHttpServer()).get('/api/user/1').expect(401);
+    await request(app.getHttpServer()).post('/api/user/power').expect(401);
+    // `UserActivateView` is `permission_classes = []`, so it is genuinely public and answers
+    // the view's own 404 rather than a 401.
+    await request(app.getHttpServer()).post('/api/user/activate/1').expect(404);
+    // The internal dispatch prefixes are not addressable from outside — the URL conf has no
+    // pattern for them, so they 404 before any guard (`DjangoUrlPattern.dispatch`).
+    await request(app.getHttpServer()).get('/api/user/detail/1').expect(404);
+    await request(app.getHttpServer()).post('/api/user/apps/power').expect(404);
   });
 
   it('exposes the Phase 2 notification route, guarded', async () => {

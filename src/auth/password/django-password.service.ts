@@ -99,6 +99,26 @@ export class DjangoPasswordService {
     return `${DjangoPasswordService.ALGORITHM}$${DjangoPasswordService.ITERATIONS}$${effectiveSalt}$${digest}`;
   }
 
+  /**
+   * `django.contrib.auth.hashers.make_password(None)` — the value
+   * `UserManager._create_user` stores when it is given no password, via
+   * `user.set_password(None)` → `set_unusable_password()`.
+   *
+   * That is exactly what `create_user` (`services/user.py:28-37`) produces: the member has
+   * no password until they follow the activation link. The prefix is `!` and the suffix is
+   * 40 random characters, which no hash can ever equal, so `verify` rejects it.
+   *
+   * v1's own test asserts on this shape — `assertFalse('pbkdf2_sha256' in user.password)`
+   * before activation, `assertTrue(...)` after (`test_user_views.py:476-478`, `:506-508`).
+   */
+  unusablePassword(): string {
+    let suffix = '';
+    for (let i = 0; i < UNUSABLE_PASSWORD_SUFFIX_LENGTH; i += 1) {
+      suffix += SALT_ALPHABET[randomInt(SALT_ALPHABET.length)];
+    }
+    return `${UNUSABLE_PASSWORD_PREFIX}${suffix}`;
+  }
+
   /** `django.utils.crypto.get_random_string()` — 12 chars of `[a-zA-Z0-9]`, CSPRNG-backed. */
   salt(): string {
     let out = '';
@@ -122,6 +142,9 @@ export class DjangoPasswordService {
 
 /** `django.contrib.auth.hashers.UNUSABLE_PASSWORD_PREFIX`. */
 const UNUSABLE_PASSWORD_PREFIX = '!';
+
+/** `django.contrib.auth.hashers.UNUSABLE_PASSWORD_SUFFIX_LENGTH`. */
+const UNUSABLE_PASSWORD_SUFFIX_LENGTH = 40;
 
 /** `django.utils.crypto.get_random_string`'s default `allowed_chars`. */
 const SALT_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';

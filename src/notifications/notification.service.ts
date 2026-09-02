@@ -4,6 +4,7 @@ import { bogotaWallClockToInstant } from '../common/utils/timezone.util';
 import type { PlainDate } from '../common/utils/date.util';
 import {
   SchedulerTaskRepository,
+  type SchedulerSqlClient,
   type SchedulerTaskPayload,
 } from '../scheduler/scheduler-task.repository';
 import { NotificationPublisher } from './notification-publisher';
@@ -117,6 +118,7 @@ export class NotificationService {
     runDate: PlainDate & { hour?: number; minute?: number },
     payload: SchedulerTaskPayload,
     repeat = 0,
+    client?: SchedulerSqlClient,
   ): Promise<void> {
     const alreadyScheduled = await this.schedulerTasks.existsUnprocessedOnDay(
       payload.owner_id,
@@ -124,11 +126,12 @@ export class NotificationService {
       runDate.year,
       runDate.month,
       runDate.day,
+      client,
     );
     if (alreadyScheduled) {
       return;
     }
-    await this.schedulerTasks.create(bogotaWallClockToInstant(runDate), payload, repeat);
+    await this.schedulerTasks.create(bogotaWallClockToInstant(runDate), payload, repeat, client);
   }
 
   /**
@@ -137,8 +140,12 @@ export class NotificationService {
    *
    * @returns the number of rows deleted.
    */
-  async removeSchNotifications(notificationType: string, ownerId: number): Promise<number> {
-    return this.schedulerTasks.deleteByOwnerAndType(ownerId, notificationType);
+  async removeSchNotifications(
+    notificationType: string,
+    ownerId: number,
+    client?: SchedulerSqlClient,
+  ): Promise<number> {
+    return this.schedulerTasks.deleteByOwnerAndType(ownerId, notificationType, client);
   }
 
   /**

@@ -1,7 +1,20 @@
 import { Injectable } from '@nestjs/common';
 import { AppConfigService } from '../config/app-config.service';
 import { toHstoreLiteral, type PythonEncodable } from '../common/utils/hstore.codec';
+import type { Prisma } from '../prisma';
 import { PrismaService } from '../prisma/prisma.service';
+
+/**
+ * Either the pooled client or an interactive-transaction client.
+ *
+ * ⚠️ Needed because `__update_user_personal` calls `remove_sch_notitfications` and
+ * `schedule_notification` **inside** `transaction.atomic()` (`services/user.py:225-236`), so
+ * a failed profile write must roll the scheduler rows back with it. Passing `this.prisma`
+ * there instead would leave an orphaned birthday task behind every failed edit.
+ */
+export type SchedulerSqlClient =
+  | Pick<PrismaService, '$queryRaw' | '$executeRaw'>
+  | Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 
 /** `SchedulerTask.TASK_TYPES` — the only member v1 ever writes. */
 export const SCHEDULER_TASK_NOTIFICATIONS = 0;
@@ -108,9 +121,10 @@ export class SchedulerTaskRepository {
     localYear: number,
     localMonth: number,
     localDay: number,
+    client: SchedulerSqlClient = this.prisma,
   ): Promise<boolean> {
     const zone = this.config.timeZone;
-    const rows = await this.prisma.$queryRaw<{ id: number }[]>`
+    const rows = await client.$queryRaw<{ id: number }[]>`
       SELECT id
       FROM fondo_api_schedulertask
       WHERE payload -> 'owner_id' = ${String(ownerId)}
@@ -130,9 +144,14 @@ export class SchedulerTaskRepository {
    * `id` is left to the sequence: v1 and v2 share it during parity testing and plan §4
    * forbids v2 setting a primary key on a table v1 also writes.
    */
-  async create(runDate: Date, payload: SchedulerTaskPayload, repeat: number): Promise<void> {
+  async create(
+    runDate: Date,
+    payload: SchedulerTaskPayload,
+    repeat: number,
+    client: SchedulerSqlClient = this.prisma,
+  ): Promise<void> {
     const literal = toHstoreLiteral(payload);
-    await this.prisma.$executeRaw`
+    await client.$executeRaw`
       INSERT INTO fondo_api_schedulertask (type, run_date, payload, processed, repeat)
       VALUES (${SCHEDULER_TASK_NOTIFICATIONS}, ${runDate}, ${literal}::hstore, false, ${repeat})
     `;
@@ -150,8 +169,12 @@ export class SchedulerTaskRepository {
    *
    * @returns the number of rows removed, for the caller's logs and for tests.
    */
-  async deleteByOwnerAndType(ownerId: number, taskType: string): Promise<number> {
-    return this.prisma.$executeRaw`
+  async deleteByOwnerAndType(
+    ownerId: number,
+    taskType: string,
+    client: SchedulerSqlClient = this.prisma,
+  ): Promise<number> {
+    return client.$executeRaw`
       DELETE FROM fondo_api_schedulertask
       WHERE payload -> 'owner_id' = ${String(ownerId)}
         AND payload -> 'type' = ${taskType}

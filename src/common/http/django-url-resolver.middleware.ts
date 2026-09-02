@@ -72,7 +72,10 @@ export class DjangoUrlResolverMiddleware implements NestMiddleware {
     // downstream — the guards especially — must key on *this*, not on the Nest route.
     (request as Request & RequestWithDjangoRoute).djangoRoute = matched;
 
-    normaliseRequestTarget(request, pathInfo, rawQuery);
+    // `matched.dispatch` is the escape hatch for the one place Express cannot express
+    // Django's discrimination — the `/api/user/<app|id>` collision. See
+    // `DjangoUrlPattern.dispatch`.
+    normaliseRequestTarget(request, matched.dispatch?.(pathInfo) ?? pathInfo, rawQuery);
     this.applyDrfViewHeaders(response, matched);
     next();
   }
@@ -127,6 +130,10 @@ export class DjangoUrlResolverMiddleware implements NestMiddleware {
  * the two forms are identical anyway — the patterns admit only `[0-9A-Za-z_-]`, so a resolving
  * `PATH_INFO` has nothing to escape — but a future pattern with a looser character class would
  * otherwise hand the router a `%`, a `?` or a `#` in a segment.
+ *
+ * A pattern carrying a `dispatch` hands the router that function's output instead — the only
+ * case where `req.url`'s path is not v1's `PATH_INFO`, and the reason is the same one N3 gives
+ * for rewriting at all: Nest's router has to be told what Django's resolver already decided.
  *
  * `originalUrl` keeps the raw target for logging; only `url`, which the router reads, moves.
  * The query string is passed through untouched: Django hands `QUERY_STRING` to `QueryDict`

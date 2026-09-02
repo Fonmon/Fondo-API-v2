@@ -88,8 +88,15 @@ describe('C20 — the guard binds to the resolved v1 view, not to the Nest route
 
     app = moduleFixture.createNestApplication();
     app.useGlobalFilters(new ApiExceptionFilter());
-    // The unmodified v1 table — these are real v1 URLs, not synthetic ones.
-    const resolver = new DjangoUrlResolverMiddleware(DJANGO_URL_CONF);
+    // The v1 table with `dispatch` stripped — real v1 URLs, resolved to real v1 views, but
+    // routed the way Express would route them **without** the internal-path rewrite the two
+    // `/api/user/<x>` patterns now carry. That rewrite is what makes the production
+    // controllers immune to this class of mistake (see `DjangoUrlPattern.dispatch`); this
+    // suite is about the guard that catches it when nothing else does, so it deliberately
+    // recreates the unprotected shape.
+    const resolver = new DjangoUrlResolverMiddleware(
+      DJANGO_URL_CONF.map(({ regex, view, drf }) => ({ regex, view, drf })),
+    );
     app.use(resolver.use.bind(resolver));
     await app.init();
 

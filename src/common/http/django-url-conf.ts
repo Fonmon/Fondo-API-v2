@@ -134,6 +134,42 @@ export interface DjangoUrlPattern {
   readonly view: ResolvedViewName | null;
   /** The headers DRF attaches to every response from this view. */
   readonly drf: DrfViewHeaders | null;
+  /**
+   * An **internal** path for Nest's router, used only where Express cannot express the
+   * discrimination Django's regexes make.
+   *
+   * ## Why this exists — the `/api/user/<x>` collision
+   *
+   * Three v1 patterns share one path shape, with different views and different rules:
+   *
+   * ```
+   * ^api/user/(?P<app>-?[a-zA-Z]+)$   UserAppsView     POST 3
+   * ^api/user/(?P<id>-?[0-9]+)$       UserDetailView   GET 3  PATCH 3  DELETE 0
+   * ```
+   *
+   * Django tells them apart by **character class**; path-to-regexp v8 dropped inline
+   * parameter patterns, so `:app` and `:id` are the same unconstrained segment to Express and
+   * whichever controller is registered first wins **both**. That is not a routing nuisance,
+   * it is an authorisation decision: `DELETE /api/user/power` would reach
+   * `UserDetailView.DELETE` (ADMIN-allowed) instead of `UserAppsView` (deny-all), and
+   * `POST /api/user/5` the reverse.
+   *
+   * The C20 guard catches the disagreement, but only by answering **500**, where v1 answers
+   * 403 — a fail-*safe* outcome, not a correct one. So the regexes that already encode the
+   * discrimination get to make it: a pattern with a `dispatch` has
+   * `DjangoUrlResolverMiddleware` rewrite `req.url` to a prefix only that pattern can produce,
+   * and the matching controller is mounted there. Each controller then binds to exactly one
+   * v1 view and the C20 invariant (declared === resolved) holds by construction rather than
+   * by declaration order.
+   *
+   * ⚠️ The rewritten prefix must be **unreachable from outside**: `/api/user/apps/power` has
+   * three segments and matches no pattern in this table, so a client cannot address it — the
+   * resolver 404s it before the router ever sees it. Any new `dispatch` must preserve that.
+   *
+   * @param pathInfo the decoded `PATH_INFO` the pattern matched, leading slash included.
+   * @returns the internal path, leading slash included.
+   */
+  readonly dispatch?: (pathInfo: string) => string;
 }
 
 /**
@@ -166,6 +202,9 @@ export interface RequestWithDjangoRoute {
 }
 
 const DRF_JSON_ONLY = (allow: string): DrfViewHeaders => ({ allow, varyAccept: false });
+
+/** The captured segment of a two-segment `/api/user/<x>` path. */
+const lastSegment = (pathInfo: string): string => pathInfo.slice(pathInfo.lastIndexOf('/') + 1);
 const DRF = (allow: string): DrfViewHeaders => ({ allow, varyAccept: true });
 
 /**
@@ -214,12 +253,20 @@ export const DJANGO_URL_CONF: readonly DjangoUrlPattern[] = [
   // url(r'^api/user/?$', UserView.as_view(), ...)
   { regex: /^api\/user\/?$/, view: 'UserView', drf: DRF('GET, POST, PATCH, HEAD, OPTIONS') },
   // url(r'^api/user/(?P<app>-?[a-zA-Z]+)$', UserAppsView.as_view(), ...)
-  { regex: /^api\/user\/-?[a-zA-Z]+$/, view: 'UserAppsView', drf: DRF('POST, OPTIONS') },
+  // ⚠️ `dispatch` — see DjangoUrlPattern.dispatch. `:app` and `:id` are indistinguishable to
+  // Express, and picking the wrong one is an authorisation decision, not a routing detail.
+  {
+    regex: /^api\/user\/-?[a-zA-Z]+$/,
+    view: 'UserAppsView',
+    drf: DRF('POST, OPTIONS'),
+    dispatch: (pathInfo) => `/api/user/apps/${lastSegment(pathInfo)}`,
+  },
   // url(r'^api/user/(?P<id>-?[0-9]+)$', UserDetailView.as_view(), ...) — the `-1` sentinel
   {
     regex: /^api\/user\/-?[0-9]+$/,
     view: 'UserDetailView',
     drf: DRF('GET, PATCH, DELETE, HEAD, OPTIONS'),
+    dispatch: (pathInfo) => `/api/user/detail/${lastSegment(pathInfo)}`,
   },
   // url(r'^api/user/activate/(?P<id>[0-9]+)$', UserActivateView.as_view(), ...)
   { regex: /^api\/user\/activate\/[0-9]+$/, view: 'UserActivateView', drf: DRF('POST, OPTIONS') },

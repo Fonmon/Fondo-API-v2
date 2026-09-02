@@ -17,6 +17,7 @@ import { HealthModule } from './health/health.module';
 import { MailModule } from './mail/mail.module';
 import { NotificationModule } from './notifications/notification.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { UserModule } from './users/user.module';
 
 /**
  * Root module.
@@ -31,7 +32,13 @@ import { PrismaModule } from './prisma/prisma.module';
  * {@link NotificationModule} (`POST /api/notification/<subscribe|unsubscribe>`, the hstore
  * subscription repository and the SQS publisher).
  *
- * Users, loans, activities, saving accounts, files and the scheduler arrive in Phases 3-8.
+ * Phase 3 adds {@link UserModule} — `POST|GET|PATCH /api/user`,
+ * `GET|PATCH|DELETE /api/user/<id>`, `POST /api/user/<birthdates|power>`,
+ * `POST /api/user/activate/<id>` — together with Phase **7a**, the `SchedulerTask` write half
+ * its birthday notification needs (`SchedulerModule`, pulled in through
+ * {@link NotificationModule}).
+ *
+ * Loans, activities, saving accounts, files and the scheduler runner arrive in Phases 4-8.
  */
 @Module({
   imports: [
@@ -40,6 +47,7 @@ import { PrismaModule } from './prisma/prisma.module';
     AuthModule,
     MailModule,
     NotificationModule,
+    UserModule,
     // Registered now so Phase 7 only has to add the cron provider. Declares no jobs yet.
     ScheduleModule.forRoot(),
     HealthModule,

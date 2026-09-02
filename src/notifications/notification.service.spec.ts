@@ -215,6 +215,8 @@ describe('NotificationService', () => {
         2027,
         8,
         25,
+        // No interactive-transaction client: this call is not inside one.
+        undefined,
       );
     });
 
@@ -254,7 +256,7 @@ describe('NotificationService', () => {
       schedulerTasks.deleteByOwnerAndType.mockResolvedValue(3);
 
       await expect(service.removeSchNotifications('birthdate', 5)).resolves.toBe(3);
-      expect(schedulerTasks.deleteByOwnerAndType).toHaveBeenCalledWith(5, 'birthdate');
+      expect(schedulerTasks.deleteByOwnerAndType).toHaveBeenCalledWith(5, 'birthdate', undefined);
     });
   });
 });
