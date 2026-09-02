@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-09-02 | v2.3 | **Phase 3 parity: FAIL** — five unregistered diffs, all at the HTTP edge; the substance is exact (72-cell D1 matrix, byte-identical reset pages, `SchedulerTask` payload, SES/SQS payloads, four-table rollback). **F3 and F5 are security-relevant.** ⚠️ **Fixture incident: six historical `fondo_api_schedulertask` rows for owner 13 were deleted by a probe and are unrecoverable** — the table is 626, not 632. New §7 rule: **snapshot every table a phase writes, before the first write cell.** |
 | 2026-09-02 | v2.2 | ✅ **PHASE 3 IMPLEMENTED** (`feat/phase-3-users`) — users, finance, powers of attorney, password reset, plus **Phase 7a** (the `SchedulerTask` write half, pulled forward because Phase 3 and Phase 4 both write rows). **C22–C25 closed.** Ten §5 deviations implemented (**D1, D2, D5, D11, D14–D17, D19, D20**); seven new ones registered (**P3-D1–P3-D7**) in `docs/phase-3-deviations.md`. **The session question is decided: keep the redirect hop, drop the store** — the token rides an `HttpOnly` cookie and is re-validated by `check_token`, exactly as Django re-validates its session copy (P3-D3). ⚠️ **Five behaviours corrected against the live v1, one a real defect: `@parser_classes` on an `APIView` *method* is a no-op**, so `PATCH /api/user` with JSON is a 500 and not a 415 — and the same decorator is misused in `LoanView.patch` and `FileView.post`, so Phases 4 and 8 inherit the correction. Gate: lint + typecheck clean, **1476 unit / 48 suites**, **617 e2e + 1 skipped / 13 suites**. `fondodev` unchanged (94 / 1468 / 1). |
 | 2026-09-02 | v2.1 | ✅ **C19, C20 and C21 closed** (`03758dc`, `7415876`, `a39049c`) — the three prerequisites for Phase 3's first controller. `ALLOWED_HOSTS` ported from the installed Django 2.2.27 and re-measured against four live-v1 configurations; `RolesGuard` bound to the view the URL table resolved, with a hard failure on disagreement; the response phase ordered by v1 `MIDDLEWARE` depth, with `skipBeforeHeadersHooks` scoped to "below me". Both `Vary` orders (`Cookie, Origin` on `/password_reset/`, `Origin, Cookie` on `/reset/<uid>/set-password/`) re-measured on live v1 and now fall out of depth alone. Consider **C5** taken with C20. Gate: 1298 unit / 38 suites, 480 e2e + 1 skipped, lint and typecheck clean. **Phase 3 is now gated on Q26/Q27 alone.** |
 | 2026-09-02 | v2.1 | **C19–C21 closed** (`03758dc`, `7415876`, `9846130`) — `ALLOWED_HOSTS` ported, the guard now authorises on the resolved **v1 view** rather than Express order, and the response phase runs by **middleware depth**. **Q26 and Q27 answered → D16 and D17 decided.** **Phase 3 unblocked and started.** Two corrections of mine: the fixture content-hash was unreproducible without its query (now recorded), and C19–C21 are numbered differently in the review doc than in this plan. |
@@ -1016,6 +1017,30 @@ From [`docs/review-phase-2.md`](docs/review-phase-2.md). Graded by deadline, not
 
 **Consider C5** (not a condition): the 22-pattern table is correct *only* because Django 2.2.25+ uses `re.fullmatch` for `$`-terminated patterns (the CVE-2021-44420 fix) — Python's `$` otherwise matches before a trailing newline, and `POST /…/subscribe%0A` is reachable. Correct but version-dependent and undocumented; pin it with two cells. ✅ **Done** (with C20): six cells in `django-url-conf.spec.ts` and four in `test/http-edge.e2e-spec.ts`, naming the Django version and the CVE, plus the `decodePathInfo('%0A')` step that makes the input reachable.
 
+### ⚠️ Fixture incident — 2026-09-02, Phase 3 parity
+
+A `PATCH /api/user/13` probe (D15/P3-D2, suggested by `docs/phase-3-deviations.md` §4.4) succeeded
+against v2, and `__create_birthdate_notification` calls `remove_sch_notitfications`
+**unconditionally**. **Six historical `fondo_api_schedulertask` rows for owner 13 were deleted and
+are not recoverable** — no dump, no accessible WAL, the tuples already pruned.
+`fondo_api_schedulertask` is now **626, was 632**; one row for owner 13 survives, regenerated with
+the correct values. The six were deliberately **not** fabricated.
+
+**Everything else is byte-identical to baseline:** `notificationsubscriptions` 94 / max id 1468 /
+`count(distinct xmin::text) = 1`, `auth_user` 15, `power` 20, `django_session` 20, `loan` 425, and
+all schema/constraint/index hashes.
+
+**Impact.** `fondodev` is a snapshot of production, so nothing member-facing is lost and production
+is untouched — but this table is no longer a faithful snapshot, and **`SchedulerTask` is exactly
+what Phase 7 exists to test**. Recommend **re-snapshotting `fondodev` from production before Phase
+7**, and re-verifying the guards afterwards.
+
+**Rule added — this is the process failure, not the probe:** every parity round must
+`pg_dump` **each table the phase writes** before its first write cell. Phase 3 guarded
+`notificationsubscriptions` (the Phase 2 fixture) and not `schedulertask`, because the brief named
+the tables of the *previous* phase. Phase 4 writes `loan`, `loandetail` and `schedulertask`; Phase
+5 writes `activity*`; Phase 6 writes `savingaccount`.
+
 ### Open review conditions
 
 Tracked to closure, not carried forward silently. Source:
@@ -1076,7 +1101,7 @@ set, as defence in depth rather than as the primary control.
 | 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab` + C1–C4) | ✅ | n/a | ✅ **APPROVED** | n/a |
 | 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
 | 2 Mail + notifications | ✅ **CLOSED — APPROVED** (`fe261fc`) | ✅ | ✅ PASS r3 | ✅ **Approved w/ conditions** | ⬜ |
-| 3 Users + finance | 🔨 dev done (`1a8c37f`) → **tester** | ✅ | 🔨 | ⬜ | ⬜ |
+| 3 Users + finance | 🔴 **parity FAIL → back to dev** | ✅ | ❌ **FAIL** (F1–F5) | ⬜ | ⬜ |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
 | 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ |
 | 7b Scheduler *runner* | ⬜ Blocked on P4 | — | — | — | — |
