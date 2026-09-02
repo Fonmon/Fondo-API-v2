@@ -355,3 +355,50 @@ The plan (and the `django-url-conf.ts` doc) said Phase 3 must widen the per-view
 It did not: `Vary: Cookie` is a property of *which layer touched a cookie*, and C21's depth
 model already expresses that. Registering each hook at its v1 layer's depth reproduces all
 three measured orders with no per-route string. Recorded in `django-url-conf.ts`.
+
+---
+
+## 6. Parity round 1 — the five findings, fixed
+
+`docs/parity-phase-3.md` filed **FAIL** on five unregistered differences, all at the HTTP
+edge. All five are fixed and re-verified against the same live v1 the tester used
+(`fondo-v1-p3`, gunicorn 19.9.0, `api.settings.production`, `fondodev`, host port **8451**).
+One commit each.
+
+| # | Fixed by | Where |
+|---|---|---|
+| **F1** | The 500-header strip now asks **who built the response**, not what the status is. `convert_exception_to_response` replaces the response object for an *uncaught* exception, so DRF's `Allow` / `Vary: Accept` go with the old one; a 500 a DRF view **returns** went through `finalize_response` and keeps them. `ApiExceptionFilter` marks the responses it renders from an `ApiException` or a `DrfException`; only an unmarked 500 is stripped. | `common/http/drf-finalize-response.ts`, `django-url-resolver.middleware.ts`, `filters/api-exception.filter.ts` |
+| **F2** | `HttpResponseRedirect` is an ordinary `HttpResponse` and carries `Content-Type: text/html; charset=utf-8` with `Content-Length: 0`. Both set explicitly; Express emits neither for a bodiless `end()`. | `password-reset.controller.ts::redirect` |
+| **F3** | `@DjangoView()` — "the v1 counterpart is a plain Django view, so there are no `authentication_classes` and no `permission_classes`". Both guards honour it, **and only when the resolved URL-table entry agrees** (`view !== null && drf === null`). | `auth/decorators/django-view.decorator.ts`, both guards, `password-reset.controller.ts` |
+| **F4** | DRF's `OPTIONS` metadata document implemented for the two views that clear `permission_classes`. **P1-D2 withdrawn**; the browsable-API residual registered as **P3-D8**. | `common/http/drf-metadata.ts`, `auth.controller.ts`, `user-activate.controller.ts` |
+| **F5** | `csrfmiddlewaretoken` is read from the body for `POST` alone, then the `X-CSRFToken` fallback — Django's three lines, in order. | `password-reset.controller.ts::rejectCsrf` |
+
+### 6.1 Three things in the report were approximate
+
+1. **F4 is not "the positive half of P1-D2, which until now only recorded the negative".**
+   P1-D2 recorded **both** halves — v1's 200 + document *and* v2's 405 — and an e2e cell
+   pinned it. What was genuinely missing is that the deviation names `/api-token-auth` only,
+   and Phase 3 shipped a second route with the same shape (`/api/user/activate/<id>`) without
+   extending it. That is the failure: a per-route deviation that a later phase silently
+   widened the scope of. Implementing removed the question.
+2. **v1 was on host port 8451, not 8449** (`fondo-v1-p3`; the brief said 8449, which is
+   `fondo-v1-t` — the *same image and settings* but pointed at `fondo_api_test`, not
+   `fondodev`). Both are production settings, so no conclusion changes; recorded because
+   `8449` is the port §3 of this document used during implementation, and the two containers
+   are one character apart in the logs.
+3. **F5's blast radius was slightly larger than filed.** The report says the cause is "v2's
+   body parsing rather than a deliberate rule", which is right, but `DELETE` agreed only
+   because `DrfRequestParsingMiddleware` does not parse a `DELETE` body at all — not because
+   the CSRF code treated it differently. And the existing e2e cell **"PUT behaves exactly like
+   POST"** was sending the token in the body and passing: a green test asserting the defect.
+   Any fix that had kept the body read would have stayed green.
+
+### 6.2 What did *not* change
+
+Nothing in `user.service.ts`, `power.service.ts`, the serializers, the mail templates, the
+SQS payload, the `SchedulerTask` writer or the permission matrix. F3 and F5 are both
+security controls, so each has explicit fail-closed cells: for F3, the decorator is ignored
+on a DRF route, on a route with no resolved entry and on a `view: null` route, and
+`/api-token-auth` and `/api/user/activate/<id>` still 401 a broken token; for F5, the header
+path, the both-sources path and the empty-body-token fallback are pinned alongside the three
+refusals.
