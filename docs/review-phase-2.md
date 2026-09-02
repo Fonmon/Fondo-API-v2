@@ -1,5 +1,18 @@
 # Phase 2 review — SES mail, hstore subscriptions, SQS notifications, and the Django HTTP layer
 
+> ⚠️ **Condition numbers in this document do not match `MIGRATION_PLAN.md`.** This review's own
+> gate table numbers them C19=S1, C20=S2, C21=S9, C22=S3; the plan's §7 — which is authoritative
+> and which the developer followed — numbers them **C19=S3, C20=S2, C21=S1**, with S9 as C24.
+> Map by finding (S*n*), not by condition number. My transcription error, not the reviewer's.
+>
+> Two factual corrections to this document, found while implementing:
+> - **S2's `/api/user/…` table lists three patterns; there are four.** `^api/user/?$`
+>   (`UserView`) is missing, and `UserActivateView` is not `POST: 3` — it sets
+>   `permission_classes = []` and is public.
+> - **S1 says `CorsMiddleware` is "registered third of five"** — it is fourth of five, and fifth
+>   of six after C19 added the `ALLOWED_HOSTS` middleware.
+
+
 Reviewer: `nestjs-reviewer`. Subject: `~/Projects/Fondo-API-v2`, branch
 `feat/phase-2-notifications`, HEAD **`fe261fc`**; diffs `656f955..HEAD` (Phase 2 + three fix
 rounds) and `151314f..HEAD` (everything since Phase 1). v1 read-only at
