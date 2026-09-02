@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-09-02 | v2.2 | ✅ **PHASE 3 IMPLEMENTED** (`feat/phase-3-users`) — users, finance, powers of attorney, password reset, plus **Phase 7a** (the `SchedulerTask` write half, pulled forward because Phase 3 and Phase 4 both write rows). **C22–C25 closed.** Ten §5 deviations implemented (**D1, D2, D5, D11, D14–D17, D19, D20**); seven new ones registered (**P3-D1–P3-D7**) in `docs/phase-3-deviations.md`. **The session question is decided: keep the redirect hop, drop the store** — the token rides an `HttpOnly` cookie and is re-validated by `check_token`, exactly as Django re-validates its session copy (P3-D3). ⚠️ **Five behaviours corrected against the live v1, one a real defect: `@parser_classes` on an `APIView` *method* is a no-op**, so `PATCH /api/user` with JSON is a 500 and not a 415 — and the same decorator is misused in `LoanView.patch` and `FileView.post`, so Phases 4 and 8 inherit the correction. Gate: lint + typecheck clean, **1476 unit / 48 suites**, **617 e2e + 1 skipped / 13 suites**. `fondodev` unchanged (94 / 1468 / 1). |
 | 2026-09-02 | v2.1 | ✅ **C19, C20 and C21 closed** (`03758dc`, `7415876`, `a39049c`) — the three prerequisites for Phase 3's first controller. `ALLOWED_HOSTS` ported from the installed Django 2.2.27 and re-measured against four live-v1 configurations; `RolesGuard` bound to the view the URL table resolved, with a hard failure on disagreement; the response phase ordered by v1 `MIDDLEWARE` depth, with `skipBeforeHeadersHooks` scoped to "below me". Both `Vary` orders (`Cookie, Origin` on `/password_reset/`, `Origin, Cookie` on `/reset/<uid>/set-password/`) re-measured on live v1 and now fall out of depth alone. Consider **C5** taken with C20. Gate: 1298 unit / 38 suites, 480 e2e + 1 skipped, lint and typecheck clean. **Phase 3 is now gated on Q26/Q27 alone.** |
 | 2026-09-02 | v2.1 | **C19–C21 closed** (`03758dc`, `7415876`, `9846130`) — `ALLOWED_HOSTS` ported, the guard now authorises on the resolved **v1 view** rather than Express order, and the response phase runs by **middleware depth**. **Q26 and Q27 answered → D16 and D17 decided.** **Phase 3 unblocked and started.** Two corrections of mine: the fixture content-hash was unreproducible without its query (now recorded), and C19–C21 are numbered differently in the review doc than in this plan. |
 | 2026-09-02 | v2.0 | ✅ **PHASE 2 CLOSED — Approved with conditions.** Reviewer re-derived claims inside the v1 image rather than re-running suites. Nine should-fix findings → **C19–C27**, graded by deadline. Three change Phase 3's shape: **S3 is a real vulnerability** (`ALLOWED_HOSTS` dropped; Phase 3's `PasswordResetView` builds the emailed link from the request host → reset-link poisoning), **S2** (the table resolves paths not views, so `/api/user/<x>` overlaps could evaluate under the wrong view's rules), **S1** (response hooks run FIFO — the reverse of Django — and the model has no notion of depth). |
@@ -422,8 +423,13 @@ emit on write paths.
 - User creation produces identical rows across `auth_user`, `fondo_api_userprofile`,
   `fondo_api_userfinance`, `fondo_api_userpreference` (modulo id/timestamps).
 - Mail-send failure leaves **zero** rows in all four tables.
-- Same TSV → identical finance rows and `last_modified` semantics.
+- Same TSV → identical finance rows and `last_modified` semantics — including
+  `last_modified` **not** moving when no value changed.
 - Power approve/reject → identical rows and identical email recipient list.
+- ⚠️ **A birthdate edit produces a byte-identical `SchedulerTask`** — `type`, `run_date`
+  (local midnight, i.e. `05:00Z`), `repeat = 4`, `processed = false` and `payload::text`,
+  including the **unordered** `user_ids` list, which is PostgreSQL's heap order and must not be
+  sorted. Added v2.2; the scope list above did not mention this write at all (finding S9).
 
 ---
 
@@ -554,6 +560,20 @@ identical previous-year `enable` flip; both `patch=` modes identical.
 
 ### Phase 7 — Scheduler (replacing Celery beat)
 
+> ⚠️ **Split into 7a and 7b (v2.2), because Phases 3 and 4 *write* the rows Phase 7 runs.**
+> Review finding **S9**, condition **C24**. v1's call sites are
+> `services/user.py:281-282` (`PATCH /api/user/<id>` — Phase 3) and `services/loan.py:107,314`
+> (loan payout and bulk update — Phase 4), both of which precede this phase in the sequence.
+>
+> * **7a — ✅ DONE, landed with Phase 3** (`af596b0`): `SchedulerTaskRepository` (the second and
+>   last raw-SQL hstore repository), `NotificationService.scheduleNotification` /
+>   `removeSchNotifications`, the hstore encoding, and the same-day dedupe rule. Its parity
+>   criterion is a **data** comparison against the 632 live rows, not an execution one — see
+>   C24 in §7.
+> * **7b — this phase**: the cron runner, the executer factory, `repeat` cloning, and the
+>   multi-instance claim. Everything under *Scope* below **except** the last two bullets, which
+>   7a already covers.
+
 > **Resequenced (v0.3): run this directly after Phase 4, before Phases 5/6.** It is the sole
 > delivery path for loan payment reminders, has **zero** inherited tests, is raw-SQL hstore
 > territory, and fails **silently** — `scheduler/tasks.py:scheduler` marks a task `processed`
@@ -572,9 +592,14 @@ identical previous-year `enable` flip; both `patch=` modes identical.
   between libraries, pin it with tests).
 - `NotificationExecuter` (type 0) → `send_notification(...)`. `payload['user_ids']` is
   `json.loads`-ed out of hstore's string storage (§2).
-- `schedule_notification(run_date, payload, repeat)` dedupe: **skip if an unprocessed task
-  with the same `owner_id` + `type` already exists that calendar day.**
-- `SchedulerTaskRepository` — raw SQL for the hstore `payload` column.
+- ✅ *(7a, done)* `schedule_notification(run_date, payload, repeat)` dedupe: **skip if an
+  unprocessed task with the same `owner_id` + `type` already exists that calendar day.**
+  ⚠️ `run_date__year|month|day` extracts `AT TIME ZONE 'America/Bogota'` under `USE_TZ`, not
+  UTC — a UTC extract defeats the dedupe for every task scheduled after 19:00 local.
+- ✅ *(7a, done)* `SchedulerTaskRepository` — raw SQL for the hstore `payload` column.
+  ⚠️ Its write methods take an **optional transaction client**: `__update_user_personal` calls
+  both of them inside `transaction.atomic()`, so a failed profile edit must take the scheduler
+  rows with it.
 
 **Risks**
 - ⚠️ **hstore + zero inherited coverage.** No v1 scheduler tests exist *and* this is raw-SQL
@@ -714,6 +739,17 @@ Verified in every phase's parity report, not just the phase that introduces them
     must delete children explicitly inside the transaction** or hard deletes raise FK violations.
     The live case is `DELETE /api/activity/<id>` (Phase 5), which must remove `ActivityUser` rows
     first. Most other v1 deletes are soft (`is_active = false`), which masks this.
+12b. ⚠️ **`@parser_classes(...)` on an `APIView` *method* is a no-op** — found in Phase 3 by
+    probing the live v1, and it affects three handlers across three phases.
+    `rest_framework.decorators.parser_classes` is written for **function**-based views: it sets
+    the attribute on the decorated callable, and `APIView.dispatch` reads `self.parser_classes`
+    from the **class**. So `UserView.patch` (`views/user.py:36`, Phase 3), `LoanView.patch`
+    (`views/loan.py:49`, Phase 4) and `FileView.post` (`views/file.py:15`, Phase 8) all accept
+    the **default** parser list, JSON included. Measured: `PATCH /api/user` with
+    `application/json` is a **500** in v1 (the body parses to `{}` and `obj['file']` raises
+    `KeyError`), not the 415 the decorator implies; `text/plain` is a 415 because it is outside
+    the *default* list too. **Do not "restore" the narrowing in Phase 4 or 8.**
+
 12. ⚠️ **Nest 404s where DRF 405s.** Django resolves the URL and *then* DRF raises
     `MethodNotAllowed`; Express has no route for an unmapped method at all. **Every controller in
     Phases 3–8 needs an `@All()` fallback** (`DrfException.methodNotAllowed()` is the reusable
@@ -787,17 +823,24 @@ column; none of these are mine to decide unilaterally, because each changes prod
 | **D7** | A payment reminder whose `run_date` has passed is **never sent** — the 5-day reminder is skipped entirely whenever the monthly file lands within 5 days of the deadline. | **Send immediately** on the next scheduler run instead of skipping (Q8). | P7 | ✅ **Decided — change** |
 | **D8** | Bulk loan upload returns a bare `200` with no body. | **Return the list of auto-closed loans.** No cap on how many may be closed (Q3). ⚠️ Response-shape change — `manual-tester` must expect it. | P4 | ✅ **Decided — change** |
 | **D9** | Re-approving an already-approved or closed loan is allowed and corrupts the record. | **Enforce legal state transitions** `0→1`, `0→2`, `1→3`, `1→2`; reject anything else (Q14). | P4 | ✅ **Decided — fix** |
-| **D19** | `__create_birthdate_notification` (`services/user.py:269`) calls `.replace(year=today_year)` on the stored birthdate. `date(2000,2,29).replace(year=2026)` raises `ValueError`; `UserDetailView.patch` has no handler, so it **500s and `transaction.atomic()` rolls the whole edit back**. Checked 2026-08-31: **0 of 15 members have a 29 Feb birthdate**, so this is **latent** — it fires the day one is enrolled. | Clamp to 28 Feb or 1 Mar — decide which, then handle it deliberately. | P3 | ⏳ **Open (latent)** |
-| **D20** | The same handler calls `user_ids.remove(user.id)` on a list from `get_users_attr("id")`, which filters `is_active=True`. Editing a **soft-deleted** user raises `ValueError` → 500 → full rollback. ⚠️ Checked 2026-08-31: **`fondodev` has 2 inactive users, so this is triggerable today.** | Guard the removal. | P3 | ⏳ **Open — live** |
+| **D19** | `__create_birthdate_notification` (`services/user.py:269`) calls `.replace(year=today_year)` on the stored birthdate. `date(2000,2,29).replace(year=2026)` raises `ValueError`; `UserDetailView.patch` has no handler, so it **500s and `transaction.atomic()` rolls the whole edit back**. Checked 2026-08-31: **0 of 15 members have a 29 Feb birthdate**, so this is **latent** — it fires the day one is enrolled. | Clamp to 28 Feb or 1 Mar — decide which, then handle it deliberately. | P3 | ✅ **Fixed (P3)** — clamped to **28 Feb**, because `relativedelta(years=+1)` (and therefore Phase 7's own yearly clone of this task) puts it there; 1 Mar would leave the first notification a day after every repeat of itself. |
+| **D20** | The same handler calls `user_ids.remove(user.id)` on a list from `get_users_attr("id")`, which filters `is_active=True`. Editing a **soft-deleted** user raises `ValueError` → 500 → full rollback. ⚠️ Checked 2026-08-31: **`fondodev` has 2 inactive users, so this is triggerable today.** | Guard the removal. | P3 | ✅ **Fixed (P3)** — the removal is guarded; an admin can now edit a soft-deleted member's profile. |
 | **D18** | Request-parsing divergences found in Phase 1 review: `text/plain` → v1 **415**, v2 400. `multipart/form-data` → v1 **200**, v2 400. Malformed JSON → v1 `{"detail":"JSON parse error - …"}`, v2 Node's message. | ✅ **Fixed, all three — no deviation taken.** v2 owns request parsing (`DrfRequestParsingMiddleware` + `DrfParserInterceptor`, `bodyParser: false`): multipart parses, an unsupported media type is DRF's **415**, and a malformed JSON body returns CPython's own message and character offset (`python-json.ts`, differentially validated against CPython 3.9 over 412 structured + 3 000 fuzz cases, 0 mismatches). Parsing is deferred until **after** the guards, so DRF's authenticate-then-parse ordering is preserved. Three residuals registered in `docs/phase-1-drf-auth-bodies.md`, none client-visible. | P1 | ✅ **Fixed** |
 | **D14** | `PATCH /api/user/-1` and `DELETE /api/user/-1` pass `-1` through and 404; only `GET` substitutes `request.user.id`. | **Split by verb** (BA). GET keeps "me". PATCH **adopts** "me" — v1 404s unconditionally, so no working client can depend on it; the change is inert but stops telling a member they don't exist. DELETE **rejects the sentinel**: `fondodev` has exactly **one** ADMIN, and self-soft-delete is unrecoverable through the API (`key_activation` is null for all 15 users, so `activate_user` can never restore them). | P3 | ✅ **Decided — fix** |
 | **D15** | `__update_user_personal` does `user.username = obj['email']`, rotating the name the member logs in with. | **Stop writing `username` on personal updates.** Login names become stable. See the runbook item below — the live behavior is *worse and narrower* than "silent rename". | P3 | ✅ **Decided — fix** |
-| **D16** | `identification` is writable by any caller on a `personal` update. | ✅ **Decided (Q26): ADMIN-only.** It is the join key of the treasurer's monthly TSV and a miss is only logged (`services/user.py:144`), so a member editing their own cédula **silently freezes their own contributions and quota** until someone notices. ⏳ **Needs operator confirmation.** | P3 | ⏳ **Open** |
+| **D16** | `identification` is writable by any caller on a `personal` update. | ✅ **Decided (Q26): ADMIN-only.** It is the join key of the treasurer's monthly TSV and a miss is only logged (`services/user.py:144`), so a member editing their own cédula **silently freezes their own contributions and quota** until someone notices. ⏳ **Needs operator confirmation.** | P3 | ✅ **Fixed (P3)** — ADMIN-only, gated on an actual change. |
 | **D17** | `get_user_by_email` (`services/user.py:84`) uses `.get()` inside a bare `except`, so a duplicated email raises `MultipleObjectsReturned` → returns `None` → **no reset email is sent**, while `PasswordResetView` still redirects to the success page. | **Verified live: users 7, 10, 13 and 14 — 4 of 15 members — cannot reset their password and are told it worked.** v2 must handle multiplicity deliberately. ✅ **Decided (Q27): the link goes to the account whose `username` equals the email** — so `criss9413@hotmail.com` resets id 7 (the parent), not id 14 (Ainhoa); `mhjc123@hotmail.com` resets id 10, not id 13. The two child accounts are admin-assisted reset only. Fixes the current silent failure for all four members. | P3 | ✅ **Decided — fix** |
 | **D13** | An unknown URL returns Django's **HTML** 404 page (`<h1>Not Found</h1>…`), not JSON. | v2 returns JSON `{message: …}`. Pre-existing since Phase 0 but was unregistered — `manual-tester` would otherwise file it. Accepted: no client depends on an HTML 404. | P0 | ✅ **Accepted** |
 | **D12** | CAP auto-close was never implemented — `services/saving_account.py` carries a `# TODO: schedule task for closing CAP`. Closing is manual-only today. | **Implement it** (Q20): a CAP closes automatically on `end_date`. New functionality, not a port. Needs a `SchedulerTask` type — **so Phase 6 depends on Phase 7** (already sequenced that way). No member notification (Q22). | P6 | ✅ **Decided — build** |
-| **D11** | `UserFinance.user` and `UserPreference.user` are plain FKs, not OneToOne — the same latent defect registered as D6 for `LoanDetail`. A duplicate row makes the user's finance endpoints 500 permanently. | Unique constraint on `user_id` for both; upsert not insert. | P3 | ⏳ **Needs decision** |
+| **D11** | `UserFinance.user` and `UserPreference.user` are plain FKs, not OneToOne — the same latent defect registered as D6 for `LoanDetail`. A duplicate row makes the user's finance endpoints 500 permanently. | Unique constraint on `user_id` for both; upsert not insert. | P3 | ✅ **Decided — fix, in two halves.** The application half shipped in P3 (deterministic lowest-id reads, so a duplicate row degrades to "ignored" instead of a permanent 500). ⚠️ The **physical `UNIQUE (user_id)` moves to Phase 9**: §4 rule 6 forbids v2 running migrations against a database v1 shares. Nothing in v2 can create a second row. |
 | **D10** | Loan read (`GET /api/loan/<id>`, `paymentProjection`) is open to any member by id. | **Restrict** to the loan owner plus roles `[0,1,2]` (Q16). | P4 | ✅ **Decided — fix** |
+
+**Phase-local deviations** — the ones that only exist because of how a phase was
+implemented — live in that phase's `docs/phase-<n>-deviations.md`, not here. Phase 3 registered
+seven (**P3-D1**–**P3-D7**), of which three change an observable response: **P3-D2** (a
+duplicate email on a personal update is now a 200, not a 409 — the 409 came from the `username`
+write D15 removed), **P3-D3** (no `django_session` row and no `sessionid` on the reset hop) and
+**P3-D6** (a zero-byte 500 where Django renders its HTML error page — D13's species, extended).
 
 ### D1 — the authorization rule for `PATCH /api/user/<id>`
 
@@ -868,7 +911,7 @@ v1 has **104 test methods** across 8 files (the 20 Alexa tests are dropped):
 | `test_models.py` | 8 | Phase 0 (model round-trip) |
 | `test_mail_service.py` | 6 | Phase 2 |
 | `test_notification_views.py` | 4 | Phase 2 ⚠️ thin |
-| `test_user_views.py` | 31 | Phase 3 |
+| `test_user_views.py` | 31 | ✅ Phase 3 — all 31 ported (`test/user.e2e-spec.ts`, 84 cells; four expectations moved by D15/D2 and each says so) |
 | `test_loan_views.py` | 33 | Phase 4 |
 | `test_activity_views.py` | 12 | Phase 5 |
 | `test_file_views.py` | 8 | Phase 8 |
@@ -960,9 +1003,16 @@ From [`docs/review-phase-2.md`](docs/review-phase-2.md). Graded by deadline, not
 | **C20** | **S2 — the URL table resolves paths, never views**, and `roles.guard.ts:66` trusts Express declaration order. v1's four `/api/user/…` routes have different rules — `UserAppsView` declares only `POST` (so `DELETE` is deny-all via the bare `except`) while `UserDetailView.DELETE` is ADMIN-allowed. A mis-resolution turns a routing detail into an **authorization** decision. Bind the resolved v1 view identity, not the path. ✅ **Closed.** `DjangoUrlResolverMiddleware` now publishes the matched pattern as `request.djangoRoute`, and `RolesGuard` authorises on **that** view. `DjangoUrlPattern.view` is narrowed from `string` to `V1ViewName | UnguardedV1View | null`, so the table and `list_permissions` are linked at compile time. Three fail-closed outcomes: no `@V1View` → 403 (v1's `KeyError` path, unchanged); no resolved route → 403; **resolved ≠ declared → 500 with a loud log**, never a plausible 403 that hides a mis-ordered route. `test/v1-view-binding.e2e-spec.ts` mounts the mis-ordering deliberately and pins `DELETE /api/user/power` as a refusal for ADMIN. The 280-cell role matrix now runs through the resolver too, so it proves table+router+matrix agreement rather than the matrix alone. |
 | **C21** | **S1 — response hooks run FIFO, the reverse of Django's response phase**, and the doc at `before-headers.ts:31-33` asserts the opposite. Unobservable today; Phase 3 makes it observable. The model also has no notion of **depth**, so it cannot express `/password_reset/`'s `Vary: Cookie, Origin` (view-level `csrf_protect`, below all eight slots), and `skipBeforeHeadersHooks` means "all" where Django means "below me". ✅ **Closed, as a Phase 2 defect rather than a Phase 3 design item** — the mechanism already existed, already ran backwards and already carried three hooks at three different depths while pretending they were peers. `DjangoStack` (`django-middleware-depth.ts`) gives v1's eight slots numbers, plus `VIEW = 9` for everything below them and `TRANSPORT = 0` for the un-Django Express fixups. `onBeforeHeaders(response, depth, hook)` sorts descending (explicit sequence tiebreak, no reliance on sort stability); `skipBeforeHeadersHooks(response, belowDepth)` suppresses only what is deeper, and applies to hooks registered after the call as well. `DjangoResponseHeadersMiddleware` split into its three real depths. Both measured `Vary` orders now fall out of depth alone — pinned by a unit spec and by `test/response-phase.e2e-spec.ts`, whose slot-2 probe reproduces the reviewer's requested cell; both fail against the FIFO implementation (mutation-checked). The wrong doc comments at `before-headers.ts:31-33` and `app.module.ts:97` are corrected. **What is genuinely a Phase 3 design question is the session store**, not the ordering: `GET /reset/<uid>/<token>/` writes a `django_session` row, and v2 has no session model — already recorded at `django-url-conf.ts` and unchanged by this. |
 
-**Within Phase 3:** C22 (S4 — the SQS retry budget is **9**, not the 3 P2-D7 records, with no request timeout, now on the HTTP request thread), C23 (S5 — the hstore codec fails **open** on an absent `keys`/`user_ids` where v1 raises `KeyError`; invisible to any black-box round), C24 (S9 — plan defect: Phases 3 and 4 both write `SchedulerTask` rows that Phase 7 owns and runs *after*).
+**Within Phase 3 — all closed** (`5f4120f`, `af596b0`):
 
-**Before the next parity round:** C25 (S6 — `resetDatabase` is one `TEST_DATABASE_URL` away from truncating the parity fixture), C26 (S7 — the parity report's `pg_dump` md5 guard is not evidence), C27 (S8 — supertest also silently rewrites dot-segments, backslashes and spaces; existing cells survive but the trap is open for Phases 3–8).
+| # | Condition | Outcome |
+|---|---|---|
+| **C22** | S4 — the SQS retry budget is **9**, not the 3 P2-D7 records, with no request timeout, now on the HTTP request thread. | ✅ **Closed.** `sqsClientConfig` / `sesClientConfig` pin `maxAttempts: 1` plus explicit connect/socket timeouts, so the publisher's own 3-attempt loop is the only retry and a publish is bounded at **~9.6 s** worst case. SES gets the same treatment (Consider #6): boto3's legacy default there is **5** attempts and `MailService` has no retry loop at all, so every one of them was invisible latency inside `create_user`'s transaction. P2-D7 corrected to state the wall-clock bound. |
+| **C23** | S5 — the hstore codec fails **open** on an absent `keys`/`user_ids` where v1 raises `KeyError`. | ✅ **Closed.** Both decoders check the key's presence before iterating, with the `KeyError: '<key>'` shape `readEndpoint` already uses, and the two NULL branches now carry the exception CPython actually raises (`AttributeError` / `TypeError`, not a generic one). Four spec cells; Phase 7 inherits the `user_ids` half. |
+| **C24** | S9 — plan defect: Phases 3 and 4 both write `SchedulerTask` rows that Phase 7 owns and runs *after*. | ✅ **Closed by splitting Phase 7** — see the Phase 7a/7b note in §3. **How the rows are validated before the runner exists** (C24's actual question): by *comparison*, not execution. `fondodev` holds 632 real rows, 92 of them `birthdate`, so the e2e cells transcribe row 2458 field by field — `type`, `run_date` (05:00Z = local midnight), `repeat`, `processed` and `payload::text` — and prove a v2 row is byte-identical now. Phase 7 adds the behavioural half later, on top of `nextRepeatRunDate`, which C3 already pinned against `python-dateutil==2.7.5`. |
+| **C25** | S6 — `resetDatabase` is one `TEST_DATABASE_URL` away from truncating the parity fixture. | ✅ **Closed.** `assertDisposableDatabase` gates **both** `provisionTestDatabase` and `resetDatabase` on positive evidence that Django does *not* own the schema — `django_migrations` empty (fondodev has 38) and no `0_init` baseline marked applied with `applied_steps_count = 0` (fondodev has exactly that) — plus a name denylist as a weaker second line. Six e2e cells, all negative. |
+
+**Before the next parity round:** C26 (S7 — the parity report's `pg_dump` md5 guard is not evidence), C27 (S8 — supertest also silently rewrites dot-segments, backslashes and spaces; existing cells survive but the trap is open for Phases 3–8). Both belong to `manual-tester`'s method rather than to the source tree; C25's guard is the code half of the same concern and is closed.
 
 **Consider C5** (not a condition): the 22-pattern table is correct *only* because Django 2.2.25+ uses `re.fullmatch` for `$`-terminated patterns (the CVE-2021-44420 fix) — Python's `$` otherwise matches before a trailing newline, and `POST /…/subscribe%0A` is reachable. Correct but version-dependent and undocumented; pin it with two cells. ✅ **Done** (with C20): six cells in `django-url-conf.spec.ts` and four in `test/http-edge.e2e-spec.ts`, naming the Django version and the CVE, plus the `decodePathInfo('%0A')` step that makes the input reachable.
 
@@ -1026,9 +1076,10 @@ set, as defence in depth rather than as the primary control.
 | 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab` + C1–C4) | ✅ | n/a | ✅ **APPROVED** | n/a |
 | 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
 | 2 Mail + notifications | ✅ **CLOSED — APPROVED** (`fe261fc`) | ✅ | ✅ PASS r3 | ✅ **Approved w/ conditions** | ⬜ |
-| 3 Users + finance | 🔨 **In progress** | 🔨 | ⬜ | ⬜ | ⬜ |
+| 3 Users + finance | 🔨 **Dev done — with `manual-tester`** (`69c8496`) | ✅ | ⬜ | ⬜ | ⬜ |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
-| 7 Scheduler *(resequenced)* | ⬜ Blocked on P4 | — | — | — | — |
+| 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ |
+| 7b Scheduler *runner* | ⬜ Blocked on P4 | — | — | — | — |
 | 5 Activities | ⬜ Blocked on P3 | — | — | — | — |
 | 6 Saving accounts | 🔴 **Blocked on Q19–Q24** — no spec to port | — | — | — | — |
 | 8 Files + admin | ⬜ Blocked on P2 | — | — | — | — |
@@ -1094,15 +1145,26 @@ by the §5 register. Operator answered 13 of 24 questions on 2026-08-30.
 | Q24 | CAP ↔ quota | Purely informative | Confirms v1 |
 | Q25 | PRESIDENT and `PATCH /api/user` | Not allowed — ⚠️ *scope being confirmed* | **D1** |
 
-### Still open
+### Answered 2026-09-02 (third round)
+
+| Q | Topic | Answer | Effect |
+|---|---|---|---|
+| Q26 | `identification` ADMIN-only? | **Yes** | **D16** decided — implemented in P3 |
+| Q27 | Who gets the reset link on a shared email? | **The account whose `username` is the email** | **D17** decided — implemented in P3 |
+
+Q1–Q27 are answered. The only open *inference* is the TREASURER self-service cell in the D1
+table (§5), flagged there.
+
+### Open — raised by the Phase 3 implementation
 
 | Q | Topic | Blocks |
 |---|---|---|
-| **Q26** | **D16** — should `identification` be ADMIN-only? It is the join key of the treasurer's monthly TSV; a member editing their own cédula silently freezes their contributions and quota. Recommend yes. | P3 |
-| **Q27** | **D17** — when two members share an email, who gets the password-reset link? Reset the account whose `username` equals the email, refuse ambiguous addresses, or something else? | P3 |
+| **Q28** | **D5's empty `To`.** The power-of-attorney letter now goes out with `ToAddresses: []` and every member in `Bcc` — the literal reading of "move them to `Bcc`". SES accepts it, but a message with no `To:` header is scored more harshly by some spam filters and this is a formal document. The alternative is `To: <DEFAULT_FROM_EMAIL>`. Confirm before the first real approval after cutover; one-line change either way. | Nothing — recorded, not blocking |
 
-Q1–Q25 are answered; **Q26 and Q27 are open** and block Phase 3. The only open *inference* is the
-TREASURER self-service cell in the D1 table (§5), flagged there.
+⚠️ **`DJANGO_SECRET_KEY` is now required in production.** v2 signs its own password-reset tokens
+with it (**P3-D4**). It reuses the variable v1's `production.py` already reads, so no
+deployment change is needed — but the boot now *fails* without it, where v1 failed later and
+less clearly.
 
 ### Runbook items carried from Phase 3 findings
 
@@ -1113,7 +1175,15 @@ TREASURER self-service cell in the D1 table (§5), flagged there.
    members is not sufficient: Ainhoa is five.
 2. **Four members cannot reset their password** (D17: ids 7, 10, 13, 14) and are shown the
    success page. Until D17 ships in v2, those resets have to be done manually. Worth telling the
-   treasurer now rather than at cutover.
+   treasurer now rather than at cutover. ✅ **Fixed at cutover for ids 7 and 10**; ids 13 and 14
+   (the custodial accounts) become **admin-assisted reset only**, deliberately — they have no
+   email address of their own.
+3. **Reset links do not survive the switch** (P3-D4): v2 signs its own tokens, so any link v1
+   issued stops working at cutover. Django's timeout is 3 days, so at worst a few members
+   re-request. Nothing to do beyond knowing it.
+4. **Two more `@parser_classes` misuses to leave alone.** `LoanView.patch` and `FileView.post`
+   carry `@parser_classes((MultiPartParser,))` on a *method*, where it is a no-op (§ Phase 3
+   findings). Phases 4 and 8 must reproduce the no-op, not the decorator's apparent intent.
 
 ### Cutover timing — corrected (Q11)
 
