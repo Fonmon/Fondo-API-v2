@@ -1306,15 +1306,38 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
     expect(finance.total_quota).toBe(1000n);
   });
 
-  it('is a 415 for a JSON body — @parser_classes((MultiPartParser,))', async () => {
-    const response = await request(app.getHttpServer())
+  /**
+   * ⚠️ Measured on the live v1: **500**, not 415. `@parser_classes((MultiPartParser,))` on a
+   * *method* of an `APIView` is a no-op — the decorator is for function-based views — so the
+   * default parsers apply, the JSON body parses to `{}` and `obj['file']` raises `KeyError`.
+   * An earlier v2 revision answered 415 here and was wrong.
+   */
+  it('is a 500 for a JSON body — the MultiPartParser decorator is a no-op in v1', async () => {
+    await request(app.getHttpServer())
       .patch('/api/user')
       .set(asAdmin())
       .send({ file: 'x' })
+      .expect(500);
+  });
+
+  it('is a 500 for a multipart body with no `file` part — the same KeyError', async () => {
+    await request(app.getHttpServer())
+      .patch('/api/user')
+      .set(asAdmin())
+      .field('notfile', 'x')
+      .expect(500);
+  });
+
+  it('is a 415 for text/plain — that one IS outside the default parser list', async () => {
+    const response = await request(app.getHttpServer())
+      .patch('/api/user')
+      .set(asAdmin())
+      .set('Content-Type', 'text/plain')
+      .send('1\t1\t1\t1\t1')
       .expect(415);
 
     expect(response.body).toEqual({
-      detail: 'Unsupported media type "application/json" in request.',
+      detail: 'Unsupported media type "text/plain" in request.',
     });
   });
 

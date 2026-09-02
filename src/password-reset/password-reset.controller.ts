@@ -1,4 +1,4 @@
-import { All, Body, Controller, Get, HttpStatus, Param, Post, Req, Res } from '@nestjs/common';
+import { All, Controller, HttpStatus, Param, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
 import { DjangoStack, onBeforeHeaders } from '../common/http/before-headers';
@@ -117,87 +117,154 @@ export class PasswordResetController {
   ) {}
 
   // -------------------------------------------------------------------------
-  // /password_reset/
+  // The four routes
   // -------------------------------------------------------------------------
+  //
+  // ⚠️ **Every route is `@All`, and that is a correctness requirement, not a shortcut.**
+  // Django checks CSRF in `CsrfViewMiddleware.process_view`, i.e. **before** the view's
+  // `dispatch` resolves a handler, so an unsafe method with no CSRF cookie is a **403 even
+  // when the method is not allowed at all**. Measured on the live v1:
+  //
+  // ```
+  // DELETE /password_reset/                       -> 403 (no cookie)
+  // DELETE /password_reset/  + a valid csrftoken  -> 405, Allow: GET, POST, PUT, HEAD, OPTIONS
+  // POST   /password_reset/done/ + a valid token  -> 405, Allow: GET, HEAD, OPTIONS
+  // ```
+  //
+  // Splitting these into `@Get` / `@Post` / `@All` would put Nest's routing before the CSRF
+  // check and invert both statuses.
 
   /**
-   * `PasswordResetView.get` — the email form.
+   * `PasswordResetView` — v1's own subclass of `auth_views.PasswordResetView`.
    *
-   * `{% csrf_token %}` in the template calls Django's `get_token()`, which sets
-   * `CSRF_COOKIE_USED`, which makes `csrf_protect`'s response phase write the cookie **and**
-   * patch `Vary: Cookie`. The decorator sits below the middleware stack, hence
-   * {@link DjangoStack.VIEW} and hence `Cookie, Origin`.
+   * ⚠️ **`PUT` behaves exactly like `POST`.** `ProcessFormView` defines `put = post`, and v1
+   * overrides only `post`, so `PUT /password_reset/` sends the reset email and 302s. Verified
+   * live. It is in `Allow` for the same reason.
    */
-  @Get('password_reset')
-  passwordResetForm(@Req() request: Request, @Res() response: Response): void {
-    const csrfToken = this.issueCsrfCookie(request, response, DjangoStack.VIEW);
-    this.sendHtml(response, this.html.render('password_reset_form.eta', { csrf_token: csrfToken }));
-  }
-
   /**
-   * `PasswordResetView.post` — v1's own override, not Django's.
-   *
-   * The redirect is **unconditional**: a missing address, an unknown one and an ambiguous one
-   * all land on `/password_reset/done/`. No user enumeration.
-   *
-   * ⚠️ No cookie and no `Vary: Cookie` here — measured. `csrf_protect`'s response phase only
-   * writes the cookie when the *template* asked for a token, and this response is a redirect.
+   * ⚠️ `@DrfNoRequestData()` on every handler here: these are **Django** views, not DRF ones.
+   * `PasswordResetView.post` reads `request.POST` and `SetPasswordForm` reads it too, and
+   * `request.POST` never negotiates a parser — a `text/plain` body is simply an empty
+   * `QueryDict`, so the form is invalid and the view still redirects. Without the marker
+   * `DrfParserInterceptor` would raise DRF's 415 on a route that cannot produce one
+   * (review condition **C10**, whose doc names this view).
    */
-  @Post('password_reset')
-  async passwordResetPost(
-    @Req() request: Request,
-    @Res() response: Response,
-    @Body() body: unknown,
-  ): Promise<void> {
-    if (this.rejectCsrf(request, response)) {
+  @DrfNoRequestData()
+  @All('password_reset')
+  async passwordReset(@Req() request: Request, @Res() response: Response): Promise<void> {
+    if (this.refuseUnsafeMethod(request, response)) {
       return;
     }
-    const form = asForm(body);
-    await this.resets.requestReset(form.email, request.headers.host ?? '');
-    this.redirect(response, '/password_reset/done/');
+    const method = request.method;
+
+    if (method === 'GET' || method === 'HEAD') {
+      // `{% csrf_token %}` calls Django's `get_token()`, which sets `CSRF_COOKIE_USED`, which
+      // makes `csrf_protect`'s response phase write the cookie and patch `Vary: Cookie`. The
+      // decorator sits *below* the middleware stack, hence `DjangoStack.VIEW` and hence
+      // `Cookie, Origin`.
+      const csrfToken = this.issueCsrfCookie(request, response, DjangoStack.VIEW);
+      this.sendHtml(
+        response,
+        this.html.render('password_reset_form.eta', { csrf_token: csrfToken }),
+      );
+      return;
+    }
+
+    if (method === 'POST' || method === 'PUT') {
+      const form = djangoPostData(request);
+      await this.resets.requestReset(form.email, request.headers.host ?? '');
+      // ⚠️ Unconditional: an unknown address, an ambiguous one and a malformed one all land
+      // here. That is the anti-enumeration property; it must not become a 404.
+      //
+      // ⚠️ No `Set-Cookie` and no `Cookie` in `Vary` — measured. `csrf_protect` writes the
+      // cookie only when the *template* asked for a token, and this response is a redirect.
+      this.redirect(response, '/password_reset/done/');
+      return;
+    }
+
+    this.methodFallback(request, response, 'GET, POST, PUT, HEAD, OPTIONS');
   }
 
-  /** `PasswordResetDoneView` — a `TemplateView`, no cookies, no session access. */
-  @Get('password_reset/done')
-  passwordResetDone(@Res() response: Response): void {
-    this.sendHtml(response, this.html.render('password_reset_done.eta'));
+  /** `PasswordResetDoneView` — a `TemplateView`: no cookie, no session access. */
+  @DrfNoRequestData()
+  @All('password_reset/done')
+  passwordResetDone(@Req() request: Request, @Res() response: Response): void {
+    if (this.refuseUnsafeMethod(request, response)) {
+      return;
+    }
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      this.sendHtml(response, this.html.render('password_reset_done.eta'));
+      return;
+    }
+    this.methodFallback(request, response, 'GET, HEAD, OPTIONS');
   }
 
-  // -------------------------------------------------------------------------
-  // /reset/<uid>/<token>/ and /reset/<uid>/set-password/
-  // -------------------------------------------------------------------------
+  /** `PasswordResetCompleteView` — `{% host %}` is its only variable. */
+  @DrfNoRequestData()
+  @All('reset/done')
+  resetDone(@Req() request: Request, @Res() response: Response): void {
+    if (this.refuseUnsafeMethod(request, response)) {
+      return;
+    }
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      this.sendHtml(response, this.html.render('password_reset_complete.eta'));
+      return;
+    }
+    this.methodFallback(request, response, 'GET, HEAD, OPTIONS');
+  }
 
   /**
-   * `PasswordResetConfirmView.dispatch` + `get`.
+   * `PasswordResetConfirmView.dispatch` — the two-step hop, and the `set-password` page.
    *
-   * Three outcomes, matching v1 exactly:
+   * ```python
+   * self.validlink = False
+   * self.user = self.get_user(kwargs['uidb64'])
+   * if self.user is not None:
+   *     token = kwargs['token']
+   *     if token == INTERNAL_RESET_URL_TOKEN:
+   *         session_token = self.request.session.get(INTERNAL_RESET_SESSION_TOKEN)
+   *         if self.token_generator.check_token(self.user, session_token):
+   *             self.validlink = True
+   *             return super().dispatch(*args, **kwargs)
+   *     else:
+   *         if self.token_generator.check_token(self.user, token):
+   *             self.request.session[INTERNAL_RESET_SESSION_TOKEN] = token
+   *             redirect_url = self.request.path.replace(token, INTERNAL_RESET_URL_TOKEN)
+   *             return HttpResponseRedirect(redirect_url)
+   * return self.render_to_response(self.get_context_data())
+   * ```
    *
-   * | request | v1 | v2 |
-   * |---|---|---|
-   * | valid token in the URL | store it in the session, **302** to `…/set-password/` | store it in the reset cookie, **302** |
-   * | `set-password` + a valid stored token | render the form (`validlink=True`) | same |
-   * | anything else | render the "invalid or already used" page (200) | same |
+   * ⚠️ **An invalid link answers 200 for *every* method**, including `DELETE` — the `return`
+   * above happens before `super().dispatch()`, which is where Django checks the method at all.
+   * Verified live: `DELETE /reset/<uid>/set-password/` with a valid csrftoken is a **200**
+   * rendering the "invalid or already used" page, not a 405. The 405 only exists once the link
+   * validates.
    *
-   * ⚠️ `@method_decorator(never_cache)` is on this view, so both responses carry
-   * `Cache-Control: max-age=0, no-cache, no-store, must-revalidate, private` and an `Expires`
-   * in the past.
+   * ⚠️ `@method_decorator(never_cache)` is on this view, so every response it produces carries
+   * `Cache-Control: max-age=0, no-cache, no-store, must-revalidate` — **without** `private`,
+   * which Django only added in 3.0. Measured.
    */
-  @Get('reset/:uidb64/:token')
+  @DrfNoRequestData()
+  @All('reset/:uidb64/:token')
   async resetConfirm(
     @Param('uidb64') uidb64: string,
     @Param('token') token: string,
     @Req() request: Request,
     @Res() response: Response,
   ): Promise<void> {
+    if (this.refuseUnsafeMethod(request, response)) {
+      return;
+    }
     addNeverCacheHeaders(response);
-    const user = await this.resets.getUserFromUidb64(uidb64);
 
-    if (user !== null && token !== PasswordResetController.INTERNAL_RESET_URL_TOKEN) {
+    const user = await this.resets.getUserFromUidb64(uidb64);
+    const isSetPassword = token === PasswordResetController.INTERNAL_RESET_URL_TOKEN;
+
+    if (user !== null && !isSetPassword) {
       if (this.resets.checkToken(user, token)) {
-        // v1: `self.request.session[INTERNAL_RESET_SESSION_TOKEN] = token`, which is what
-        // makes SessionMiddleware write a `django_session` row and patch `Vary: Cookie` at
-        // slot 2. v2 stores it in the cookie instead — same carrier role, no row.
-        this.setResetCookie(request, response, token);
+        // v1 stores the token in the session here, which is what writes a `django_session`
+        // row and patches `Vary: Cookie` at slot 2. v2 uses a cookie — same carrier role.
+        this.setResetCookie(response, token);
         this.redirect(
           response,
           `/reset/${uidb64}/${PasswordResetController.INTERNAL_RESET_URL_TOKEN}/`,
@@ -208,103 +275,43 @@ export class PasswordResetController {
       return;
     }
 
-    if (user !== null && token === PasswordResetController.INTERNAL_RESET_URL_TOKEN) {
-      // The session (here: the cookie) is *read* on this branch whether or not it is valid, so
-      // `Vary: Cookie` is patched at slot 2 either way — `SessionMiddleware.process_response`
-      // keys on `request.session.accessed`, not on the outcome. Measured on v1.
-      this.varyOnCookie(response, DjangoStack.SESSION);
-      const stored = readCookie(request, PasswordResetController.RESET_COOKIE);
-      if (this.resets.checkToken(user, stored)) {
-        this.renderSetPasswordForm(request, response, []);
-        return;
-      }
-    }
-
-    this.renderInvalidLink(response);
-  }
-
-  /** `PasswordResetConfirmView.post` — `SetPasswordForm`. */
-  @Post('reset/:uidb64/:token')
-  async resetConfirmPost(
-    @Param('uidb64') uidb64: string,
-    @Param('token') token: string,
-    @Req() request: Request,
-    @Res() response: Response,
-    @Body() body: unknown,
-  ): Promise<void> {
-    addNeverCacheHeaders(response);
-    if (this.rejectCsrf(request, response)) {
-      return;
-    }
-
-    const user = await this.resets.getUserFromUidb64(uidb64);
-    this.varyOnCookie(response, DjangoStack.SESSION);
-    const stored = readCookie(request, PasswordResetController.RESET_COOKIE);
-
-    if (
-      user === null ||
-      token !== PasswordResetController.INTERNAL_RESET_URL_TOKEN ||
-      !this.resets.checkToken(user, stored)
-    ) {
+    if (user === null || !isSetPassword) {
       this.renderInvalidLink(response);
       return;
     }
 
-    const form = asForm(body);
-    const errors = await this.resets.setPassword(
-      user,
-      typeof form.new_password1 === 'string' ? form.new_password1 : '',
-      typeof form.new_password2 === 'string' ? form.new_password2 : '',
-    );
-    if (errors.length > 0) {
-      this.renderSetPasswordForm(request, response, errors);
+    // The session is *accessed* on this branch whether or not it validates, and
+    // `SessionMiddleware.process_response` keys `Vary: Cookie` on access, not on outcome.
+    this.varyOnCookie(response, DjangoStack.SESSION);
+    const stored = readCookie(request, PasswordResetController.RESET_COOKIE);
+    if (!this.resets.checkToken(user, stored)) {
+      this.renderInvalidLink(response);
       return;
     }
 
-    // v1: `del self.request.session[INTERNAL_RESET_SESSION_TOKEN]`, which modifies the session
-    // and therefore re-writes the cookie. v2 clears its own.
-    this.clearResetCookie(response);
-    this.redirect(response, '/reset/done/');
-  }
+    // From here the link is valid, so `super().dispatch()` runs and the method matters.
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      this.renderSetPasswordForm(request, response, []);
+      return;
+    }
+    if (request.method === 'POST' || request.method === 'PUT') {
+      const form = djangoPostData(request);
+      const errors = await this.resets.setPassword(
+        user,
+        typeof form.new_password1 === 'string' ? form.new_password1 : '',
+        typeof form.new_password2 === 'string' ? form.new_password2 : '',
+      );
+      if (errors.length > 0) {
+        this.renderSetPasswordForm(request, response, errors);
+        return;
+      }
+      // v1: `del self.request.session[INTERNAL_RESET_SESSION_TOKEN]`, which modifies the
+      // session and re-writes its cookie. v2 clears its own.
+      this.clearResetCookie(response);
+      this.redirect(response, '/reset/done/');
+      return;
+    }
 
-  /** `PasswordResetCompleteView` — a `TemplateView`; `{% host %}` is the only variable. */
-  @Get('reset/done')
-  resetDone(@Res() response: Response): void {
-    this.sendHtml(response, this.html.render('password_reset_complete.eta'));
-  }
-
-  // -------------------------------------------------------------------------
-  // method fallbacks
-  // -------------------------------------------------------------------------
-
-  /**
-   * Django's `View.http_method_not_allowed` / `View.options`, which Nest would otherwise 404.
-   *
-   * ⚠️ `ProcessFormView` defines `put = post`, so **`PUT /password_reset/` behaves exactly
-   * like a POST** in v1 — a genuine, if unlikely, part of the contract. That is why the two
-   * form routes below list `PUT` in `Allow` and why `@Put` aliases are registered.
-   */
-  @DrfNoRequestData()
-  @All('password_reset')
-  passwordResetOther(@Req() request: Request, @Res() response: Response): void {
-    this.methodFallback(request, response, 'GET, POST, PUT, HEAD, OPTIONS');
-  }
-
-  @DrfNoRequestData()
-  @All('password_reset/done')
-  passwordResetDoneOther(@Req() request: Request, @Res() response: Response): void {
-    this.methodFallback(request, response, 'GET, HEAD, OPTIONS');
-  }
-
-  @DrfNoRequestData()
-  @All('reset/done')
-  resetDoneOther(@Req() request: Request, @Res() response: Response): void {
-    this.methodFallback(request, response, 'GET, HEAD, OPTIONS');
-  }
-
-  @DrfNoRequestData()
-  @All('reset/:uidb64/:token')
-  resetConfirmOther(@Req() request: Request, @Res() response: Response): void {
     this.methodFallback(request, response, 'GET, POST, PUT, HEAD, OPTIONS');
   }
 
@@ -318,13 +325,27 @@ export class PasswordResetController {
    */
   private methodFallback(request: Request, response: Response, allow: string): void {
     response.setHeader('Allow', allow);
-    if (request.method === 'OPTIONS') {
-      response.setHeader('Content-Length', '0');
-      response.status(HttpStatus.OK).end();
-      return;
+    // `HttpResponse()` and `HttpResponseNotAllowed()` both default to
+    // `text/html; charset=utf-8`, and both are zero-length. Measured on all four routes.
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    response.setHeader('Content-Length', '0');
+    response
+      .status(request.method === 'OPTIONS' ? HttpStatus.OK : HttpStatus.METHOD_NOT_ALLOWED)
+      .end();
+  }
+
+  /**
+   * `CsrfViewMiddleware.process_view`'s guard, applied to every unsafe method on all four
+   * routes — none of these views is `csrf_exempt` (unlike every DRF view in the service).
+   *
+   * @returns `true` when the request was refused and a response has been sent.
+   */
+  private refuseUnsafeMethod(request: Request, response: Response): boolean {
+    // "Assume that anything not defined as 'safe' by RFC7231 needs protection."
+    if (SAFE_METHODS.has(request.method)) {
+      return false;
     }
-    response.setHeader('Content-Type', 'text/html');
-    response.status(HttpStatus.METHOD_NOT_ALLOWED).end();
+    return this.rejectCsrf(request, response);
   }
 
   private renderSetPasswordForm(
@@ -391,8 +412,7 @@ export class PasswordResetController {
   }
 
   /** v2's stand-in for `request.session[INTERNAL_RESET_SESSION_TOKEN] = token`. */
-  private setResetCookie(request: Request, response: Response, token: string): void {
-    void request;
+  private setResetCookie(response: Response, token: string): void {
     appendSetCookie(response, {
       name: PasswordResetController.RESET_COOKIE,
       value: token,
@@ -448,7 +468,7 @@ export class PasswordResetController {
     }
     const { token: sanitized } = sanitizeCsrfToken(cookieToken);
 
-    const body = asForm(request.body);
+    const body = djangoPostData(request);
     const fromBody = body[CSRF_FIELD_NAME];
     const fromHeader = request.headers[CSRF_HEADER_NAME];
     const submitted =
@@ -477,14 +497,21 @@ export class PasswordResetController {
             'them, at least for this site, or for &#39;same-origin&#39; requests.</p>\n\n'
           : '',
     });
+    // ⚠️ `django.views.csrf.csrf_failure` builds `HttpResponseForbidden(..., content_type=
+    // 'text/html')` — **no charset**, unlike every other page here. Express's `res.send()`
+    // appends one, so the body goes out through `end()` instead.
+    const body = Buffer.from(page, 'utf8');
     response.setHeader('Content-Type', 'text/html');
-    response.status(HttpStatus.FORBIDDEN).send(page);
+    response.setHeader('Content-Length', String(body.byteLength));
+    response.status(HttpStatus.FORBIDDEN).end(body);
   }
 
-  private sendHtml(response: Response, body: string): void {
+  private sendHtml(response: Response, html: string): void {
     // Django's `TemplateResponse` default: `text/html; charset=utf-8`.
+    const body = Buffer.from(html, 'utf8');
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
-    response.status(HttpStatus.OK).send(body);
+    response.setHeader('Content-Length', String(body.byteLength));
+    response.status(HttpStatus.OK).end(body);
   }
 
   /** `django.shortcuts.redirect(to)` — a **302**, `Location` verbatim, empty body. */
@@ -494,8 +521,36 @@ export class PasswordResetController {
   }
 }
 
-/** A parsed form/JSON body as a plain record; never throws. */
-function asForm(body: unknown): Record<string, unknown> {
+/** RFC 7231's safe methods, as `CsrfViewMiddleware.process_view` lists them. */
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
+
+/**
+ * `HttpRequest.POST` — **not** `request.data`.
+ *
+ * ⚠️ These are Django views, and `HttpRequest._load_post_and_files` populates `request.POST`
+ * for exactly two content types:
+ *
+ * ```python
+ * if self.content_type == 'multipart/form-data':          ... parse
+ * elif self.content_type == 'application/x-www-form-urlencoded': ... parse
+ * else: self._post = QueryDict(encoding=self._encoding)   # empty
+ * ```
+ *
+ * So a **JSON** body is invisible to `PasswordResetForm` and to `SetPasswordForm`, and
+ * `POST /password_reset/` with `{"email": "…"}` sends **no email** and still 302s. Verified
+ * live: `text/plain` and `application/json` both answer 302 with nothing sent. Reading
+ * `request.body` here instead would have made v2 email a member where v1 does not — the one
+ * divergence on this route with a real-world consequence.
+ */
+function djangoPostData(request: Request): Record<string, unknown> {
+  const contentType = (request.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+  if (
+    contentType !== 'application/x-www-form-urlencoded' &&
+    contentType !== 'multipart/form-data'
+  ) {
+    return {};
+  }
+  const body: unknown = request.body;
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     return {};
   }
@@ -576,5 +631,8 @@ function appendSetCookie(
  */
 function addNeverCacheHeaders(response: Response): void {
   response.setHeader('Expires', new Date().toUTCString());
-  response.setHeader('Cache-Control', 'max-age=0, no-cache, no-store, must-revalidate, private');
+  // ⚠️ **No `private`.** Django 2.2's `add_never_cache_headers` passes only
+  // `no_cache`, `no_store` and `must_revalidate`; `private=True` arrived in Django 3.0.
+  // Measured on the live v1: `max-age=0, no-cache, no-store, must-revalidate`.
+  response.setHeader('Cache-Control', 'max-age=0, no-cache, no-store, must-revalidate');
 }

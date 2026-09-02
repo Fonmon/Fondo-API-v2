@@ -13,8 +13,7 @@ import {
 import type { Request } from 'express';
 import { V1View } from '../auth/decorators/v1-view.decorator';
 import { ApiException } from '../common/http/api.exception';
-import { DRF_PARSER_MEDIA_TYPES } from '../common/http/drf-media-type';
-import { DrfNoRequestData, DrfParsers } from '../common/http/drf-parser.interceptor';
+import { DrfNoRequestData } from '../common/http/drf-parser.interceptor';
 import { DrfException } from '../common/http/drf.exception';
 import type { PageEnvelope, UnpaginatedEnvelope } from '../common/http/pagination';
 import type { UserProfileDto } from './dto/user.serializers';
@@ -91,13 +90,33 @@ export class UserController {
   /**
    * `UserView.patch` — the treasurer's monthly TSV.
    *
-   * `@parser_classes((MultiPartParser,))` narrows the parser list for this handler alone, so a
-   * JSON body here is a **415**, not a 400. `@DrfParsers` is the v2 spelling.
+   * ## ⚠️ `@parser_classes((MultiPartParser,))` on this handler is a **no-op**, and v2 must
+   * reproduce that rather than the decorator's apparent intent
    *
-   * ⚠️ v1 reads `request.data['file']`, and DRF merges `POST` and `FILES` into one
-   * `QueryDict` — so a request with no `file` part raises `KeyError` → **500**.
+   * `rest_framework.decorators.parser_classes` is written for **function**-based views: it
+   * sets `func.parser_classes` on the decorated callable. Applied to a *method* of an
+   * `APIView` (`views/user.py:36`) it decorates the unbound function, and `APIView.dispatch`
+   * never looks there — `self.parser_classes` still resolves to
+   * `DEFAULT_PARSER_CLASSES`. So this route accepts JSON, form and multipart exactly like
+   * every other one.
+   *
+   * Measured on the live v1, which is why this is stated rather than argued:
+   *
+   * | `Content-Type` | v1 |
+   * |---|---|
+   * | `application/json` | **500** (`<h1>Server Error (500)</h1>`) — the body parses to `{}` and `obj['file']` raises `KeyError` |
+   * | `application/x-www-form-urlencoded` | **500**, same reason |
+   * | `multipart/form-data` with no `file` part | **500**, same reason |
+   * | `text/plain` | **415** — not in the *default* parser list either |
+   *
+   * An earlier version of this controller carried `@DrfParsers(MULTIPART)` and answered 415
+   * for JSON. That was wrong in the one direction that matters: it refused a request v1
+   * accepts-then-500s on, which a client could tell apart.
+   *
+   * ⚠️ **The same decorator is misused twice more** — `LoanView.patch` (`views/loan.py:49`)
+   * and `FileView.post` (`views/file.py:15`). Phases 4 and 8 must not "restore" the
+   * narrowing there either.
    */
-  @DrfParsers(DRF_PARSER_MEDIA_TYPES.MULTIPART)
   @Patch()
   @HttpCode(HttpStatus.OK)
   async bulkUpdate(@Req() request: Request): Promise<void> {

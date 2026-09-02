@@ -243,6 +243,62 @@ describe('Phase 3 — password reset', () => {
       expect(sendMail).not.toHaveBeenCalled();
     });
 
+    /**
+     * ⚠️ Verified live: v1 answers **302 and sends nothing** for a JSON body, because
+     * `PasswordResetForm(request.POST)` reads `HttpRequest.POST`, which Django populates only
+     * for `x-www-form-urlencoded` and `multipart/form-data`. Reading `request.data` here would
+     * have made v2 email a member where v1 does not.
+     */
+    it('ignores a JSON body entirely — request.POST is form-only', async () => {
+      const { cookie, field } = csrfPair();
+      await request(app.getHttpServer())
+        .post('/password_reset/')
+        .set('Cookie', `csrftoken=${cookie}`)
+        .set('X-CSRFToken', field)
+        .send({ email: MEMBER_EMAIL })
+        .expect(302);
+
+      expect(sendMail).not.toHaveBeenCalled();
+    });
+
+    it('ignores a text/plain body and still redirects — never a 415', async () => {
+      const { cookie, field } = csrfPair();
+      await request(app.getHttpServer())
+        .post('/password_reset/')
+        .set('Cookie', `csrftoken=${cookie}`)
+        .set('X-CSRFToken', field)
+        .set('Content-Type', 'text/plain')
+        .send(`email=${MEMBER_EMAIL}`)
+        .expect(302);
+
+      expect(sendMail).not.toHaveBeenCalled();
+    });
+
+    it('accepts a multipart body — the other content type request.POST parses', async () => {
+      const { cookie, field } = csrfPair();
+      await request(app.getHttpServer())
+        .post('/password_reset/')
+        .set('Cookie', `csrftoken=${cookie}`)
+        .field('email', MEMBER_EMAIL)
+        .field('csrfmiddlewaretoken', field)
+        .expect(302);
+
+      expect(sendMail).toHaveBeenCalledTimes(1);
+    });
+
+    it('PUT behaves exactly like POST — ProcessFormView defines `put = post`', async () => {
+      const { cookie, field } = csrfPair();
+      const response = await request(app.getHttpServer())
+        .put('/password_reset/')
+        .set('Cookie', `csrftoken=${cookie}`)
+        .type('form')
+        .send({ email: MEMBER_EMAIL, csrfmiddlewaretoken: field })
+        .expect(302);
+
+      expect(response.headers.location).toBe('/password_reset/done/');
+      expect(sendMail).toHaveBeenCalledTimes(1);
+    });
+
     it('carries no Set-Cookie and no Cookie in Vary — the response is a redirect', async () => {
       const { cookie, field } = csrfPair();
       const response = await request(app.getHttpServer())
@@ -359,8 +415,9 @@ describe('Phase 3 — password reset', () => {
 
       // Measured on v1: `Origin, Cookie` — the session patch is at slot 2, *above* corsheaders.
       expect(response.headers.vary).toBe('Origin, Cookie');
+      // ⚠️ No `private`: Django 2.2's `add_never_cache_headers` does not pass it (3.0 does).
       expect(response.headers['cache-control']).toBe(
-        'max-age=0, no-cache, no-store, must-revalidate, private',
+        'max-age=0, no-cache, no-store, must-revalidate',
       );
     });
 
@@ -529,17 +586,60 @@ describe('Phase 3 — password reset', () => {
     });
   });
 
-  describe('method handling', () => {
-    it('405s a DELETE on the form page, with Django’s Allow list', async () => {
-      const response = await request(app.getHttpServer()).delete('/password_reset/').expect(405);
-      // `ProcessFormView` defines get/post/put; `View` adds head/options.
-      expect(response.headers.allow).toBe('GET, POST, PUT, HEAD, OPTIONS');
+  describe('method handling — CSRF is checked before the method is', () => {
+    /**
+     * ⚠️ Measured on the live v1: `DELETE /password_reset/` with **no** csrftoken cookie is a
+     * **403**, not a 405. `CsrfViewMiddleware.process_view` runs before the view's `dispatch`
+     * resolves a handler, so an unsafe method is refused on CSRF grounds first. Splitting
+     * these routes into `@Get`/`@Post`/`@All` would put Nest's router in front of the check
+     * and invert both statuses.
+     */
+    it('403s an unsafe method with no CSRF cookie, whatever the method', async () => {
+      for (const path of ['/password_reset/', '/password_reset/done/', '/reset/done/']) {
+        const response = await request(app.getHttpServer()).delete(path).expect(403);
+        expect(response.text).toContain('CSRF verification failed. Request aborted.');
+      }
     });
 
-    it('405s a POST on the done page', async () => {
-      const response = await request(app.getHttpServer()).post('/password_reset/done/');
+    it('405s a DELETE on the form page once the CSRF token is present', async () => {
+      const { cookie, field } = csrfPair();
+      const response = await request(app.getHttpServer())
+        .delete('/password_reset/')
+        .set('Cookie', `csrftoken=${cookie}`)
+        .set('X-CSRFToken', field)
+        .expect(405);
+
+      // `ProcessFormView` defines get/post/put; `View` adds head/options.
+      expect(response.headers.allow).toBe('GET, POST, PUT, HEAD, OPTIONS');
+      expect(response.headers['content-type']).toBe('text/html; charset=utf-8');
+      expect(response.text).toBe('');
+    });
+
+    it('405s a POST on the done page once the CSRF token is present', async () => {
+      const { cookie, field } = csrfPair();
+      const response = await request(app.getHttpServer())
+        .post('/password_reset/done/')
+        .set('Cookie', `csrftoken=${cookie}`)
+        .set('X-CSRFToken', field);
+
       expect(response.status).toBe(405);
       expect(response.headers.allow).toBe('GET, HEAD, OPTIONS');
+    });
+
+    /**
+     * ⚠️ `PasswordResetConfirmView.dispatch` returns the invalid-link page **before**
+     * `super().dispatch()`, which is where Django checks the method at all. Verified live:
+     * `DELETE /reset/<uid>/set-password/` with a valid csrftoken is a **200**.
+     */
+    it('renders the invalid-link page for ANY method when the link is invalid', async () => {
+      const { cookie, field } = csrfPair();
+      const response = await request(app.getHttpServer())
+        .delete(`/reset/${uidOf(memberId)}/set-password/`)
+        .set('Cookie', `csrftoken=${cookie}`)
+        .set('X-CSRFToken', field)
+        .expect(200);
+
+      expect(response.text).toContain('El enlace de restauración de contraseña es inválido');
     });
 
     it('answers a bare OPTIONS with 200 and an Allow list, as django.views.View does', async () => {
