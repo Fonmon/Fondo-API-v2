@@ -1076,7 +1076,7 @@ set, as defence in depth rather than as the primary control.
 | 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab` + C1–C4) | ✅ | n/a | ✅ **APPROVED** | n/a |
 | 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
 | 2 Mail + notifications | ✅ **CLOSED — APPROVED** (`fe261fc`) | ✅ | ✅ PASS r3 | ✅ **Approved w/ conditions** | ⬜ |
-| 3 Users + finance | 🔨 **Dev done — with `manual-tester`** (`69c8496`) | ✅ | ⬜ | ⬜ | ⬜ |
+| 3 Users + finance | 🔨 dev done (`1a8c37f`) → **tester** | ✅ | 🔨 | ⬜ | ⬜ |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
 | 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ |
 | 7b Scheduler *runner* | ⬜ Blocked on P4 | — | — | — | — |
