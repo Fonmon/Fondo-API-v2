@@ -1,0 +1,147 @@
+import {
+  asPythonDict,
+  pyGet,
+  pyGetDict,
+  pyHas,
+  PythonKeyError,
+  PythonTypeError,
+  pythonNotEqual,
+  toDjangoBool,
+  toDjangoInt,
+  toDjangoSmallInt,
+  toDjangoText,
+} from './python-obj';
+
+/**
+ * The CPython behaviours `services/user.py` relies on. Each cell states which v1 line depends
+ * on it, because none of these is defensive programming — they decide whether a malformed
+ * request is a 404, a 409 or a 500.
+ */
+describe('python-obj', () => {
+  describe('asPythonDict', () => {
+    it('accepts a mapping', () => {
+      expect(asPythonDict({ a: 1 })).toEqual({ a: 1 });
+    });
+
+    it.each([[null], [[1, 2]], ['text'], [5], [true]])(
+      'raises TypeError for %p, as `obj["type"]` does on a non-mapping',
+      (value) => {
+        expect(() => asPythonDict(value)).toThrow(PythonTypeError);
+      },
+    );
+  });
+
+  describe('pyGet / pyHas / pyGetDict', () => {
+    it('raises KeyError with Python’s message shape', () => {
+      expect(() => pyGet({}, 'type')).toThrow(PythonKeyError);
+      expect(() => pyGet({}, 'type')).toThrow("KeyError: 'type'");
+    });
+
+    it('returns a present key even when its value is null or undefined', () => {
+      expect(pyGet({ birthdate: null }, 'birthdate')).toBeNull();
+      expect(pyHas({ birthdate: null }, 'birthdate')).toBe(true);
+      expect(pyHas({}, 'birthdate')).toBe(false);
+    });
+
+    it('does not see inherited properties — `in` on a dict does not either', () => {
+      expect(pyHas({}, 'toString')).toBe(false);
+      expect(() => pyGet({}, 'toString')).toThrow(PythonKeyError);
+    });
+
+    it('pyGetDict raises KeyError for an absent section and TypeError for a scalar one', () => {
+      expect(() => pyGetDict({}, 'personal')).toThrow(PythonKeyError);
+      expect(() => pyGetDict({ personal: 5 }, 'personal')).toThrow(PythonTypeError);
+    });
+  });
+
+  describe('toDjangoInt — `BigIntegerField.get_prep_value`', () => {
+    it('accepts integers, bigints and decimal strings', () => {
+      expect(toDjangoInt(123, 'x')).toBe(123n);
+      expect(toDjangoInt(123n, 'x')).toBe(123n);
+      expect(toDjangoInt('123', 'x')).toBe(123n);
+      expect(toDjangoInt(' -45 ', 'x')).toBe(-45n);
+      expect(toDjangoInt(12312451241243, 'x')).toBe(12312451241243n);
+    });
+
+    it('truncates a float, as CPython’s int() does', () => {
+      expect(toDjangoInt(2.9, 'x')).toBe(2n);
+      expect(toDjangoInt(-2.9, 'x')).toBe(-2n);
+    });
+
+    it('maps a boolean to 1/0 — `int(True)` is 1', () => {
+      expect(toDjangoInt(true, 'x')).toBe(1n);
+      expect(toDjangoInt(false, 'x')).toBe(0n);
+    });
+
+    it.each([['abc'], [''], [null], [{}], [[1]]])('raises for %p', (value) => {
+      expect(() => toDjangoInt(value, 'identification')).toThrow(PythonTypeError);
+    });
+
+    it('toDjangoSmallInt narrows to a number for the role column', () => {
+      expect(toDjangoSmallInt('2', 'role')).toBe(2);
+    });
+  });
+
+  describe('toDjangoBool — `BooleanField.to_python`', () => {
+    it.each([
+      [true, true],
+      [false, false],
+      [1, true],
+      [0, false],
+      ['t', true],
+      ['True', true],
+      ['1', true],
+      ['f', false],
+      ['False', false],
+      ['0', false],
+    ])('maps %p to %p', (input, expected) => {
+      expect(toDjangoBool(input, 'notifications')).toBe(expected);
+    });
+
+    it.each([['true'], ['yes'], [null], [2], [{}]])('raises for %p, as Django does', (value) => {
+      expect(() => toDjangoBool(value, 'notifications')).toThrow(PythonTypeError);
+    });
+  });
+
+  describe('toDjangoText — `CharField.get_prep_value`', () => {
+    it('renders null as the four characters None, as `str(None)` does', () => {
+      expect(toDjangoText(null)).toBe('None');
+      expect(toDjangoText(undefined)).toBe('None');
+      expect(toDjangoText(true)).toBe('True');
+      expect(toDjangoText(5)).toBe('5');
+      expect(toDjangoText('x')).toBe('x');
+    });
+
+    it('never renders [object Object]', () => {
+      expect(toDjangoText({ a: 1 })).not.toContain('object Object');
+    });
+  });
+
+  describe('pythonNotEqual — `__update_user_finance`’s change check', () => {
+    it('is False for an equal integer, whatever its JavaScript type', () => {
+      expect(pythonNotEqual(2000n, 2000)).toBe(false);
+      expect(pythonNotEqual(2000n, 2000n)).toBe(false);
+    });
+
+    it('is True for a stringified number — Python’s `2000 != "2000"` is True', () => {
+      // ⚠️ Deliberately different from `changedFields`, which normalises. This one decides
+      // whether v1 would have written the row and bumped `last_modified`.
+      expect(pythonNotEqual(2000n, '2000')).toBe(true);
+    });
+
+    it('is True for a float that is not the same integer', () => {
+      expect(pythonNotEqual(2000n, 2000.5)).toBe(true);
+    });
+
+    it('compares booleans by identity, so a stored False differs from "false"', () => {
+      expect(pythonNotEqual(false, false)).toBe(false);
+      expect(pythonNotEqual(false, 'false')).toBe(true);
+      expect(pythonNotEqual(true, false)).toBe(true);
+    });
+
+    it('is True for null and for objects', () => {
+      expect(pythonNotEqual(1n, null)).toBe(true);
+      expect(pythonNotEqual(1n, {})).toBe(true);
+    });
+  });
+});
