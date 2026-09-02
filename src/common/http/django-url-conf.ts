@@ -42,45 +42,30 @@ import type { V1ViewName } from '../../auth/permissions/permission-matrix';
 /**
  * DRF's `APIView.default_response_headers`, per view. `null` for a plain Django view.
  *
- * ⚠️ **Phase 3 must widen this to carry `Vary: Cookie`.** Two v1 middlewares patch `Cookie`
- * into `Vary` from *outside* DRF: `CsrfViewMiddleware`, when it sets the `csrftoken` cookie on
- * a form page, and `SessionMiddleware`, when a view touches the session.
+ * ✅ **Phase 3 resolved this without widening the table** — `Vary: Cookie` is not a per-view
+ * header, it is a consequence of *which layer touched a cookie*, and condition **C21**'s depth
+ * model already expresses that. `PasswordResetController` registers its `patch_vary_headers`
+ * hook at the depth of the v1 layer it is porting, and the three measured orders fall out:
  *
- * This was first recorded as affecting one route. The round-3 sweep found it is **three kept
- * routes**, and that the element order is not constant between them:
+ * | route | `Vary` | who added `Cookie` | depth |
+ * |---|---|---|---|
+ * | `GET /password_reset/` | `Cookie, Origin` | `PasswordResetView`'s `@method_decorator(csrf_protect)` | `DjangoStack.VIEW` — below all eight |
+ * | `GET /reset/<uid>/<valid token>/` | `Origin, Cookie` | `SessionMiddleware` | slot 2 |
+ * | `GET /reset/<uid>/set-password/` | `Origin, Cookie` | `CsrfViewMiddleware` (that view has **no** `csrf_protect` decorator) | slot 4 |
  *
- * | route | `Vary` | also |
- * |---|---|---|
- * | `GET /password_reset/` | `Cookie, Origin` | `Set-Cookie: csrftoken` |
- * | `GET /reset/<uid>/<valid token>/` | `Origin, Cookie` | **302** → `/reset/<uid>/set-password/` |
- * | `GET /reset/<uid>/set-password/` | `Origin, Cookie` | `Set-Cookie: csrftoken` |
+ * Both orders verified live against v1, and against v2, byte for byte. Building the header
+ * from a per-view flag here would have needed a special case for the order; putting each hook
+ * where its counterpart lives needs none.
  *
- * ⚠️ **`Cookie, Origin` on the first, `Origin, Cookie` on the other two.** Django does not
- * sort `Vary`; `patch_vary_headers` appends whatever is not already present, so the order is a
- * function of *which middleware got there first*, not of the header's meaning. That is
- * irrelevant if Phase 3 transcribes the string per route and load-bearing the moment anyone
- * builds it by joining a set — which is why it is written down here.
- *
- * `GET /api/authorize` also answers `Vary: Accept, Origin, Cookie`, but that is Alexa account
- * linking and is **not migrated** (plan §1), so it is out of scope rather than a fourth row.
- *
- * ⚠️ **Phase 3 scope, and probably a Phase 3 *design* question, not a one-liner:
- * `GET /reset/<uid>/<token>/` performs a database write.** With a *valid* token,
- * `PasswordResetConfirmView.dispatch` (Django 2.2.27,
- * `django/contrib/auth/views.py:272-278`) does:
- *
- * ```python
- * self.request.session[INTERNAL_RESET_SESSION_TOKEN] = token   # '_password_reset_token'
- * redirect_url = self.request.path.replace(token, INTERNAL_RESET_URL_TOKEN)  # 'set-password'
- * ```
- *
- * so `SessionMiddleware` persists the modified session and a **`django_session` row is
- * inserted on a GET**, before the 302. That is where both the `Cookie` in `Vary` and the
- * `sessionid` cookie on those two routes come from. **v2 has no session model at all** — no
- * `django_session` mapping, no session store, no `sessionid`. Reproducing this is a decision
- * about how far the password-reset flow is ported (real server-side sessions vs. a signed
- * token carrying the same state), not a header to add, so it belongs to whoever lands
- * `PasswordResetConfirmView`. **Do not build it as part of the header work.**
+ * ✅ **The `django_session` question is answered too, and the answer is "no sessions".**
+ * `GET /reset/<uid>/<token>/` writes a `django_session` row in v1 because
+ * `PasswordResetConfirmView.dispatch` (Django 2.2.27, `contrib/auth/views.py:272-278`) stores
+ * the token in the session and 302s to `…/set-password/`. v2 keeps the **hop** — it exists so
+ * the token leaves the URL before a page that loads a third-party stylesheet renders, which
+ * would otherwise leak it in `Referer` — and drops the **store**: the token travels in an
+ * `HttpOnly` cookie and is re-validated by `check_token` on arrival, exactly as Django
+ * re-validates the session copy. Strictly less state, no `django_session` row, and nothing for
+ * a parity round to misread. Registered as **P3-D3**; see `PasswordResetController`.
  */
 export interface DrfViewHeaders {
   /** `Allow` — `[m.upper() for m in http_method_names if hasattr(self, m)]`, DRF's order. */
