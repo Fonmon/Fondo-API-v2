@@ -478,15 +478,34 @@ export class PasswordResetController {
     }
     const { token: sanitized } = sanitizeCsrfToken(cookieToken);
 
-    const body = djangoPostData(request);
-    const fromBody = body[CSRF_FIELD_NAME];
-    const fromHeader = request.headers[CSRF_HEADER_NAME];
-    const submitted =
-      typeof fromBody === 'string' && fromBody !== ''
-        ? fromBody
-        : typeof fromHeader === 'string'
-          ? fromHeader
-          : '';
+    // ```python
+    // request_csrf_token = ""
+    // if request.method == "POST":
+    //     request_csrf_token = request.POST.get('csrfmiddlewaretoken', '')
+    // if request_csrf_token == "":
+    //     request_csrf_token = request.META.get(settings.CSRF_HEADER_NAME, '')
+    // ```
+    //
+    // ⚠️ **The body is read only for `POST`** (`django/middleware/csrf.py:293`), and
+    // `HttpRequest._load_post_and_files` only populates `request.POST` for `POST` anyway. On
+    // `PUT`, `PATCH` and `DELETE` the token must arrive in `X-CSRFToken` — the comment on the
+    // fallback says so: "to make things easier for AJAX, and *possible* for PUT/DELETE".
+    //
+    // v2 read the body on every unsafe method (parity finding **F5**), so
+    // `PUT /password_reset/` with a body-borne token was a **302** where v1 is a 403 — i.e.
+    // v2 ran `PasswordResetView.post`, the branch that sends reset mail, on a request v1
+    // refuses. Narrow, since the token still has to match the cookie and no cross-origin HTML
+    // form can issue a `PUT`, but it is a wider accepted-credential surface than v1's on the
+    // one route family that mails an account-recovery link.
+    let submitted = '';
+    if (request.method === 'POST') {
+      const fromBody = djangoPostData(request)[CSRF_FIELD_NAME];
+      submitted = typeof fromBody === 'string' ? fromBody : '';
+    }
+    if (submitted === '') {
+      const fromHeader = request.headers[CSRF_HEADER_NAME];
+      submitted = typeof fromHeader === 'string' ? fromHeader : '';
+    }
 
     if (!csrfTokensMatch(sanitized, submitted)) {
       this.sendCsrfFailure(response, REASON_BAD_TOKEN);

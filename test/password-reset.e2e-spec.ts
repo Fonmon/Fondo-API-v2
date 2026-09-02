@@ -287,12 +287,17 @@ describe('Phase 3 — password reset', () => {
     });
 
     it('PUT behaves exactly like POST — ProcessFormView defines `put = post`', async () => {
+      // ⚠️ The token goes in `X-CSRFToken`, **not** in the body: Django reads
+      // `csrfmiddlewaretoken` from `request.POST` only for `POST`, so a body-borne token on a
+      // `PUT` is a 403 and this view is never reached. This cell used to send it in the body
+      // and passed — it was asserting parity finding **F5**, the bug, rather than v1.
       const { cookie, field } = csrfPair();
       const response = await request(app.getHttpServer())
         .put('/password_reset/')
         .set('Cookie', `csrftoken=${cookie}`)
+        .set('X-CSRFToken', field)
         .type('form')
-        .send({ email: MEMBER_EMAIL, csrfmiddlewaretoken: field })
+        .send({ email: MEMBER_EMAIL })
         .expect(302);
 
       expect(response.headers.location).toBe('/password_reset/done/');
@@ -778,6 +783,96 @@ describe('Phase 3 — password reset', () => {
 
       expect(response.status).toBe(405);
       expect(response.headers.allow).toBe('GET, HEAD, OPTIONS');
+    });
+
+    /**
+     * Parity finding **F5**. `CsrfViewMiddleware.process_view` reads
+     * `request.POST['csrfmiddlewaretoken']` only `if request.method == "POST"`
+     * (`django/middleware/csrf.py:293`), and `HttpRequest._load_post_and_files` populates
+     * `request.POST` for `POST` alone. Every other unsafe method must carry the token in
+     * `X-CSRFToken` — Django's own comment on the fallback says it exists "to make things
+     * easier for AJAX, and possible for PUT/DELETE".
+     *
+     * v2 read the body on every unsafe method, so a body-borne token got `PUT` past CSRF and
+     * into `PasswordResetView.post` — the branch that sends reset mail. Measured on v1:
+     * 403 for `PUT` and `PATCH`, where v2 answered 302 and 405.
+     */
+    describe('F5 — the body is a CSRF token source for POST only', () => {
+      const withBodyToken = (
+        method: 'put' | 'patch' | 'delete' | 'post',
+        path: string,
+      ): request.Test => {
+        const { cookie, field } = csrfPair();
+        return request(app.getHttpServer())
+          [method](path)
+          .set('Cookie', `csrftoken=${cookie}`)
+          .type('form')
+          .send({ csrfmiddlewaretoken: field, email: MEMBER_EMAIL });
+      };
+
+      it.each(['put', 'patch', 'delete'] as const)(
+        '403s %s carrying the token in the body only',
+        async (method) => {
+          const response = await withBodyToken(method, '/password_reset/');
+
+          expect(response.status).toBe(403);
+          expect(response.text).toContain('CSRF verification failed. Request aborted.');
+          expect(sendMail).not.toHaveBeenCalled();
+        },
+      );
+
+      it('403s the same on the confirm route, where the body token used to pass', async () => {
+        for (const method of ['put', 'patch', 'delete'] as const) {
+          const response = await withBodyToken(method, `/reset/${uidOf(memberId)}/aaaaa-bbbbbbbb/`);
+          expect(response.status).toBe(403);
+        }
+      });
+
+      it('still accepts the body token on POST — the one method Django reads it for', async () => {
+        const response = await withBodyToken('post', '/password_reset/');
+
+        expect(response.status).toBe(302);
+        expect(sendMail).toHaveBeenCalledTimes(1);
+      });
+
+      it('still accepts the header token on PUT, which is how v1 reaches the view', async () => {
+        const { cookie, field } = csrfPair();
+        const response = await request(app.getHttpServer())
+          .put('/password_reset/')
+          .set('Cookie', `csrftoken=${cookie}`)
+          .set('X-CSRFToken', field)
+          .type('form')
+          .send({ email: MEMBER_EMAIL });
+
+        // `ProcessFormView` defines `put = post`, so v1 sends the mail and 302s. Verified live.
+        expect(response.status).toBe(302);
+        expect(response.headers.location).toBe('/password_reset/done/');
+        expect(sendMail).toHaveBeenCalledTimes(1);
+      });
+
+      it('prefers the header when a PUT carries both, since the body is not read', async () => {
+        const { cookie, field } = csrfPair();
+        const response = await request(app.getHttpServer())
+          .put('/password_reset/')
+          .set('Cookie', `csrftoken=${cookie}`)
+          .set('X-CSRFToken', field)
+          .type('form')
+          .send({ csrfmiddlewaretoken: 'not-a-token-at-all', email: MEMBER_EMAIL });
+
+        expect(response.status).toBe(302);
+      });
+
+      it('a POST whose body token is empty falls back to the header, as Django does', async () => {
+        const { cookie, field } = csrfPair();
+        const response = await request(app.getHttpServer())
+          .post('/password_reset/')
+          .set('Cookie', `csrftoken=${cookie}`)
+          .set('X-CSRFToken', field)
+          .type('form')
+          .send({ csrfmiddlewaretoken: '', email: MEMBER_EMAIL });
+
+        expect(response.status).toBe(302);
+      });
     });
 
     /**
