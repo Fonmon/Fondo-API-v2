@@ -873,6 +873,52 @@ describe('Phase 3 — password reset', () => {
 
         expect(response.status).toBe(302);
       });
+
+      /**
+       * ⚠️ **R2.11.5** — the cell that distinguishes the fix from its two plausible
+       * near-misses, added after round 2 found the block could not tell them apart.
+       *
+       * Django's fallback is `if request_csrf_token == "": request_csrf_token =
+       * META[CSRF_HEADER]` (`django/middleware/csrf.py:296-303`) — it fires on the **empty
+       * string alone**. So a `POST` carrying a non-empty *wrong* body token must be a 403
+       * even with a valid `X-CSRFToken`: the body value is taken, and it is wrong.
+       *
+       * Without this cell, an implementation that read the header first, or that fell back
+       * to the header whenever the body token failed to *validate*, would satisfy every
+       * other assertion in this block and still be wrong in exactly F5's direction.
+       * Measured on both stacks: **403**, with byte-identical 1 019-byte failure pages.
+       */
+      it('403s a POST whose body token is non-empty and wrong, even with a valid header', async () => {
+        const { cookie, field } = csrfPair();
+        const response = await request(app.getHttpServer())
+          .post('/password_reset/')
+          .set('Cookie', `csrftoken=${cookie}`)
+          .set('X-CSRFToken', field)
+          .type('form')
+          .send({ csrfmiddlewaretoken: 'z'.repeat(64), email: MEMBER_EMAIL });
+
+        expect(response.status).toBe(403);
+        expect(response.text).toContain('CSRF verification failed. Request aborted.');
+        expect(sendMail).not.toHaveBeenCalled();
+
+        // Positive controls, so the 403 cannot be a broken fixture: the same request with a
+        // correct body token, and with an empty one, both reach the view.
+        const correctBody = await request(app.getHttpServer())
+          .post('/password_reset/')
+          .set('Cookie', `csrftoken=${cookie}`)
+          .set('X-CSRFToken', field)
+          .type('form')
+          .send({ csrfmiddlewaretoken: field, email: MEMBER_EMAIL });
+        expect(correctBody.status).toBe(302);
+
+        const emptyBody = await request(app.getHttpServer())
+          .post('/password_reset/')
+          .set('Cookie', `csrftoken=${cookie}`)
+          .set('X-CSRFToken', field)
+          .type('form')
+          .send({ csrfmiddlewaretoken: '', email: MEMBER_EMAIL });
+        expect(emptyBody.status).toBe(302);
+      });
     });
 
     /**
