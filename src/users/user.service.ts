@@ -11,6 +11,7 @@ import {
 import { SELF_USER_ID } from '../auth/policies/ownership';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user';
 import { ApiException } from '../common/http/api.exception';
+import { djangoFileLines, parseMoneyColumn, requireColumn } from '../common/http/django-tsv';
 import {
   buildPageEnvelope,
   isPageBeyondLast,
@@ -20,11 +21,11 @@ import {
   type UnpaginatedEnvelope,
 } from '../common/http/pagination';
 import type { PlainDate } from '../common/utils/date.util';
-import { roundHalfEvenToBigInt } from '../common/utils/rounding.util';
 import {
   nowInstant,
   plainDateToUtcDate,
   todayForAutoNowDateColumn,
+  todayInBogota,
 } from '../common/utils/timezone.util';
 import { AppConfigService } from '../config/app-config.service';
 import { EmailTemplate } from '../mail/email-template';
@@ -52,7 +53,7 @@ import {
   toDjangoSmallInt,
   toDjangoText,
   PythonTypeError,
-} from './python-obj';
+} from '../common/utils/python-obj';
 
 /** The two halves of `UserProfile(User)`, as every read here loads them. */
 const WITH_AUTH_USER = { auth_user: true } as const;
@@ -649,7 +650,12 @@ export class UserService {
     user: { id: number; firstName: string; lastName: string; birthdate: PlainDate },
     tx: Prisma.TransactionClient,
   ): Promise<void> {
-    const thisYear = new Date().getFullYear();
+    // ⚠️ Bogota, never the host zone (plan §4 rule 5, review C28). `datetime.now()` in v1 is
+    // process-local and Django pins the process zone to `TIME_ZONE = 'America/Bogota'`
+    // (`django/conf/__init__.py::Settings.__init__`), so between 00:00 and 05:00 UTC a
+    // `new Date().getFullYear()` on a UTC host is a year AHEAD of v1 — on 1 January it writes
+    // the birthday task a full year out, and `repeat = 4` clones that error forward.
+    const thisYear = todayInBogota().year;
     const runDate = birthdayInYear(user.birthdate, thisYear);
 
     // Read through the transaction client: v1 runs this inside `transaction.atomic()`, so it
@@ -1106,47 +1112,6 @@ export function birthdayInYear(birthdate: PlainDate, year: number): PlainDate {
 
 function isLeapYear(year: number): boolean {
   return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-}
-
-/**
- * `django.core.files.base.File.__iter__` — iterating an uploaded file yields **lines**.
- *
- * For `bytes`, CPython's `splitlines` breaks on `\n`, `\r` and `\r\n` only (the extra Unicode
- * line breaks are a `str` feature). A terminator at the end of the file does **not** produce a
- * trailing empty line.
- *
- * ⚠️ A genuinely blank line in the middle of the file yields `['']`, and `int('')` raises
- * `ValueError` → 500 → the whole upload rolls back. v1's behaviour, kept: a monthly file with
- * a stray blank line is rejected in full rather than applied in part.
- */
-export function djangoFileLines(contents: Buffer): string[] {
-  const text = contents.toString('utf8');
-  if (text === '') {
-    return [];
-  }
-  const lines = text.split(/\r\n|\r|\n/);
-  if (lines.length > 0 && lines[lines.length - 1] === '') {
-    lines.pop();
-  }
-  return lines;
-}
-
-function requireColumn(data: readonly string[], index: number): string {
-  const value = data[index];
-  if (value === undefined) {
-    throw new PythonTypeError(`IndexError: list index out of range (column ${index})`);
-  }
-  return value;
-}
-
-/** `int(round(float(data[i]), 0))` — CPython's half-even `round`, not `Math.round`. */
-function parseMoneyColumn(data: readonly string[], index: number): bigint {
-  const raw = requireColumn(data, index).trim();
-  const asFloat = Number(raw);
-  if (raw === '' || !Number.isFinite(asFloat)) {
-    throw new PythonTypeError(`ValueError: could not convert string to float: '${raw}'`);
-  }
-  return roundHalfEvenToBigInt(asFloat);
 }
 
 /** A PostgreSQL `23505` surfaced by Prisma. v1 sees `django.db.IntegrityError`. */

@@ -1,3 +1,4 @@
+import { PythonKeyError } from '../utils/python-obj';
 import { parseHeader, stripAsciiWhitespace, type ParsedHeader } from './django-parse-header';
 
 /**
@@ -484,4 +485,29 @@ export function setUploadedFiles(request: object, files: readonly DjangoUploaded
 export function getUploadedFiles(request: object): readonly DjangoUploadedFile[] {
   const files = (request as Record<symbol, unknown>)[UPLOADED_FILES];
   return Array.isArray(files) ? (files as readonly DjangoUploadedFile[]) : [];
+}
+
+/**
+ * `request.data['<field>']` on a multipart upload — i.e. Django's `request.FILES[field]`.
+ *
+ * **This is the standing pattern for every file part in every phase** (plan §4 rule 12c,
+ * review C36). DRF's `request.data` is the `QueryDict` *merged with* `FILES`, and v1's
+ * `UserView.patch` (P3), `LoanView.patch` (P4) and `FileView.post` (P8) all read `obj['file']`
+ * only because of that merge. v2 does **not** implement the merge — it is the exact mechanism
+ * of deviation **D23** — so a handler must reach for the file explicitly, here.
+ *
+ * A missing part is v1's `KeyError`: a **500**, not a 400. That is not a rough edge to be
+ * smoothed over in a later phase; it is the measured status for `PATCH /api/user` with a JSON
+ * body, with a form body, and with a multipart body carrying no `file` part.
+ *
+ * ⚠️ Do **not** pair this with a narrowed parser list. `@parser_classes((MultiPartParser,))`
+ * on an `APIView` *method* is a no-op in v1 (plan §4 rule 12b) — all three handlers accept the
+ * default parser list, JSON included, and then 500 here.
+ */
+export function readUploadedFile(request: object, field: string): Buffer {
+  const match = getUploadedFiles(request).find((file) => file.fieldname === field);
+  if (match === undefined) {
+    throw new PythonKeyError(field);
+  }
+  return match.buffer;
 }

@@ -13,12 +13,13 @@ import {
 import type { Request } from 'express';
 import { V1View } from '../auth/decorators/v1-view.decorator';
 import { ApiException } from '../common/http/api.exception';
-import { getUploadedFiles } from '../common/http/django-multipart';
+import { readUploadedFile } from '../common/http/django-multipart';
+import { lastQueryValue } from '../common/http/django-query';
 import { DrfNoRequestData } from '../common/http/drf-parser.interceptor';
 import { DrfException } from '../common/http/drf.exception';
 import type { PageEnvelope, UnpaginatedEnvelope } from '../common/http/pagination';
+import { pythonInt } from '../common/utils/python-obj';
 import type { UserProfileDto } from './dto/user.serializers';
-import { PythonKeyError } from './python-obj';
 import { UserService } from './user.service';
 
 /**
@@ -138,37 +139,4 @@ export class UserController {
   methodNotAllowed(@Req() request: Request): never {
     throw DrfException.methodNotAllowed(request.method, 'GET, POST, PATCH, HEAD, OPTIONS');
   }
-}
-
-/** `QueryDict.get` — the **last** value of a repeated key, `undefined` when absent. */
-export function lastQueryValue(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) {
-    return value.length === 0 ? undefined : value[value.length - 1];
-  }
-  return value;
-}
-
-/**
- * CPython's `int(str)`: leading/trailing whitespace is allowed, an optional sign is allowed,
- * everything else raises `ValueError` — which `UserView.get` does not catch, so it is a 500.
- */
-export function pythonInt(raw: string): number {
-  const trimmed = raw.trim();
-  if (!/^[+-]?\d+$/.test(trimmed)) {
-    throw new Error(`ValueError: invalid literal for int() with base 10: '${raw}'`);
-  }
-  return Number(trimmed);
-}
-
-/**
- * `request.data['<field>']` for the multipart uploads, i.e. Django's `request.FILES`.
- *
- * A missing part is v1's `KeyError` — a 500 — not a 400.
- */
-export function readUploadedFile(request: Request, field: string): Buffer {
-  const match = getUploadedFiles(request).find((file) => file.fieldname === field);
-  if (match === undefined) {
-    throw new PythonKeyError(field);
-  }
-  return match.buffer;
 }

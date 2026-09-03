@@ -3,6 +3,7 @@ import {
   pyGet,
   pyGetDict,
   pyHas,
+  pythonInt,
   PythonKeyError,
   PythonTypeError,
   pythonNotEqual,
@@ -13,9 +14,13 @@ import {
 } from './python-obj';
 
 /**
- * The CPython behaviours `services/user.py` relies on. Each cell states which v1 line depends
- * on it, because none of these is defensive programming — they decide whether a malformed
- * request is a 404, a 409 or a 500.
+ * The CPython behaviours v1's services rely on. Each cell states which v1 line depends on it,
+ * because none of these is defensive programming — they decide whether a malformed request is
+ * a 404, a 409 or a 500.
+ *
+ * Moved here from `src/users/` by review condition **C36**, together with the `pythonInt`
+ * cases below, which were previously untested: Phases 4, 5 and 8 subscript `request.data` and
+ * `int()` a query parameter exactly as Phase 3 does.
  */
 describe('python-obj', () => {
   describe('asPythonDict', () => {
@@ -142,6 +147,38 @@ describe('python-obj', () => {
     it('is True for null and for objects', () => {
       expect(pythonNotEqual(1n, null)).toBe(true);
       expect(pythonNotEqual(1n, {})).toBe(true);
+    });
+  });
+
+  describe('pythonInt — CPython `int(str)`', () => {
+    it('parses a plain decimal', () => {
+      expect(pythonInt('12')).toBe(12);
+    });
+
+    it('allows surrounding whitespace and a sign, as int() does', () => {
+      expect(pythonInt('  7  ')).toBe(7);
+      expect(pythonInt('+7')).toBe(7);
+      expect(pythonInt('-7')).toBe(-7);
+    });
+
+    it('raises ValueError for an empty string — `?page=` is a 500, not a 400', () => {
+      expect(() => pythonInt('')).toThrow("ValueError: invalid literal for int() with base 10: ''");
+    });
+
+    it('raises ValueError for a non-integer, quoting the RAW value in the message', () => {
+      expect(() => pythonInt('abc')).toThrow(
+        "ValueError: invalid literal for int() with base 10: 'abc'",
+      );
+      // Not the trimmed one: CPython echoes what it was given.
+      expect(() => pythonInt(' 1.5 ')).toThrow(
+        "ValueError: invalid literal for int() with base 10: ' 1.5 '",
+      );
+    });
+
+    it('refuses a float, a hex literal and an underscored literal', () => {
+      for (const raw of ['1.0', '0x10', '1e3']) {
+        expect(() => pythonInt(raw)).toThrow('ValueError');
+      }
     });
   });
 });

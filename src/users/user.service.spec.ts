@@ -1,6 +1,7 @@
 import { HttpStatus } from '@nestjs/common';
 import { Role } from '../auth/permissions/roles';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user';
+import type { PlainDate } from '../common/utils/date.util';
 import { ApiException } from '../common/http/api.exception';
 import { DrfException } from '../common/http/drf.exception';
 import type { AppConfigService } from '../config/app-config.service';
@@ -11,7 +12,6 @@ import { DjangoPasswordService } from '../auth/password/django-password.service'
 import type { PrismaService } from '../prisma/prisma.service';
 import {
   birthdayInYear,
-  djangoFileLines,
   normalizeEmail,
   normalizeUsername,
   resolveDetailUserId,
@@ -78,24 +78,6 @@ describe('UserService (unit)', () => {
     it('applies the Gregorian century rule', () => {
       expect(birthdayInYear({ year: 2000, month: 2, day: 29 }, 2100).day).toBe(28);
       expect(birthdayInYear({ year: 2000, month: 2, day: 29 }, 2000).day).toBe(29);
-    });
-  });
-
-  describe('djangoFileLines — `File.__iter__`', () => {
-    it('splits on \\r\\n, \\r and \\n', () => {
-      expect(djangoFileLines(Buffer.from('a\r\nb\nc\rd'))).toEqual(['a', 'b', 'c', 'd']);
-    });
-
-    it('does not produce a trailing empty line for a terminated file', () => {
-      expect(djangoFileLines(Buffer.from('a\r\nb\r\n'))).toEqual(['a', 'b']);
-    });
-
-    it('DOES produce an empty line for a genuine blank one — which v1 then 500s on', () => {
-      expect(djangoFileLines(Buffer.from('a\n\nb\n'))).toEqual(['a', '', 'b']);
-    });
-
-    it('is empty for an empty file', () => {
-      expect(djangoFileLines(Buffer.from(''))).toEqual([]);
     });
   });
 
@@ -288,6 +270,110 @@ describe('UserService (unit)', () => {
         { id: 14, username: 'b.child' },
       ]);
       await expect(service.getUserByEmail('shared@mail.com')).resolves.toBeNull();
+    });
+  });
+
+  describe('createBirthdateNotification — the year is Bogota’s, not the host’s (C28)', () => {
+    /**
+     * v1: `today_year = datetime.now().year` (`services/user.py:268`), and Django pins the
+     * **process** zone to `TIME_ZONE = 'America/Bogota'` in `Settings.__init__`
+     * (`api/settings/base.py:121`), so `datetime.now()` is Bogota-local wall clock.
+     *
+     * The discriminating instant is any UTC time between 00:00 and 05:00 on 1 January: it is
+     * still 31 December in Bogota (UTC−5). A host-zone read answers 2026 where v1 answers
+     * 2025, and the birthday `SchedulerTask` is written a **full year** out — `repeat = 4`
+     * then clones that error forward, so the member's notification is skipped, not merely
+     * late. This test fails against `new Date().getFullYear()` **because `jest.config.ts`
+     * pins the harness host zone to UTC** — a developer laptop already at −05:00 would
+     * otherwise make the buggy line pass by coincidence. Do not unpin it.
+     * (`process.env.TZ = ...` from inside a test is a no-op: jest's vm context does not
+     * propagate the change to V8's cached zone. Measured.)
+     */
+    const member: AuthenticatedUser = {
+      id: 5,
+      username: 'm@mail.com',
+      email: 'm@mail.com',
+      isActive: true,
+      profile: { role: Role.MEMBER, identification: 1n },
+    };
+
+    const scheduleFor = async (
+      nowIso: string,
+    ): Promise<{ year: number; month: number; day: number }> => {
+      jest.useFakeTimers().setSystemTime(new Date(nowIso));
+      try {
+        const notifications = {
+          removeSchNotifications: jest.fn().mockResolvedValue(0),
+          scheduleNotification: jest.fn().mockResolvedValue(undefined),
+        };
+        const prisma: {
+          $transaction: jest.Mock;
+          userProfile: { findUnique: jest.Mock; update: jest.Mock; findMany: jest.Mock };
+          authUser: { update: jest.Mock };
+        } = {
+          $transaction: jest.fn((callback: (tx: unknown) => Promise<void>) => callback(prisma)),
+          userProfile: {
+            findUnique: jest.fn().mockResolvedValue({
+              user_ptr_id: 5,
+              identification: 1n,
+              role: Role.MEMBER,
+              birthdate: new Date(Date.UTC(1995, 10, 7)),
+              auth_user: { first_name: 'Foo', last_name: 'Bar', email: 'm@mail.com' },
+            }),
+            update: jest.fn().mockResolvedValue(undefined),
+            findMany: jest.fn().mockResolvedValue([{ user_ptr_id: 5 }, { user_ptr_id: 9 }]),
+          },
+          authUser: { update: jest.fn().mockResolvedValue(undefined) },
+        };
+        const service = new UserService(
+          prisma as unknown as PrismaService,
+          {} as MailService,
+          notifications as unknown as NotificationService,
+          new DjangoPasswordService(),
+          {} as AppConfigService,
+        );
+
+        await service.updateUser(member, 5, {
+          type: 'personal',
+          personal: {
+            first_name: 'Foo',
+            last_name: 'Bar',
+            email: 'm@mail.com',
+            identification: 1,
+            role: Role.MEMBER,
+            birthdate: '1995-11-07',
+          },
+        });
+
+        expect(notifications.scheduleNotification).toHaveBeenCalledTimes(1);
+        return (notifications.scheduleNotification.mock.calls[0] as [PlainDate])[0];
+      } finally {
+        jest.useRealTimers();
+      }
+    };
+
+    it('schedules in 2025 at 2026-01-01T02:00Z — still 31 December in Bogota', async () => {
+      await expect(scheduleFor('2026-01-01T02:00:00.000Z')).resolves.toEqual({
+        year: 2025,
+        month: 11,
+        day: 7,
+      });
+    });
+
+    it('schedules in 2026 at 2026-01-01T05:00Z — midnight in Bogota, the year has turned', async () => {
+      await expect(scheduleFor('2026-01-01T05:00:00.000Z')).resolves.toEqual({
+        year: 2026,
+        month: 11,
+        day: 7,
+      });
+    });
+
+    it('is unaffected by the host zone in the middle of the day', async () => {
+      await expect(scheduleFor('2026-06-15T18:00:00.000Z')).resolves.toEqual({
+        year: 2026,
+        month: 11,
+        day: 7,
+      });
     });
   });
 

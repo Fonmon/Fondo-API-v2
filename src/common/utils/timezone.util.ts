@@ -125,7 +125,28 @@ export function toBogotaDate(instant: Date, timeZone: string = BOGOTA_TIME_ZONE)
   return { year, month, day };
 }
 
-/** "Today" in `America/Bogota`. */
+/**
+ * "Today" in `America/Bogota` — **the only correct way to ask v2 what day it is.**
+ *
+ * ⚠️ `new Date().getFullYear()` / `.getMonth()` / `.getDate()` read the **host** zone and are
+ * a bug, not a shortcut (review condition **C28**). v1 gets Bogota for free — Django's
+ * `Settings.__init__` sets `os.environ['TZ']` from `TIME_ZONE = 'America/Bogota'`
+ * (`api/settings/base.py:121`), so every naive `datetime.now()` / `date.today()` in v1 is
+ * Bogota-local — and v2 has no such global. Between 00:00 and 05:00 UTC the two answers are
+ * *different days*, and on 1 January different **years**: the birthday `SchedulerTask` written
+ * by `UserService` was a full year out, cloned forward by `repeat = 4`, and no CI run would
+ * ever have shown it.
+ *
+ * Reach for this (or {@link todayForAutoNowDateColumn} when the value is going into a
+ * `@db.Date` column) for `from_date`, `payday_limit`, the T−5d / T−1d loan reminder dates,
+ * `datetime.now().year`, and anything else where the answer is a **calendar date**. Use
+ * {@link nowInstant} only where the value is a genuine instant going into a `timestamptz`.
+ *
+ * The test harness pins its host zone to UTC (`jest.config.ts`, `test/global-setup.ts`) so a
+ * host-zone read fails there rather than passing by coincidence on a −05:00 laptop.
+ *
+ * @param now injectable clock; tests pass a fixed instant.
+ */
 export function todayInBogota(now: Date = new Date(), timeZone = BOGOTA_TIME_ZONE): PlainDate {
   return toBogotaDate(now, timeZone);
 }

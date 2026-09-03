@@ -817,6 +817,13 @@ Verified in every phase's parity report, not just the phase that introduces them
     with `^api/activity/(?P<id>[0-9]+)/?$` the lone exception), so it is transcribed, not
     summarised.
 
+    📋 **The full "adding a route" checklist is `docs/adding-a-route.md`** (review condition
+    **C36**) — the URL-conf entry and its trailing `/?`, `@V1View`, the permission-matrix row
+    and its default-deny, the `@All()` fallback and its `Allow` string, `@DrfNoRequestData()`,
+    `readUploadedFile` plus rule 12c's no-merge and rule 12b's "do not narrow the parsers",
+    and `DrfViewHeaders.renderers`. Each item carries a one-line why and a pointer to a
+    working example. **Phases 4–8 start there.**
+
 11. ⚠️ **All 21 FKs are `DEFERRABLE INITIALLY DEFERRED`** and Prisma cannot express it; the
     baseline SQL is hand-patched. Keep the patch on any future baseline regeneration — without it
     CI databases enforce FKs at statement time while production enforces at commit, so multi-table

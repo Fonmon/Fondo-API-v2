@@ -15,7 +15,7 @@ import { MailService } from '../mail/mail.service';
 import { NotificationService } from '../notifications/notification.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { serializePower, type PowerDto } from './dto/user.serializers';
-import { asPythonDict, pyGet, toDjangoSmallInt, PythonTypeError } from './python-obj';
+import { asPythonDict, pyGet, toDjangoSmallInt, PythonTypeError } from '../common/utils/python-obj';
 import { UserService } from './user.service';
 
 /** `Power.POWER_STATE`. */

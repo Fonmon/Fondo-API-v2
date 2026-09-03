@@ -1,7 +1,12 @@
 /**
- * The half-dozen CPython behaviours `fondo_api/services/user.py` relies on when it reads a
- * parsed request body, reproduced so that a malformed body fails in v2 exactly where and how
- * it fails in v1.
+ * The CPython behaviours v1's services rely on when they read a parsed request body,
+ * reproduced so that a malformed body fails in v2 exactly where and how it fails in v1.
+ *
+ * ⚠️ **Shared, not users-only** (review C36). It lived in `src/users/` through Phase 3;
+ * `LoanView`, `ActivityView` and `FileView` subscript `request.data` the same unguarded way,
+ * and a second copy of these coercions is a second, silently diverging error contract. Import
+ * from here — never re-implement, and never import a Python-semantics helper out of a feature
+ * module.
  *
  * v1 subscripts `request.data` directly — `obj['type']`, `obj['personal']`,
  * `obj['first_name']` — with no validation layer anywhere. Which exception that raises, and
@@ -193,4 +198,29 @@ function describeType(value: unknown): string {
     return 'list';
   }
   return typeof value;
+}
+
+/**
+ * CPython's `int(str)`: leading/trailing whitespace is allowed, an optional sign is allowed,
+ * everything else raises `ValueError`.
+ *
+ * v1's callers do **not** catch it, so it is a 500 rather than a 400. Call sites:
+ *
+ * | v1 | shape |
+ * |---|---|
+ * | `UserView.get` (`views/user.py:27-28`) | guarded by `if …get('page') is not None`, so it runs only when the key is **present** |
+ * | `LoanView.get` (`views/loan.py:24-25`, Phase 4) | `get('state', 4)` / `get('page', '1')` — **no guard**, so it runs on every request |
+ * | `LoanDetailView.patch` (`views/loan.py:63`, Phase 4) | `int(request.data['state'])`, on the body |
+ *
+ * ⚠️ `?page=` (empty) and `?page=abc` are therefore 500s, not 400s, on both views.
+ *
+ * Deliberately a plain `Error`, not a {@link PythonTypeError}: both render as a bare 500 and
+ * the message is the one CPython prints.
+ */
+export function pythonInt(raw: string): number {
+  const trimmed = raw.trim();
+  if (!/^[+-]?\d+$/.test(trimmed)) {
+    throw new Error(`ValueError: invalid literal for int() with base 10: '${raw}'`);
+  }
+  return Number(trimmed);
 }

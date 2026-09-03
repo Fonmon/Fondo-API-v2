@@ -1,8 +1,10 @@
+import { PythonKeyError } from '../utils/python-obj';
 import {
   DjangoSuspiciousOperation,
   MultiPartParserError,
   getUploadedFiles,
   parseDjangoMultipart,
+  readUploadedFile,
   sanitizeFileName,
   setUploadedFiles,
   validBoundary,
@@ -279,6 +281,57 @@ describe('django.http.multipartparser.MultiPartParser', () => {
       ];
       setUploadedFiles(request, files);
       expect(getUploadedFiles(request)).toEqual(files);
+    });
+  });
+
+  /**
+   * `readUploadedFile` was exported from `src/users/user.controller.ts` through Phase 3 and
+   * moved here by review condition **C36** — Phase 4's `LoanView.patch` and Phase 8's
+   * `FileView.post` need it, and importing it out of the users module is how a second copy
+   * (and with it DRF's `FILES`-into-`data` merge, deviation D23) gets written instead.
+   */
+  describe("readUploadedFile — `request.data['file']`, i.e. `request.FILES`", () => {
+    const withFiles = (fieldnames: readonly string[]): object => {
+      const request = {};
+      setUploadedFiles(
+        request,
+        fieldnames.map((fieldname) => ({
+          fieldname,
+          originalname: `${fieldname}.tsv`,
+          mimetype: 'text/plain',
+          buffer: Buffer.from(`contents of ${fieldname}`),
+        })),
+      );
+      return request;
+    };
+
+    it('returns the buffer of the part with that field name', () => {
+      expect(readUploadedFile(withFiles(['file']), 'file').toString()).toBe('contents of file');
+    });
+
+    it('ignores parts with a different field name', () => {
+      expect(readUploadedFile(withFiles(['other', 'file']), 'file').toString()).toBe(
+        'contents of file',
+      );
+    });
+
+    it('takes the FIRST part when a field name repeats', () => {
+      const request = {};
+      setUploadedFiles(request, [
+        { fieldname: 'file', originalname: 'a', mimetype: '', buffer: Buffer.from('first') },
+        { fieldname: 'file', originalname: 'b', mimetype: '', buffer: Buffer.from('second') },
+      ]);
+      expect(readUploadedFile(request, 'file').toString()).toBe('first');
+    });
+
+    it('raises KeyError — a 500, not a 400 — when the part is missing', () => {
+      expect(() => readUploadedFile(withFiles(['other']), 'file')).toThrow(PythonKeyError);
+      expect(() => readUploadedFile(withFiles(['other']), 'file')).toThrow("KeyError: 'file'");
+    });
+
+    it('raises KeyError on a request that carried no multipart body at all', () => {
+      // The measured v1 status for `PATCH /api/user` with a JSON body: 500, not 415.
+      expect(() => readUploadedFile({}, 'file')).toThrow("KeyError: 'file'");
     });
   });
 });
