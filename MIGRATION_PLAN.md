@@ -453,7 +453,10 @@ emit on write paths.
 **Scope** (from `services/loan.py`)
 - **Rate table:** `≤6 → 0.015`, `7–12 → 0.020`, `13–24 → 0.022`, `25–36 → 0.025` monthly.
   `timelimit > 36` **clamped to 36** silently, before the rate lookup. Commit `a45c343`
-  changed this recently — port the *current* table.
+  changed this recently — port the *current* table. ⚠️ **The clamp is v1's behaviour and is
+  SUPERSEDED by D4** — operator **Q9** decided `timelimit` outside `1–36` is a **400**, so v2
+  rejects `37` where v1 returns `201` with `timelimit == 36` (v1's `test_post_loan_5` asserts
+  the clamp; that test is a *moved expectation*, not a spec).
 - **Quota check** on create: reject if `value > available_quota`, **unless** `refinance=True`.
 - On create: always web-push to roles `[0, 2]`, target `/loan/<id>`.
 - **Approval (`state → 1`)**, atomic: build the HTML amortization table, create `LoanDetail`,
@@ -833,6 +836,15 @@ Verified in every phase's parity report, not just the phase that introduces them
 ---
 
 ## 5. Deliberate deviations from v1 (the port-or-fix register)
+
+> ⚠️ **§3 describes v1. §5 decides what v2 does. Where they disagree, §5 wins — by construction,
+> because a registered deviation *is* a decision to diverge from the behaviour §3 documents.**
+> A v1 unit test asserting the §3 behaviour is therefore not evidence for keeping it: under a
+> deviation it becomes a **moved expectation**. This bit us on **D4** in Phase 4 — §3's "silently
+> clamped to 36", v1's `test_post_loan_5`, and a paraphrase in my own dispatch brief all agreed
+> with each other *against* operator **Q9**'s decided `400`. Two descriptions of v1 and a v1 test
+> will always agree; that agreement carries no information about what v2 should do. **Check §5 and
+> §9 before implementing anything §3 describes.**
 
 **Why this section exists.** The parity contract in §4 says v1's behavior is the spec. Taken
 literally that is wrong: the business-analyst review found authorization holes in v1 that a
