@@ -1,5 +1,7 @@
 # Phase 3 parity report — users, finance, powers of attorney, password reset
 
+> **CURRENT STATUS: PASS** — set by **[Round 4 (2026-09-03)](#round-4--2026-09-03--confirmation-pass)**, the latest round. The `FAIL` verdicts below are the **historical** records of rounds 1–3; every finding they raised is closed or registered (D21–D24). Read the Round 4 section for the live verdict.
+
 **Tester:** `manual-tester` (black-box).
 **Date:** 2026-09-02.
 **v1 (oracle, frozen):** `~/Projects/Fondo-API` @ `5bef585`, Django 2.2.27 / DRF 3.11.2 /
@@ -2122,3 +2124,213 @@ one registration now is worth four later. F11 → `business-analyst` (scope ques
 DRF's `FILES`-into-`data` merge?), then `nestjs-developer`. The four new §7 false-green instances
 (#9–#12) and the two harness defects still live in `p3/restore-all.sh` and `p3/r2-f3.sh` →
 `nestjs-reviewer` for the plan. This report → `nestjs-reviewer`.
+
+---
+
+# Round 4 — 2026-09-03 — confirmation pass
+
+**Verdict: PASS.**
+
+**Tester:** `manual-tester` (black-box).
+**v1 (oracle, frozen):** `~/Projects/Fondo-API` @ `5bef585`, container `fondo-v1-p3`, `127.0.0.1:8451`.
+**v2 (under test):** `~/Projects/Fondo-API-v2` @ `b3fc01d` (`feat/phase-3-users`), working tree
+clean, **started from `p3/start-v2.sh`** (SQS/SES → the local capture stub on `:4598`,
+`HOST_URL_APP=http://localhost:3000`), `127.0.0.1:8450`.
+**Database:** shared `fondodev`, migration `0019_auto_20220313_1225`.
+**Pre-write dump:** `~/.fondo-parity-dumps/r4/r4-pre-{FULL,DATA}-20260903120625.sql`.
+
+Scope was the four cells `business-analyst` specified, the two live harness defects, a
+spot-check that D21–D24 describe reality, and a regression sample to prove v2 has not moved.
+**≈650 live cells.** Nothing in v2 changed since round 3 and the measurements confirm it: the
+D1 matrix reproduces round 3's status distributions digit for digit.
+
+## R4.1 — the two harness defects (§7 false-green instance #11) — **fixed in the probe**
+
+Both were real, and fixing them found more of the same class.
+
+| Defect | Evidence it was live | Fix |
+|---|---|---|
+| `p3/r2-f3.sh` lacked `--path-as-is` | curl rewrote the request target **before** it left the client: `/api/../password_reset/` and `/./password_reset/` were both sent as `GET /password_reset/`, and `/password_reset/%2e/` was decoded *and* collapsed to `/password_reset/`. 3 of the 4 dot-segment cells were comparing a route both stacks trivially serve | `--path-as-is` added to the shared `c()` curl; verified on the wire with `--trace-ascii` |
+| `p3/restore-all.sh` was mode 644 | direct invocation returned 126 `Permission denied`; callers that redirect (`restore-all.sh > /dev/null 2>&1` — my own `d19.sh` does) swallow it and carry on against an **unrestored** database | `chmod 755`; re-verified by invoking it directly, then diffing the snapshot |
+
+Two further instances of the same class, found while fixing those:
+
+- **9 of 17 probe scripts were mode 644**, not the 2 named — `cmp.sh`, `createuser.sh`,
+  `p2edges.sh`, `payloads.sh`, `r2-500.sh`, `r2-csrf.sh`, `sideeffects.sh`, `tsv.sh`, `d1.py`.
+  All set to 755. `cmp.sh` failed *loudly* (126) the first time this round called it, which is
+  the safe direction; `restore-all.sh` is the dangerous one because its callers mute stderr.
+- **`p3/d1.py`'s positive control was unsatisfiable.** It asserted v1 returns a **403** — but v1
+  has no authorisation branch at all on `PATCH /api/user/<id>`; that absence *is* D1. The control
+  therefore printed `POSITIVE CONTROLS: FAILED` on every correct run, which trains the next round
+  to ignore it. A control that always fails silences exactly like a control that always passes.
+  Split per side: v1 must produce 200/409/500, v2 must produce 200/403/500, no 401 anywhere,
+  both sides must write rows. Now `ok` on a correct run.
+
+**Re-run of what the `--path-as-is` defect invalidated — F3, 409 cells.**
+
+| Section | Cells | Result |
+|---|---|---|
+| A — the four plain-Django views × 7 methods × 8 `Authorization` shapes | 280 | **0 differences** |
+| B — DRF routes must still authenticate (the exemption must not leak) | 84 | **0 differences** |
+| C — look-alike targets, now genuinely on the wire | 36 | status **identical on all 36**; 26 differ in the 404 *body* only — **D13** |
+| D — `/health`, the `view: null` v2-only route | 9 | the registered **P0-D2** route |
+
+The four dot-segment cells now reach both stacks unmodified and **both refuse**:
+`/api/../password_reset/`, `/./password_reset/`, `/password_reset/%2E/` and `//password_reset/`
+are **404 on v1 and 404 on v2**. The `@DjangoView()` exemption does not leak through a dot
+segment. The only delta is D13's HTML-vs-JSON 404 body, which the plain control `/nonexistent-xyz/`
+shows identically — it is not dot-segment-specific. **F3 fail-closed: confirmed, on real traffic.**
+
+## R4.2 — the four cells `business-analyst` specified
+
+### D20 — editing a soft-deleted member (the branch round 3 did *not* test)
+
+`PATCH /api/user/<id>` as ADMIN, `type: personal`, birthdate present, on the two genuinely
+inactive members. Both have `username == email`, so **D15 cannot confound the result**.
+
+| Case | v1 | v2 | DB delta | Verdict |
+|---|---|---|---|---|
+| id **3** (Fernando Herrera, `is_active=f`) | **500**, `<h1>Server Error (500)</h1>` | **200** | v1: **nothing** — `first_name` still `Fernando`, `schedulertask` 626. v2: `first_name` → `FernandoR4`, `is_active` untouched (`f`), birthdate task replaced (net 0) | **PASS — D20 as registered** |
+| id **15** (Angi Paola Sanchez Quilindo, `is_active=f`) | **500**, rolled back | **200** | v1: nothing. v2: `first_name` → `AngiR4`, `schedulertask` 626 → **623** | **PASS — D20 as registered** |
+
+v1's `user_ids.remove(user.id)` raises `ValueError` against the `is_active=True` list, inside
+`transaction.atomic()`, and only `DoesNotExist`/`IntegrityError` are caught — so the whole edit
+rolls back, exactly as D20 says. v2's guarded removal produces the semantically correct row:
+
+```
+2529|0|2026-03-02 05:00:00+00|4|f|"type"=>"birthdate", ..., "owner_id"=>"3",
+     "user_ids"=>"[10, 6, 7, 12, 5, 14, 9, 1, 13, 11, 8, 2, 4]"
+```
+
+13 ids — the 15 members less the 2 inactive — and the subject correctly absent.
+
+The **−3** on id 15 is faithful, not over-deletion: `remove_sch_notitfications` filters on
+`payload__owner_id` + `payload__type` only, with **no `processed` predicate**, and owner 15 had
+4 birthdate tasks (3 historical `processed=t`, 1 pending). v1 deletes all 4 and inserts 1 too.
+
+**Positive control for that claim** — the same PATCH on an *active* member (id 4), where v1 can
+reach the code: v1 and v2 produced **the same row id (2529), the same `run_date`, `repeat`,
+message and the same total (620)**. The write path is byte-identical; D20 is only about the guard.
+
+### D19 — leap-day birthdate (latent: 0 of 15 members have one)
+
+`PATCH /api/user/4` with `birthdate: 2000-02-29`. `__create_birthdate_notification` parses the
+*submitted* string, so no fixture pre-seeding is needed.
+
+| | v1 | v2 |
+|---|---|---|
+| Status | **500** | **200** |
+| `userprofile.birthdate` | unchanged `1997-09-09` — **rolled back** | `2000-02-29` |
+| birthdate tasks for owner 4 | all **7** originals intact, `schedulertask` 626 | one row, **`run_date = 2026-02-28`** |
+
+`date(2000,2,29).replace(year=2026)` raises `ValueError` in v1 and nothing catches it.
+**v2 clamps to 28 Feb**, as decided — consistent with `relativedelta(years=+1)`, so Phase 7's
+yearly clone lands on the same day. **PASS.**
+
+## R4.3 — do D21–D24 describe reality?
+
+| Row | Claim | Measured | Verdict |
+|---|---|---|---|
+| **D21** | gunicorn emits the full entity body on `HEAD`; status and `Content-Length` byte-identical to v1 on every route | Raw socket, 11 routes: v1 returns the body on **all 11**, v2 returns **0 bytes**, status + `Content-Length` identical on **10/11** | **Accurate** — see note |
+| **D22** | non-ASCII boundary → v1 uncaught 500, *"gunicorn's 141-byte HTML page, no `Allow`, no `Vary`"*, across 4 endpoints incl. `PATCH /api/user` | True for `/api-token-auth`, `POST /api/user/activate/<id>`, `POST /api/user/power`. **Not true for `PATCH /api/user`**: Django's **27-byte** page **with `Vary: Origin`** | **Substance holds; parenthetical over-generalises** |
+| **D23** | `POST /api/user` with `first_name` as a part named `a.txt` → **201** in v1, member named `a.txt`, activation email; **500** and no row in v2 | **Exactly reproduced.** v1 201, `auth_user` 15→16, `first_name` = `a.txt` (the *filename* — the part content was `CONTENT-NOT-FILENAME` and was discarded), SES captured: `Hola a.txt D23Probe` to `d23probe@example.test`. v2 **500**, **no row**, **no SES call** | **Accurate** |
+| **D24** | `MultiPartParserError` on the one bare-`except` view double-faults to the 141-byte page with no `Allow`/`Vary`; v2 gives the DRF caught-500 shape | Missing / empty / `""` boundary on `POST /api/user/power`: v1 **500 / 141 / no Allow / no Vary**, v2 **500 / `Allow: POST, OPTIONS` / `Vary: Accept, Origin``**. Status identical | **Accurate, and correctly scoped** |
+
+Two notes for the plan, neither a new finding, both zero-write:
+
+1. **D21's `Content-Length` clause has one exception**: the 404 handler, where v1 sends 77 bytes
+   of HTML and v2 sends 23 of JSON. That is **D13**, already registered — but D21 says "byte-identical
+   **on every route**", and on that one route it is not.
+2. **D22's parenthetical belongs to the POST endpoints only.** The 141-byte page is a *double
+   fault*: Django's `log_response` → `get_post_parameters` re-reads `request.POST` and re-triggers
+   the parser failure outside exception handling. Django only populates `POST` for `POST`, so
+   `PATCH /api/user` never re-enters and returns a clean 27-byte Django 500. Under the
+   **D24** trigger the same split appears and **confirms D24's scoping is right**: with a plain
+   `MultiPartParserError`, `/api-token-auth` is **400 on both**, `/api/user/activate/13` is
+   **404 on both**, and only `/api/user/power` — the bare-`except` view — double-faults.
+
+`business-analyst` may want to tighten those two sentences. Both stacks refuse in every cell and
+the snapshot after the whole D22/D24 block was **byte-identical** — zero rows written on either side.
+
+## R4.4 — regression sweep (v2 unchanged since round 3)
+
+| Probe | Cells | Result |
+|---|---|---|
+| **D1 authorisation matrix**, restore-per-cell | 72 ×2 runs | `disagreements=49`, and **v1 `{200:41, 409:7, 500:24}` / v2 `{200:22, 403:33, 409:1, 500:16}` — digit-for-digit identical to round 3.** All 49 are D1 by construction (v1 has no authorisation on this route; v2 denies). Two independent runs cell-for-cell identical. Positive controls **ok** |
+| **Phase 1–3 read-only surface** | 18 | **17 identical.** The one difference is `?page=abc` → **500 on both**, v1 Django's 27-byte page vs v2 zero-byte — registered **P3-D6** |
+| **Pagination edges** | in the above | page out of range returns the envelope, not a 404: `{"list":[],"num_pages":2,"count":13}` identical on both; `page=0` and `page=-3` both **400** identical |
+| **Powers of attorney**, ADMIN + MEMBER × `requested`/`requestee` × pages 1/2/99 | 12 | **12 identical**, with real 200 bodies (non-empty lists, `num_pages`/`count`) — a genuine positive control, not a uniform failure |
+| **SES envelope + body** (password reset, live on both stacks) | 1 pair | **Every SES field identical**, including `Message.Body.Html.Data` at **445 bytes on both**, the `ñ` subject, `Source`, and the `https://localhost/reset/…` link domain. Only the reset token differs (volatile) |
+
+⚠️ **One near-miss worth recording.** My first powers probe omitted `obj` and got **500 on both
+stacks — "identical".** That is precisely the uniform-failure shape this round exists to catch. I
+noticed the status was wrong for a read endpoint, read `handle_power_request`, and re-ran with the
+real payload for 12 genuine 200s. *A matching status is not evidence until you know which branch
+produced it.*
+
+## R4.5 — system health
+
+- **Both servers boot and serve at close**: v1 `401`/`200`, v2 `401`/`200` on the same probes.
+  v2 up continuously since its `start-v2.sh` restart; no process-level crash. Its 123 logged
+  `ERROR` lines are the deliberate 500-branch cells (missing `type`/`finance`/`contributions`/`obj`),
+  handled by `ApiExceptionFilter` — the same cells where v1 also 500s.
+- **Schema untouched.** `guard_schema`, `guard_constraints`, `guard_indexes` are **identical across
+  r2 base → r3 base → r3 close → r4 base → r4 close**. `django_migrations` still **38**, head
+  `0019_auto_20220313_1225`.
+- **`_prisma_migrations` exists but is inert** — a single `0_init` row, `applied_steps_count = 0`,
+  `started_at == finished_at`, dated **2026-08-30** (Phase 0), and present in the r2, r3 and r4
+  dumps alike. v2 ran no DDL. Flagged for `nestjs-reviewer` only because Phase 9 adds the `UNIQUE`
+  constraints and will have to decide how that table is handled.
+- **Scheduler and worker behave.** The celery worker has been up 5h44m; last task
+  `send_notification … succeeded`. Both capture stubs alive on `:4598`/`:4599`.
+- **No stray writes.** Every block was snapshotted before and after; the read-only sweep, the
+  powers sweep, the D22/D24 block and the SES cell each closed **byte-identical**. Notably v1's
+  password-reset hop wrote **no** `django_session` row either, so P3-D3 has no observable delta here.
+
+## R4.6 — fixture at close
+
+`schedulertask` **626**, `notificationsubscriptions` **94 / 1468 / xmin-1**, `auth_user` **15**,
+`power` **20**, `loan` **425** — the round-open baseline, exactly. The close snapshot is identical
+to both `snap-r4base` and `snap-r3close`.
+
+Against the pre-write `pg_dump`: **every row, every schema object and every other sequence is
+identical.** One intentional change, disclosed:
+
+> **`fondo_api_userfinance_id_seq` and `fondo_api_userpreference_id_seq` normalised 45/46 → 17/17.**
+
+These two sequences had been **drifting every round** (27 → 36 → 45) because a rolled-back or
+restored user-create still burns them, and `restore-all.sh` reset `auth_user_id_seq` and
+`fondo_api_power_id_seq` but **not** these two. `snap.sh` did not guard them either, which is why
+three rounds reported "byte-identical" while this crept. Not parity-visible — no endpoint reads a
+sequence, and ids 18+ are free either way — but it made the byte-identical claim untrue.
+**Both fixed in the probe**: `restore-all.sh` now resets them to `max(id)`, and `snap.sh` now
+guards `seq_power`, `seq_userfinance` and `seq_userpreference` as well.
+
+## Endpoint verdicts
+
+| Endpoint | Verdict |
+|---|---|
+| `GET /api/user` (list, pagination, validation) | **PASS** |
+| `GET /api/user/<id>` (incl. `-1`) | **PASS** |
+| `PATCH /api/user/<id>` | **PASS** — D1, D15, D16 as registered; **D19 and D20 confirmed fixed** |
+| `POST /api/user` | **PASS** with **D23** |
+| `PATCH /api/user` (bulk TSV) | **PASS** with **D22** |
+| `POST /api/user/power` | **PASS** with **D24** |
+| `POST /api/user/birthdates` | **PASS** |
+| `/password_reset/`, `/password_reset/done/`, `/reset/…` | **PASS** — F3 fail-closed re-confirmed on real dot-segment traffic |
+| `/api-token-auth` | **PASS** |
+| `HEAD`, all routes | **PASS** with **D21** |
+
+## Phase verdict: **PASS**
+
+Every prior finding stays closed, the four BA-specified cells behave exactly as registered, and
+the D1 matrix reproduces round 3 digit for digit — v2 has not moved. The registered differences
+**D21–D24** are the only unfixed behavioural deltas and all four were measured this round to do
+what their rows say. No new finding is filed: nothing found here changes data or access.
+
+**For `nestjs-reviewer`:** (1) the two D-row wording corrections in R4.3 — D21's "every route"
+and D22's 141-byte/no-`Vary` parenthetical — a registration that misdescribes behaviour silences
+a future signal; (2) `_prisma_migrations` in the shared database, ahead of Phase 9's `UNIQUE`
+constraints; (3) §7 false-green instance **#11** is closed, and the harness now carries four
+fixes — `--path-as-is`, the executable bits on 9 scripts, `d1.py`'s per-side positive control, and
+the two unreset sequences.
