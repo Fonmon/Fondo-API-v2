@@ -13,6 +13,7 @@ import {
 import type { Request } from 'express';
 import { V1View } from '../auth/decorators/v1-view.decorator';
 import { ApiException } from '../common/http/api.exception';
+import { getUploadedFiles } from '../common/http/django-multipart';
 import { DrfNoRequestData } from '../common/http/drf-parser.interceptor';
 import { DrfException } from '../common/http/drf.exception';
 import type { PageEnvelope, UnpaginatedEnvelope } from '../common/http/pagination';
@@ -160,14 +161,12 @@ export function pythonInt(raw: string): number {
 }
 
 /**
- * `request.data['<field>']` for the multipart uploads, which multer parks on `request.files`.
+ * `request.data['<field>']` for the multipart uploads, i.e. Django's `request.FILES`.
  *
  * A missing part is v1's `KeyError` — a 500 — not a 400.
  */
 export function readUploadedFile(request: Request, field: string): Buffer {
-  const files = request.files;
-  const list = Array.isArray(files) ? files : [];
-  const match = list.find((file) => file.fieldname === field);
+  const match = getUploadedFiles(request).find((file) => file.fieldname === field);
   if (match === undefined) {
     throw new PythonKeyError(field);
   }

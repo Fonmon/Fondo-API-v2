@@ -75,6 +75,7 @@ describe('DrfParserInterceptor', () => {
       contentType: 'text/plain',
       hasBody: false,
       parseErrorDetail: null,
+      suspiciousOperation: null,
     };
     await expect(firstValueOf(interceptor.intercept(contextFor(state), handler))).resolves.toBe(
       'handled',
@@ -86,6 +87,7 @@ describe('DrfParserInterceptor', () => {
       contentType: 'application/json; charset=utf-8',
       hasBody: true,
       parseErrorDetail: null,
+      suspiciousOperation: null,
     };
     await expect(firstValueOf(interceptor.intercept(contextFor(state), handler))).resolves.toBe(
       'handled',
@@ -98,6 +100,7 @@ describe('DrfParserInterceptor', () => {
         contentType: 'text/plain; charset=utf-8',
         hasBody: true,
         parseErrorDetail: null,
+        suspiciousOperation: null,
       }),
     );
 
@@ -113,6 +116,7 @@ describe('DrfParserInterceptor', () => {
         contentType: 'application/json',
         hasBody: true,
         parseErrorDetail: 'JSON parse error - Expecting value: line 1 column 1 (char 0)',
+        suspiciousOperation: null,
       }),
     );
 
@@ -128,6 +132,7 @@ describe('DrfParserInterceptor', () => {
         contentType: 'text/plain',
         hasBody: true,
         parseErrorDetail: 'JSON parse error - Expecting value: line 1 column 1 (char 0)',
+        suspiciousOperation: null,
       }),
     );
 
@@ -137,9 +142,15 @@ describe('DrfParserInterceptor', () => {
   it('honours @DrfParsers — a JSON body on a multipart-only handler is a 415', () => {
     // `@parser_classes((MultiPartParser,))` on `views/user.py:36` and `views/loan.py:49`.
     const error = expectDrf(
-      contextFor({ contentType: 'application/json', hasBody: true, parseErrorDetail: null }, [
-        DRF_PARSER_MEDIA_TYPES.MULTIPART,
-      ]),
+      contextFor(
+        {
+          contentType: 'application/json',
+          hasBody: true,
+          parseErrorDetail: null,
+          suspiciousOperation: null,
+        },
+        [DRF_PARSER_MEDIA_TYPES.MULTIPART],
+      ),
     );
 
     expect(error.getStatus()).toBe(HttpStatus.UNSUPPORTED_MEDIA_TYPE);
@@ -153,7 +164,12 @@ describe('DrfParserInterceptor', () => {
       // `PUT /api-token-auth` with `text/plain`: v1 raises MethodNotAllowed from
       // `dispatch` without ever touching `request.data`, so the 405 must win.
       const context = contextFor(
-        { contentType: 'text/plain', hasBody: true, parseErrorDetail: null },
+        {
+          contentType: 'text/plain',
+          hasBody: true,
+          parseErrorDetail: null,
+          suspiciousOperation: null,
+        },
         undefined,
         true,
       );
@@ -167,6 +183,7 @@ describe('DrfParserInterceptor', () => {
           contentType: 'application/json',
           hasBody: true,
           parseErrorDetail: 'JSON parse error - Expecting value: line 1 column 1 (char 0)',
+          suspiciousOperation: null,
         },
         undefined,
         true,
@@ -177,7 +194,12 @@ describe('DrfParserInterceptor', () => {
 
     it('still 415s the same request without the marker — proving the marker is what changed', () => {
       const error = expectDrf(
-        contextFor({ contentType: 'text/plain', hasBody: true, parseErrorDetail: null }),
+        contextFor({
+          contentType: 'text/plain',
+          hasBody: true,
+          parseErrorDetail: null,
+          suspiciousOperation: null,
+        }),
       );
       expect(error.getStatus()).toBe(HttpStatus.UNSUPPORTED_MEDIA_TYPE);
     });
@@ -209,7 +231,12 @@ describe('DrfParserInterceptor', () => {
     it('is a no-op for an empty body', () => {
       expect(() =>
         assertRequestDataParsable(
-          requestWith({ contentType: 'text/plain', hasBody: false, parseErrorDetail: null }),
+          requestWith({
+            contentType: 'text/plain',
+            hasBody: false,
+            parseErrorDetail: null,
+            suspiciousOperation: null,
+          }),
         ),
       ).not.toThrow();
     });
@@ -217,7 +244,12 @@ describe('DrfParserInterceptor', () => {
     it('raises DRF 415 for an unsupported media type', () => {
       expect(() =>
         assertRequestDataParsable(
-          requestWith({ contentType: 'text/plain', hasBody: true, parseErrorDetail: null }),
+          requestWith({
+            contentType: 'text/plain',
+            hasBody: true,
+            parseErrorDetail: null,
+            suspiciousOperation: null,
+          }),
         ),
       ).toThrow(DrfException);
     });
@@ -229,6 +261,7 @@ describe('DrfParserInterceptor', () => {
             contentType: 'application/json',
             hasBody: true,
             parseErrorDetail: 'JSON parse error - Expecting value: line 1 column 1 (char 0)',
+            suspiciousOperation: null,
           }),
         );
         throw new Error('expected a DrfException');
@@ -243,7 +276,12 @@ describe('DrfParserInterceptor', () => {
     it('honours a narrowed parser list', () => {
       expect(() =>
         assertRequestDataParsable(
-          requestWith({ contentType: 'application/json', hasBody: true, parseErrorDetail: null }),
+          requestWith({
+            contentType: 'application/json',
+            hasBody: true,
+            parseErrorDetail: null,
+            suspiciousOperation: null,
+          }),
           [DRF_PARSER_MEDIA_TYPES.MULTIPART],
         ),
       ).toThrow(DrfException);

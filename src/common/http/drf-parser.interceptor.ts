@@ -1,4 +1,5 @@
 import {
+  HttpStatus,
   Injectable,
   SetMetadata,
   type CallHandler,
@@ -9,6 +10,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import type { Observable } from 'rxjs';
+import { ApiException } from './api.exception';
 import { DrfException } from './drf.exception';
 import {
   DEFAULT_PARSER_MEDIA_TYPES,
@@ -81,6 +83,8 @@ export function DrfNoRequestData(): CustomDecorator<string> {
  *
  * @throws DrfException 415 when no parser matches the request's `Content-Type`, or 400
  *   carrying CPython's own JSON parse-error message.
+ * @throws ApiException 400 for a Django `SuspiciousOperation` raised by the multipart
+ *   parser (`RequestDataTooBig`, `TooManyFieldsSent`).
  */
 export function assertRequestDataParsable(
   request: Request,
@@ -97,6 +101,13 @@ export function assertRequestDataParsable(
   }
   if (state.parseErrorDetail !== null) {
     throw DrfException.parseError(state.parseErrorDetail);
+  }
+  if (state.suspiciousOperation !== null) {
+    // `RequestDataTooBig` / `TooManyFieldsSent` are `SuspiciousOperation`s, which Django's
+    // own handler turns into a **400** before DRF sees them — so no `{"detail": ...}`
+    // envelope and no `WWW-Authenticate`. v2 renders the registered `{"message": ...}`
+    // analogue of Django's error page (D13), the same shape the URL resolver's 404 uses.
+    throw ApiException.withMessage(HttpStatus.BAD_REQUEST, 'Bad Request');
   }
 }
 

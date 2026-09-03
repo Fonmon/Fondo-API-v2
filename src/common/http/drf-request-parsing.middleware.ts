@@ -1,6 +1,11 @@
 import { Injectable, type NestMiddleware } from '@nestjs/common';
 import express, { type NextFunction, type Request, type Response } from 'express';
-import multer from 'multer';
+import {
+  DjangoSuspiciousOperation,
+  MultiPartParserError,
+  parseDjangoMultipart,
+  setUploadedFiles,
+} from './django-multipart';
 import {
   DRF_PARSER_MEDIA_TYPES,
   mediaTypeMatches,
@@ -87,13 +92,37 @@ export class DrfRequestParsingMiddleware implements NestMiddleware {
   });
 
   /**
-   * `MultiPartParser`. Memory storage mirrors Django's behaviour for a small upload
-   * (`FILE_UPLOAD_MAX_MEMORY_SIZE`, 2.5 MB, spilling to disk above it); the monthly TSVs are
-   * a few kilobytes. `.any()` because v1's parser accepts any field name — the TSV arrives as
-   * `file` (`services/user.py:132`, `services/loan.py`), and `FileView.post` reads `name`,
-   * `file` and `type` from the same merged dict.
+   * `MultiPartParser` — **Django's**, ported in `django-multipart.ts` (parity finding
+   * **F8**), not multer's.
+   *
+   * multer wraps busboy, a strict RFC parser that aborts the request on anything malformed.
+   * Django's parser raises in exactly three places and otherwise salvages what it can, so
+   * the two disagree on every malformed body — in both directions, and across the 400/500
+   * line. `django-multipart.ts` documents the nine measured rows.
+   *
+   * The body is read into a Buffer first, which is what multer's `memoryStorage` did too, so
+   * nothing about the memory profile changes. Any field name is accepted, as in v1: the TSV
+   * arrives as `file` (`services/user.py:132`, `services/loan.py`) and `FileView.post` reads
+   * `name`, `file` and `type` out of the same merged dict.
    */
-  private readonly multipart = multer({ storage: multer.memoryStorage() }).any();
+  private readonly multipart = (
+    request: Request,
+    _response: Response,
+    next: NextFunction,
+  ): void => {
+    readRawBody(request, (error, body) => {
+      if (error !== null) {
+        next(error);
+        return;
+      }
+      try {
+        applyDjangoMultipart(request, body);
+        next();
+      } catch (parseError: unknown) {
+        next(parseError);
+      }
+    });
+  };
 
   use(request: Request, response: Response, next: NextFunction): void {
     // DRF's `request.data` is always dict-like, even when nothing was parsed: `_parse`
@@ -110,6 +139,7 @@ export class DrfRequestParsingMiddleware implements NestMiddleware {
       contentType: request.headers['content-type'] ?? '',
       hasBody: hasRequestBody(request),
       parseErrorDetail: null,
+      suspiciousOperation: null,
     };
     setParseState(request, state);
 
@@ -127,7 +157,12 @@ export class DrfRequestParsingMiddleware implements NestMiddleware {
     }
 
     selected.run.call(this, request, response, (error?: unknown) => {
-      if (error !== undefined && error !== null) {
+      if (error instanceof DjangoSuspiciousOperation) {
+        // Not a DRF `ParseError`: Django's own `SuspiciousOperation` handler answers 400
+        // without ever reaching `finalize_response`. Deferred like the rest so an
+        // unauthenticated oversized body still 401s.
+        state.suspiciousOperation = error.message;
+      } else if (error !== undefined && error !== null) {
         state.parseErrorDetail = this.describe(error, request, selected.kind);
       } else if (selected.kind !== 'json') {
         collapseMultiValueFields(request);
@@ -177,12 +212,51 @@ export class DrfRequestParsingMiddleware implements NestMiddleware {
     if (parser === 'json' && error instanceof SyntaxError) {
       return drfJsonParseErrorDetail(getRawBody(request) ?? '');
     }
-    if (parser === 'multipart') {
-      const message = error instanceof Error ? error.message : String(error);
-      return `Multipart form parse error - ${message}`;
+    if (parser === 'multipart' && error instanceof MultiPartParserError) {
+      return `Multipart form parse error - ${error.message}`;
     }
     return 'Malformed request.';
   }
+}
+
+/**
+ * Reads the whole request body into a Buffer, the way Django's `LazyStream`/`ChunkIter` pair
+ * consumes the WSGI input.
+ *
+ * Deliberately unbounded, because `MultiPartParser` is: `DATA_UPLOAD_MAX_MEMORY_SIZE` is
+ * applied by Django to non-file *fields* only (and is reproduced inside
+ * {@link parseDjangoMultipart}), while an uploaded file may be arbitrarily large. multer's
+ * `memoryStorage` — what this replaces — also held the whole body in memory, so the exposure
+ * is unchanged.
+ */
+function readRawBody(request: Request, done: (error: Error | null, body: Buffer) => void): void {
+  const chunks: Buffer[] = [];
+  request.on('data', (chunk: Buffer) => chunks.push(chunk));
+  request.on('end', () => done(null, Buffer.concat(chunks)));
+  request.on('error', (error: Error) => done(error, Buffer.alloc(0)));
+}
+
+/**
+ * Puts Django's `(POST, FILES)` on the request in the shape the rest of v2 already reads:
+ * fields on `request.body` (as arrays, so {@link collapseMultiValueFields} can apply
+ * `QueryDict.__getitem__`'s last-value-wins) and files on `request.files`, in multer's
+ * `.any()` shape.
+ *
+ * ⚠️ One documented gap: DRF's `request.data` is `POST.copy()` **updated with** `FILES`, so a
+ * name present in both resolves to the *file*. `readUploadedFile` looks only at
+ * `request.files` and the DTOs look only at `request.body`, so v2 answers as if both existed
+ * separately. No v1 client sends a field and a file under one name, and no v1 handler reads
+ * a name it does not itself write.
+ */
+function applyDjangoMultipart(request: Request, body: Buffer): void {
+  const result = parseDjangoMultipart(request.headers['content-type'] ?? '', body);
+
+  const fields: Record<string, string[]> = {};
+  for (const [name, values] of result.fields) {
+    fields[name] = [...values];
+  }
+  request.body = fields;
+  setUploadedFiles(request, result.files);
 }
 
 /**
@@ -239,6 +313,14 @@ export interface DrfParseState {
   readonly hasBody: boolean;
   /** DRF's `ParseError` detail, or `null` when the body parsed (or was never read). */
   parseErrorDetail: string | null;
+  /**
+   * Django's `SuspiciousOperation` message (`RequestDataTooBig` / `TooManyFieldsSent`), or
+   * `null`. A different failure class from a `ParseError`: it is raised by the multipart
+   * parser, escapes DRF entirely and is answered by Django's own handler with a **400** —
+   * so the body is Django's error page rather than DRF's `{"detail": ...}` envelope, and v2
+   * renders the registered `{"message": ...}` analogue (D13).
+   */
+  suspiciousOperation: string | null;
 }
 
 const PARSE_STATE = Symbol('drfParseState');
