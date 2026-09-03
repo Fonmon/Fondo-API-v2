@@ -1,0 +1,1030 @@
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { assertOwnership } from '../auth/policies/ownership';
+import type { AuthenticatedUser } from '../auth/types/authenticated-user';
+import { ApiException } from '../common/http/api.exception';
+import { djangoFileLines, parseMoneyColumn, requireColumn } from '../common/http/django-tsv';
+import {
+  buildPageEnvelope,
+  isPageBeyondLast,
+  pageOffset,
+  unpaginatedEnvelope,
+  type PageEnvelope,
+  type UnpaginatedEnvelope,
+} from '../common/http/pagination';
+import { formatDateEs } from '../common/i18n/spanish-format';
+import { fromDateColumn, type PlainDate } from '../common/utils/date.util';
+import {
+  asPythonDict,
+  pyGet,
+  toDjangoDate,
+  toDjangoInt,
+  toDjangoSmallInt,
+  toDjangoText,
+  PythonTypeError,
+} from '../common/utils/python-obj';
+import { addRelativeDelta } from '../common/utils/relativedelta.util';
+import { roundHalfEvenToBigInt } from '../common/utils/rounding.util';
+import { plainDateToUtcDate, nowInstant } from '../common/utils/timezone.util';
+import { EmailTemplate } from '../mail/email-template';
+import { MailService } from '../mail/mail.service';
+import { NotificationService } from '../notifications/notification.service';
+import { Prisma } from '../prisma';
+import { PrismaService } from '../prisma/prisma.service';
+import { UserService } from '../users/user.service';
+import {
+  calculateInterests,
+  generateAmortizationTable,
+  getRate,
+  MAX_TIMELIMIT,
+} from './amortization';
+import {
+  LOAN_APPROVED,
+  LOAN_DENIED,
+  LOAN_PAID_OUT,
+  LOAN_WAITING_APPROVAL,
+  PAYMENT_REFINANCED,
+  serializeLoan,
+  serializeLoanDetail,
+  type LoanDetailDto,
+  type LoanDto,
+} from './dto/loan.serializers';
+
+/**
+ * Either the pooled client or an interactive-transaction client.
+ *
+ * ⚠️ Not cosmetic. `bulk_update_loans` is `@transaction.atomic` and calls `update_loan`,
+ * which opens its own `transaction.atomic()` — in Django that **joins** the outer one. Prisma
+ * has no ambient transaction: a `this.prisma` call inside `$transaction(async tx => ...)`
+ * runs on a *different* connection, commits independently and survives the rollback. Every
+ * query on a transactional path therefore takes the client as an argument.
+ */
+type LoanSqlClient = PrismaService | Prisma.TransactionClient;
+
+/** The `include` every loan read needs to serialise `user_full_name`. */
+const WITH_OWNER = { user: { include: { auth_user: true } } } as const;
+
+/**
+ * The roles that may read **any** loan, alongside the loan's own owner — deviation **D10**
+ * (operator Q16). Identical to the set **D25** applies to `GET /api/user/<id>`; the two land
+ * together, in this phase, so the loan read and the user read cannot drift apart.
+ */
+export const LOAN_READ_PRIVILEGED_ROLES: readonly number[] = Object.freeze([0, 1, 2]);
+
+/**
+ * `fondo_api/services/loan.py:LoanService`.
+ *
+ * ## The deviations this class carries
+ *
+ * | # | what changes |
+ * |---|---|
+ * | **D4** | `timelimit < 1` is a **400** at create instead of a `DivisionByZero` 500 at approval. The `> 36` clamp is **ported unchanged** (silent). |
+ * | **D6** | `LoanDetail` is **upserted** on approval, not inserted, and every read of it is deterministic. |
+ * | **D8** | the bulk upload returns the ids it auto-closed instead of a bare, bodyless 200. |
+ * | **D9** | only `0→1`, `0→2`, `1→3`, `1→2` are legal state transitions; anything else is a **409** with no mail and no write. |
+ * | **D10** | `GET /api/loan/<id>` and `paymentProjection` are restricted to the loan's owner plus roles `[0,1,2]`. |
+ *
+ * ## What is deliberately **not** changed
+ *
+ * * **`LoanDetailView.patch` is `[0, 2]` with no ownership check, so a TREASURER can approve
+ *   their own loan.** `update_loan(id, state)` never receives the actor's id
+ *   (`services/loan.py:79`), so there is nothing to check against. This is **deviation D28,
+ *   WITHDRAWN 2026-09-03 per operator Q31** — it is accepted fund practice, not an oversight.
+ *   See `docs/operator-q29a-q30a-q31.md`. The permission-matrix cell carries it deliberately.
+ * * **The auto-close rule** (absent from the monthly file ⇒ paid off) is a real business rule
+ *   (operator Q1) and stays **silent**: no email, no push. There is no guard against closing a
+ *   loan approved *after* the treasurer generated the file (Q2).
+ * * **Quota comes only from the treasurer's monthly file** (Q12). Loans never increment
+ *   `utilized_quota`, so a member can open several loans between uploads that together exceed
+ *   their quota.
+ * * **Concurrent refinance requests against one loan** stay allowed (Q5), broken linkage
+ *   included: the second one overwrites `prev_loan.refinanced_loan`.
+ * * **Listing order is `-created_at, -id`** and nothing else.
+ */
+@Injectable()
+export class LoanService {
+  /** v1: `self.LOANS_PER_PAGE = 10`. */
+  private readonly LOANS_PER_PAGE = 10;
+
+  private readonly logger = new Logger('fondo_api.services.loan');
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly users: UserService,
+    private readonly notifications: NotificationService,
+    private readonly mail: MailService,
+  ) {}
+
+  // -------------------------------------------------------------------------
+  // create
+  // -------------------------------------------------------------------------
+
+  /**
+   * `create_loan(user_id, obj, refinance=False, prev_loan=None)`.
+   *
+   * ```python
+   * user_finance = UserFinance.objects.get(user_id = user_id)
+   * if obj['value'] > user_finance.available_quota and not refinance:
+   *     return (False, 'User does not have available quota')
+   * user = user_finance.user
+   * if int(obj['timelimit']) > 36:
+   *     obj['timelimit'] = 36
+   * rate = self.__get_rate(int(obj['timelimit']))
+   * new_loan = Loan.objects.create(...)
+   * self.__notification_service.send_notification(
+   *     self.__user_service.get_users_attr('id', [0,2]),
+   *     "Ha sido creada una nueva solicitud de crédito", "/loan/{}".format(new_loan.id))
+   * return (True, new_loan.id)
+   * ```
+   *
+   * ⚠️ **The quota comparison runs even for a refinance.** `and not refinance` short-circuits
+   * *after* the comparison, so a non-numeric `value` is a `TypeError` (500) on both paths;
+   * only the *refusal* is skipped. Reproduced.
+   *
+   * ⚠️ **The push notification always fires**, including for a refinance and including when
+   * the loan was created on somebody's behalf. Targets roles `[0, 2]` — ADMIN and TREASURER.
+   * It is sent **after** the row is written and **outside** any transaction (v1 has none here,
+   * and Phase 2 condition 3 forbids publishing from inside one).
+   *
+   * ## D4 — the lower bound v1 does not have
+   *
+   * v1 accepts `timelimit = 0`, writes the row, and then dies with `DivisionByZero` inside
+   * `__generate_table` **at approval time** — by which point the member has a loan request
+   * that can never be approved and no error anyone connected to the create call. Operator Q9:
+   * reject. The check sits exactly where v1 first reads the value (after the quota check, so
+   * a member over quota still gets v1's 406) and uses v1's own message register
+   * (`'Page number must be greater or equal than 0'`, `'State must be less or equal than 3'`).
+   *
+   * The **upper** bound stays v1's silent clamp: `timelimit = 37` is a **201** that writes
+   * `36`, which `test_post_loan_5` asserts.
+   *
+   * @returns the new loan's id.
+   * @throws ApiException 406 `{'message': 'User does not have available quota'}`
+   * @throws ApiException 400 `{'message': 'Timelimit must be greater or equal than 1'}` (D4)
+   */
+  async createLoan(
+    userId: number,
+    body: unknown,
+    refinance = false,
+    prevLoan: { id: number } | null = null,
+  ): Promise<number> {
+    const obj = asPythonDict(body);
+
+    const finance = await this.prisma.userFinance.findFirst({
+      where: { user_id: userId },
+      orderBy: { id: 'asc' },
+      select: { available_quota: true, user_id: true },
+    });
+    if (finance === null) {
+      // `UserFinance.objects.get(user_id=...)` -> DoesNotExist -> uncaught 500.
+      throw new PythonTypeError('UserFinance matching query does not exist.');
+    }
+
+    const value = toDjangoInt(pyGet(obj, 'value'), 'value');
+    if (value > finance.available_quota && !refinance) {
+      throw ApiException.withMessage(
+        HttpStatus.NOT_ACCEPTABLE,
+        'User does not have available quota',
+      );
+    }
+
+    // `int(obj['timelimit'])`, then the silent clamp — both before the rate lookup.
+    const requestedTimelimit = toDjangoSmallInt(pyGet(obj, 'timelimit'), 'timelimit');
+    if (requestedTimelimit < 1) {
+      // D4. v1 writes the row here and 500s at approval instead.
+      throw ApiException.withMessage(
+        HttpStatus.BAD_REQUEST,
+        'Timelimit must be greater or equal than 1',
+      );
+    }
+    const timelimit = Math.min(requestedTimelimit, MAX_TIMELIMIT);
+
+    const created = await this.prisma.loan.create({
+      data: {
+        value,
+        timelimit,
+        disbursement_date: plainDateToUtcDate(
+          toDjangoDate(pyGet(obj, 'disbursement_date'), 'disbursement_date'),
+        ),
+        fee: toDjangoSmallInt(pyGet(obj, 'fee'), 'fee'),
+        payment: toDjangoSmallInt(pyGet(obj, 'payment'), 'payment'),
+        comments: toDjangoNullableText(pyGet(obj, 'comments')),
+        rate: new Prisma.Decimal(getRate(timelimit)),
+        user_id: finance.user_id,
+        prev_loan_id: prevLoan === null ? null : prevLoan.id,
+        disbursement_value: toDjangoNullableInt(pyGet(obj, 'disbursement_value')),
+        // `auto_now_add` is application-set in Django; the column has no DB default.
+        state: LOAN_WAITING_APPROVAL,
+        created_at: nowInstant(),
+      },
+      select: { id: true },
+    });
+
+    await this.notifications.sendNotification(
+      await this.users.getUserIds([0, 2]),
+      'Ha sido creada una nueva solicitud de crédito',
+      `/loan/${created.id}`,
+    );
+    return created.id;
+  }
+
+  // -------------------------------------------------------------------------
+  // reads
+  // -------------------------------------------------------------------------
+
+  /**
+   * `get_loans(user_id, page, all_loans=False, state=4, paginate=True)`.
+   *
+   * ```python
+   * if state == 4:
+   *     loans = (Loan.objects.all() if all_loans
+   *              else Loan.objects.filter(user_id=user_id)).order_by('-created_at', '-id')
+   * else:
+   *     loans = (Loan.objects.filter(state=state) if all_loans
+   *              else Loan.objects.filter(user_id=user_id, state=state)).order_by('-created_at','-id')
+   * ```
+   *
+   * ⚠️ **`state = 4` means "all states"**, not a fourth state — `Loan.LOAN_STATES` stops at 3.
+   * It is the default when the query parameter is absent.
+   *
+   * ⚠️ **`all_loans` is honoured only for roles ≤ 2**, and that filter lives in the *view*
+   * (`views/loan.py:33-41`), which simply omits the argument for a MEMBER. See
+   * {@link LoanController.list}.
+   *
+   * ⚠️ **Order is `-created_at, -id` and nothing else.** `created_at` is a `timestamptz` with
+   * millisecond resolution, so the `-id` tiebreak decides the order of loans created in the
+   * same millisecond — which is exactly what v1's 25-row pagination test produces.
+   */
+  async getLoans(
+    userId: number | null,
+    page: number | null,
+    allLoans = false,
+    state = 4,
+    paginate = true,
+    client: LoanSqlClient = this.prisma,
+  ): Promise<PageEnvelope<LoanDto> | UnpaginatedEnvelope<LoanDto>> {
+    const where: Prisma.LoanWhereInput = {
+      ...(allLoans ? {} : { user_id: userId ?? undefined }),
+      ...(state === 4 ? {} : { state }),
+    };
+    const orderBy: Prisma.LoanOrderByWithRelationInput[] = [{ created_at: 'desc' }, { id: 'desc' }];
+
+    if (!paginate) {
+      const loans = await client.loan.findMany({ where, orderBy, include: WITH_OWNER });
+      return unpaginatedEnvelope(loans.map(serializeLoan));
+    }
+
+    const count = await client.loan.count({ where });
+    if (page === null) {
+      // Unreachable from the view (`page` defaults to '1'); guarded so a future caller
+      // cannot silently page from `null`.
+      throw new TypeError('getLoans: page must be a number when paginate is true');
+    }
+    if (isPageBeyondLast(page, count, this.LOANS_PER_PAGE)) {
+      return buildPageEnvelope<LoanDto>([], count, this.LOANS_PER_PAGE);
+    }
+    const loans = await client.loan.findMany({
+      where,
+      orderBy,
+      include: WITH_OWNER,
+      skip: pageOffset(page, this.LOANS_PER_PAGE),
+      take: this.LOANS_PER_PAGE,
+    });
+    return buildPageEnvelope(loans.map(serializeLoan), count, this.LOANS_PER_PAGE);
+  }
+
+  /**
+   * `get_loan(id)`.
+   *
+   * ```python
+   * try: loan = Loan.objects.get(id=id)
+   * except Loan.DoesNotExist: return (False, '')
+   * serializer = LoanSerializer(loan)
+   * if loan.state == 1:
+   *     loan_detail = LoanDetail.objects.get(loan_id=id)
+   *     return (True, {'loan': serializer.data, 'loan_detail': LoanDetailSerializer(loan_detail).data})
+   * return (True, {'loan': serializer.data})
+   * ```
+   *
+   * ⚠️ **`loan_detail` appears only for an APPROVED loan.** A `PAID_OUT` loan has a detail row
+   * and v1 does not return it. Ported.
+   *
+   * ⚠️ **`LoanDetail.objects.get(loan_id=id)` on an approved loan with no detail row is
+   * `DoesNotExist` — a 500, not a 404.** Unreachable through v2 (approval always writes one),
+   * but reachable on rows Django wrote, so it is left as a 500 rather than softened into the
+   * 404 the missing-*loan* case gives.
+   *
+   * **D6** — the read is `findFirst(orderBy: id asc)`, not `findUnique`, so a duplicate
+   * detail row (which v1's plain FK permits and which `MultipleObjectsReturned` turns into a
+   * permanent 500) degrades to "the second row is ignored".
+   *
+   * **D10** — the caller must own the loan or hold a role in
+   * {@link LOAN_READ_PRIVILEGED_ROLES}. The loan is looked up first, so a **non-existent** id
+   * is v1's 404 for everyone and only an *existing* loan can produce the 403.
+   *
+   * @throws ApiException 404 (zero-byte) when no loan has that id.
+   * @throws DrfException 403 when D10 refuses.
+   */
+  async getLoan(
+    actor: AuthenticatedUser,
+    id: number,
+  ): Promise<{ loan: LoanDto; loan_detail?: LoanDetailDto }> {
+    const loan = await this.prisma.loan.findUnique({ where: { id }, include: WITH_OWNER });
+    if (loan === null) {
+      // v1: `(False, '')` -> `Response(status=404)`, a zero-byte body.
+      throw ApiException.empty(HttpStatus.NOT_FOUND);
+    }
+    assertOwnership(actor, loan.user_id, LOAN_READ_PRIVILEGED_ROLES);
+
+    if (loan.state !== LOAN_APPROVED) {
+      return { loan: serializeLoan(loan) };
+    }
+    const detail = await this.readLoanDetail(id);
+    if (detail === null) {
+      throw new PythonTypeError('LoanDetail matching query does not exist.');
+    }
+    return { loan: serializeLoan(loan), loan_detail: serializeLoanDetail(detail) };
+  }
+
+  /**
+   * `payment_projection(loan_id, to_date)`.
+   *
+   * ```python
+   * try:
+   *     loan_detail = LoanDetail.objects.get(loan_id=loan_id)
+   *     loan = loan_detail.loan
+   *     interests = self.__calculate_interests(loan, loan_detail.capital_balance,
+   *                                            to_date, loan_detail.from_date)
+   *     return {'interests': int(round(interests, 0)), 'capital_balance': loan_detail.capital_balance}
+   * except LoanDetail.DoesNotExist:
+   *     return None
+   * ```
+   *
+   * ⚠️ **Keyed on `LoanDetail`, not on `Loan`** — a loan that exists but was never approved
+   * has no detail row and is therefore a 404 here, the same answer as a loan that does not
+   * exist at all.
+   *
+   * ⚠️ `int(round(interests, 0))` is Python's **half-even** `round` on a `Decimal` under the
+   * default context, not `Math.round`.
+   *
+   * **D10** applies, via the detail row's loan. `checkOwnership` is off for the internal call
+   * from {@link refinanceLoan}, which has already established that the caller owns the loan.
+   */
+  async paymentProjection(
+    actor: AuthenticatedUser | null,
+    loanId: number,
+    toDate: PlainDate,
+  ): Promise<{ interests: bigint; capital_balance: bigint }> {
+    const detail = await this.prisma.loanDetail.findFirst({
+      where: { loan_id: loanId },
+      orderBy: { id: 'asc' },
+      include: { loan: true },
+    });
+    if (detail === null) {
+      // v1 returns None -> `Response(None, status=404)`, a zero-byte body.
+      throw ApiException.empty(HttpStatus.NOT_FOUND);
+    }
+    if (actor !== null) {
+      assertOwnership(actor, detail.loan.user_id, LOAN_READ_PRIVILEGED_ROLES);
+    }
+
+    const interests = calculateInterests(
+      detail.loan.rate,
+      detail.capital_balance,
+      fromDateColumn(detail.from_date),
+      toDate,
+    );
+    return {
+      interests: roundHalfEvenToBigInt(interests),
+      capital_balance: detail.capital_balance,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // state transitions
+  // -------------------------------------------------------------------------
+
+  /**
+   * `update_loan(id, state)` — the whole approval / denial / payout machine, atomic.
+   *
+   * ```python
+   * with transaction.atomic():
+   *     try: loan = Loan.objects.get(id=id)
+   *     except Loan.DoesNotExist: return (False, 'Loan does not exist')
+   *     loan.state = state; loan.save()
+   *     mail_params = {'loan_id': loan.id}
+   *     if state == 1:
+   *         table, detail = self.__generate_table(loan)
+   *         if loan.prev_loan is not None: loan.prev_loan.state = 3; loan.prev_loan.save()
+   *         loan_detail = self.__create_loan_detail(loan, detail)
+   *         mail_params['loan_table'] = table
+   *         send_mail(CHANGE_STATE_LOAN_APPROVED, [loan.user.email], mail_params,
+   *                   get_users_attr('email', [0,2]))
+   *         return (True, LoanDetailSerializer(loan_detail).data)
+   *     if state == 2:
+   *         send_mail(CHANGE_STATE_LOAN_DENIED, [loan.user.email], mail_params,
+   *                   get_users_attr('email', [0,2]))
+   *         if loan.prev_loan is not None: loan.prev_loan.refinanced_loan = None; ...save()
+   *     if state == 3:
+   *         self.__notification_service.remove_sch_notitfications("payment_reminder", id)
+   * return (True, '')
+   * ```
+   *
+   * ⚠️ **The approval email BCCs roles `[0, 2]`** and `MailService` drops any address that is
+   * also a recipient, so a TREASURER approving their own loan is not blind-copied on it
+   * (`test_update_loan_approved_monthly` pins exactly that).
+   *
+   * ⚠️ **Only `state == 3` clears the payment reminders.** A denial after approval (`1→2`)
+   * leaves the scheduled `payment_reminder` tasks in place and the member keeps getting
+   * push reminders for a cancelled loan. v1's behaviour; not changed here, because Q6 makes
+   * reminders best-effort and the fix belongs with Phase 7's runner.
+   *
+   * ⚠️ **`prev_loan.state = 3` is a direct column write, not a recursive `update_loan` call**,
+   * so it sends no mail and clears no reminders. Also v1's.
+   *
+   * ## D9 — the transition guard
+   *
+   * v1 writes `loan.state` unconditionally, so re-approving an already-approved loan
+   * regenerates the amortisation table from `disbursement_date`, **inserts a second
+   * `LoanDetail`** (D6) and re-sends the borrower's email. Legal transitions are `0→1`,
+   * `0→2`, `1→3`, `1→2` (operator Q14); anything else is a **409** with no mail, no scheduler
+   * write and no state change. The loan is looked up first, so a missing id is still v1's 404.
+   *
+   * ## D6 — upsert, not insert
+   *
+   * `__create_loan_detail` becomes an update-or-create keyed on `loan_id`. With D9 in place
+   * the second-row case is unreachable through the API; this is the recovery path for a loan
+   * wrongly closed by {@link bulkUpdateLoans}, whose repair is "set state back to 1 and
+   * re-approve" — which in v1 makes `GET /api/loan/<id>` a permanent 500.
+   *
+   * @returns the serialised `LoanDetail` for an approval, `''` for every other transition —
+   *   v1's `Response('', status=200)`, which `JSONRenderer` writes as the two bytes `""`.
+   * @throws ApiException 404 `{'message': 'Loan does not exist'}`
+   * @throws ApiException 409 `{'message': 'Invalid state transition'}` (D9)
+   */
+  async updateLoan(id: number, state: number): Promise<LoanDetailDto | ''> {
+    return this.prisma.$transaction(async (tx) => this.updateLoanIn(tx, id, state), {
+      // The approval leg sends the borrower's email *inside* v1's `transaction.atomic()`.
+      // The default 5 s interactive budget is shorter than SES's own worst case (C22).
+      timeout: 20_000,
+      maxWait: 10_000,
+    });
+  }
+
+  /** {@link updateLoan}'s body, on an explicit client so `bulkUpdateLoans` can join it. */
+  private async updateLoanIn(
+    tx: LoanSqlClient,
+    id: number,
+    state: number,
+  ): Promise<LoanDetailDto | ''> {
+    const loan = await tx.loan.findUnique({ where: { id }, include: WITH_OWNER });
+    if (loan === null) {
+      throw ApiException.withMessage(HttpStatus.NOT_FOUND, 'Loan does not exist');
+    }
+
+    // D9 — before any write, and before any mail.
+    assertLegalLoanTransition(loan.state, state);
+
+    await tx.loan.update({ where: { id }, data: { state } });
+
+    const mailBcc = await this.users.getUserEmails([0, 2]);
+
+    if (state === LOAN_APPROVED) {
+      const { table, summary } = generateAmortizationTable({
+        value: loan.value,
+        timelimit: loan.timelimit,
+        fee: loan.fee,
+        rate: loan.rate,
+        disbursement_date: fromDateColumn(loan.disbursement_date),
+      });
+      if (loan.prev_loan_id !== null) {
+        // A refinance was approved: the loan it replaces is now PAID_OUT.
+        await tx.loan.update({
+          where: { id: loan.prev_loan_id },
+          data: { state: LOAN_PAID_OUT },
+        });
+      }
+      const detail = await this.upsertLoanDetail(tx, loan, summary);
+      await this.mail.sendMail(
+        EmailTemplate.CHANGE_STATE_LOAN_APPROVED,
+        [loan.user.auth_user.email],
+        { loan_id: loan.id, loan_table: table },
+        mailBcc,
+      );
+      return serializeLoanDetail(detail);
+    }
+
+    if (state === LOAN_DENIED) {
+      await this.mail.sendMail(
+        EmailTemplate.CHANGE_STATE_LOAN_DENIED,
+        [loan.user.auth_user.email],
+        { loan_id: loan.id },
+        mailBcc,
+      );
+      if (loan.prev_loan_id !== null) {
+        // The refinance was refused: unlink it from the loan it would have replaced.
+        await tx.loan.update({
+          where: { id: loan.prev_loan_id },
+          data: { refinanced_loan: null },
+        });
+      }
+    }
+
+    if (state === LOAN_PAID_OUT) {
+      // v1's method name carries a typo (`remove_sch_notitfications`); the behaviour does not.
+      await this.notifications.removeSchNotifications('payment_reminder', id, tx);
+    }
+
+    return '';
+  }
+
+  /**
+   * `refinance_loan(loan_id, new_loan, user_id)`.
+   *
+   * ```python
+   * try:
+   *     loan = Loan.objects.get(id=loan_id)
+   *     if loan.state != 1 or user_id != loan.user.id: return None
+   *     to_date = datetime.strptime(new_loan['disbursement_date'], '%Y-%m-%d').date()
+   *     payment = self.payment_projection(loan_id, to_date)
+   *     new_loan['value'] = payment['capital_balance']
+   *     comment = 'Refinanciación del crédito #{}, cuyo valor'.format(loan_id)
+   *     if new_loan['includeInterests']:
+   *         new_loan['value'] += payment['interests']
+   *         comment = '{} incluye intereses'.format(comment)
+   *     else:
+   *         comment = '{} no incluye intereses'.format(comment)
+   *     new_loan['comments'] = '{}. {}'.format(comment, new_loan['comments'])
+   *     new_loan['payment'] = 2
+   *     new_loan['disbursement_value'] = None
+   *     state, new_loan_id = self.create_loan(user_id, new_loan, True, loan)
+   *     loan.refinanced_loan = new_loan_id
+   *     loan.save()
+   *     return new_loan_id
+   * except Loan.DoesNotExist:
+   *     return None
+   * ```
+   *
+   * ⚠️ **Own APPROVED loan only** — and that is the *whole* authorisation, built into v1. D10
+   * adds nothing here, because a non-owner already gets `None` → 400.
+   *
+   * ⚠️ **`Loan.DoesNotExist` is the only caught exception.** A missing `disbursement_date`,
+   * `includeInterests` or `comments` key is a `KeyError` → **500**, not a 400. A loan with no
+   * `LoanDetail` makes `payment_projection` return `None` and `payment['capital_balance']`
+   * raise `TypeError` → 500. All three are reproduced: the 400 means "wrong loan", never
+   * "wrong body".
+   *
+   * ⚠️ **`includeInterests` is tested for Python truthiness**, not compared to `True`, so
+   * `"false"` (a non-empty string) *includes* the interest. Reproduced.
+   *
+   * ⚠️ **No transaction.** v1 has none, so a `create_loan` failure between the two writes
+   * leaves the old loan un-linked; and `create_loan`'s SQS publish must not run inside one
+   * (Phase 2 condition 3).
+   *
+   * ⚠️ `#{}` interpolates the raw URL segment in v1 (`id` is a `str` from the regex), which
+   * renders identically to the integer.
+   *
+   * D4 applies through `create_loan`: a refinance body with `timelimit: 0` is a 400.
+   *
+   * @returns the new loan's id.
+   * @throws ApiException 400 (zero-byte) when the loan is missing, not APPROVED, or not the
+   *   caller's — v1's three `None` paths, which the view renders identically.
+   */
+  async refinanceLoan(actor: AuthenticatedUser, loanId: number, body: unknown): Promise<number> {
+    const loan = await this.prisma.loan.findUnique({ where: { id: loanId } });
+    if (loan === null || loan.state !== LOAN_APPROVED || loan.user_id !== actor.id) {
+      throw ApiException.empty(HttpStatus.BAD_REQUEST);
+    }
+    const newLoan = asPythonDict(body);
+
+    const toDate = strptimeIsoDate(pyGet(newLoan, 'disbursement_date'));
+    // `actor` is null: ownership is already established above, and v1 calls the service
+    // method directly with no permission layer between.
+    const payment = await this.paymentProjection(null, loanId, toDate);
+
+    let value = payment.capital_balance;
+    let comment = `Refinanciación del crédito #${loanId}, cuyo valor`;
+    if (isPythonTruthy(pyGet(newLoan, 'includeInterests'))) {
+      value += payment.interests;
+      comment = `${comment} incluye intereses`;
+    } else {
+      comment = `${comment} no incluye intereses`;
+    }
+
+    const newLoanId = await this.createLoan(
+      actor.id,
+      {
+        ...newLoan,
+        value,
+        comments: `${comment}. ${toDjangoText(pyGet(newLoan, 'comments'))}`,
+        payment: PAYMENT_REFINANCED,
+        disbursement_value: null,
+      },
+      true,
+      loan,
+    );
+
+    await this.prisma.loan.update({
+      where: { id: loanId },
+      data: { refinanced_loan: BigInt(newLoanId) },
+    });
+    return newLoanId;
+  }
+
+  // -------------------------------------------------------------------------
+  // the monthly file
+  // -------------------------------------------------------------------------
+
+  /**
+   * `bulk_update_loans(obj)` — **the highest-consequence implicit rule in the codebase.**
+   *
+   * ```python
+   * @transaction.atomic
+   * def bulk_update_loans(self, obj):
+   *     loan_ids = []
+   *     for line in obj['file']:
+   *         data = line.decode('utf-8').strip().split("\t")
+   *         loan_id = int(data[0]); loan_ids.append(loan_id)
+   *         info['total_payment']   = int(round(float(data[1]), 0))
+   *         info['minimum_payment'] = int(round(float(data[2]), 0))
+   *         date = data[3].strip().split("/")
+   *         info['payday_limit']    = "{}-{}-{}".format(date[2], date[1], date[0])
+   *         info['interests']       = int(round(float(data[4]), 0))
+   *         info['capital_balance'] = int(round(float(data[5]), 0))
+   *         date = data[6].strip().split("/")
+   *         info['from_date']       = "{}-{}-{}".format(date[2], date[1], date[0])
+   *         try: self.__update_loan_detail(info)
+   *         except LoanDetail.DoesNotExist:
+   *             self.__logger.error('Loan with id: {}, not exists'.format(loan_id)); continue
+   *     loans = self.get_loans(None, None, True, 1, False)['list']
+   *     for loan in loans:
+   *         if loan['id'] not in loan_ids:
+   *             self.__logger.info('Auto closing loan with id {}'.format(loan['id']))
+   *             self.update_loan(loan['id'], 3)
+   * ```
+   *
+   * ## The column map, which is not the model's field order
+   *
+   * | # | column | note |
+   * |---|---|---|
+   * | 0 | `loan_id` | `int()` — a non-numeric line is a `ValueError`, i.e. the whole upload rolls back |
+   * | 1 | `total_payment` | money |
+   * | 2 | `minimum_payment` | money |
+   * | 3 | `payday_limit` | **`D/M/Y` with `/` separators**, re-assembled as `Y-M-D` |
+   * | 4 | `interests` | money |
+   * | 5 | `capital_balance` | money |
+   * | 6 | `from_date` | **`D/M/Y`** |
+   *
+   * ⚠️ **An id in the file with no `LoanDetail` row is logged and skipped** — but it *is*
+   * appended to `loan_ids` first, so listing a not-yet-approved loan in the file protects it
+   * from the auto-close. That ordering is load-bearing and is reproduced.
+   *
+   * ⚠️ **The auto-close candidate set is every APPROVED loan in the fund** — 28 of them in
+   * `fondodev` today. A well-formed but *incomplete* file commits and closes the omissions;
+   * a loan approved after the treasurer generated the file is absent by construction and gets
+   * closed. Operator Q1/Q2 accept both. The close is silent: `update_loan(id, 3)` sends no
+   * mail and only removes the scheduled reminders.
+   *
+   * ⚠️ **Everything is one transaction**, `schedule_notification` and the auto-closes
+   * included, so a malformed line on row 400 discards rows 1-399 as well. Ported: a partly
+   * applied monthly file is worse than none.
+   *
+   * ## D8 — the response
+   *
+   * v1 answers a bare `200` with **no body**, so nothing tells the treasurer which loans the
+   * upload just closed. Operator Q3: return the list, with no cap on its length.
+   *
+   * @returns the ids auto-closed by this upload, in the order they were closed (**D8**).
+   */
+  async bulkUpdateLoans(fileContents: Buffer): Promise<{ closed_loans: number[] }> {
+    const lines = djangoFileLines(fileContents);
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        const loanIds: number[] = [];
+
+        for (const line of lines) {
+          const data = line.trim().split('\t');
+          const loanId = Number(toDjangoInt(requireColumn(data, 0), 'loan id'));
+          // ⚠️ Appended *before* the update is attempted — an unknown id still shields
+          // nothing, but a known-but-unapproved id shields itself from the auto-close.
+          loanIds.push(loanId);
+
+          const info = {
+            total_payment: parseMoneyColumn(data, 1),
+            minimum_payment: parseMoneyColumn(data, 2),
+            payday_limit: parseSlashDate(requireColumn(data, 3)),
+            interests: parseMoneyColumn(data, 4),
+            capital_balance: parseMoneyColumn(data, 5),
+            from_date: parseSlashDate(requireColumn(data, 6)),
+          };
+
+          const updated = await this.updateLoanDetail(tx, loanId, info);
+          if (!updated) {
+            // v1: `except LoanDetail.DoesNotExist: logger.error(...); continue`
+            this.logger.error(`Loan with id: ${loanId}, not exists`);
+          }
+        }
+
+        // `get_loans(None, None, True, 1, False)` — every APPROVED loan, unpaginated.
+        const approved = await this.getLoans(null, null, true, LOAN_APPROVED, false, tx);
+        const closed: number[] = [];
+        for (const loan of approved.list) {
+          if (!loanIds.includes(loan.id)) {
+            this.logger.log(`Auto closing loan with id ${loan.id}`);
+            await this.updateLoanIn(tx, loan.id, LOAN_PAID_OUT);
+            closed.push(loan.id);
+          }
+        }
+        return { closed_loans: closed };
+      },
+      // 374 detail rows plus up to 28 auto-closes, each writing scheduler rows, in one unit.
+      { timeout: 120_000, maxWait: 20_000 },
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // private
+  // -------------------------------------------------------------------------
+
+  /**
+   * `__update_loan_detail(obj)` followed by `__create_scheduled_task(payday_limit, loan)`.
+   *
+   * ⚠️ **This one stays an update, not an upsert.** D6's "upsert not insert" targets
+   * {@link upsertLoanDetail} (approval), which is where the duplicate row comes from. Here a
+   * missing `LoanDetail` means the file names a loan that was never approved — v1 logs and
+   * skips it, and creating a row would either violate the FK (no such loan) or fabricate a
+   * schedule for a loan awaiting approval.
+   *
+   * @returns `false` when there is no `LoanDetail` for that loan (v1's `DoesNotExist`).
+   */
+  private async updateLoanDetail(
+    tx: LoanSqlClient,
+    loanId: number,
+    info: {
+      total_payment: bigint;
+      minimum_payment: bigint;
+      payday_limit: PlainDate;
+      interests: bigint;
+      capital_balance: bigint;
+      from_date: PlainDate;
+    },
+  ): Promise<boolean> {
+    // D6 — deterministic read, so a duplicate row cannot raise `MultipleObjectsReturned`.
+    const existing = await tx.loanDetail.findFirst({
+      where: { loan_id: loanId },
+      orderBy: { id: 'asc' },
+      select: { id: true, loan: { select: { id: true, user_id: true } } },
+    });
+    if (existing === null) {
+      return false;
+    }
+
+    await tx.loanDetail.update({
+      where: { id: existing.id },
+      data: {
+        total_payment: info.total_payment,
+        minimum_payment: info.minimum_payment,
+        payday_limit: plainDateToUtcDate(info.payday_limit),
+        interests: info.interests,
+        capital_balance: info.capital_balance,
+        from_date: plainDateToUtcDate(info.from_date),
+      },
+    });
+    await this.createScheduledTask(tx, info.payday_limit, existing.loan);
+    return true;
+  }
+
+  /**
+   * `__create_scheduled_task(payday_limit, loan)` — the **two** payment reminders.
+   *
+   * ```python
+   * payday_limit    = datetime.strptime(payday_limit, '%Y-%m-%d').date()
+   * five_days_date  = payday_limit - relativedelta(days=5)
+   * before_date     = payday_limit - relativedelta(days=1)
+   * payload = {"type": "payment_reminder", "owner_id": loan.id, "user_ids": [loan.user.id],
+   *            "target": "/loan/{}".format(loan.id),
+   *            "message": "Recuerde que la fecha límite de pago para el crédito {}, es el: {}"
+   *                       .format(loan.id, format_date(payday_limit, locale=...))}
+   * self.__notification_service.schedule_notification(five_days_date, payload)
+   * self.__notification_service.schedule_notification(before_date, payload)
+   * ```
+   *
+   * ⚠️ **Both dates derive from `payday_limit`, which comes out of the uploaded file** — they
+   * are not "today ± n". There is no calendar-now read anywhere on the loan path (condition
+   * **C28**); the only clock read in this service is `created_at`'s `nowInstant()`.
+   *
+   * ⚠️ **`repeat` is 0 (`NONE`)**, unlike the birthday task's `4`. And the payload is
+   * identical for both rows — the same-day dedupe in `schedule_notification` is what keeps
+   * them from collapsing, and they cannot fall on the same day because they are 4 days apart.
+   *
+   * ⚠️ Key insertion order (`type, owner_id, user_ids, target, message`) is v1's. PostgreSQL
+   * re-orders hstore entries on storage, but the encoder writes what it is given.
+   *
+   * ⚠️ **D7 lives in Phase 7, not here.** A reminder whose `run_date` has already passed is
+   * still written; v1's *runner* then never fires it, and the decision to send it immediately
+   * instead (operator Q8) is the runner's.
+   */
+  private async createScheduledTask(
+    tx: LoanSqlClient,
+    paydayLimit: PlainDate,
+    loan: { id: number; user_id: number },
+  ): Promise<void> {
+    const fiveDaysBefore = addRelativeDelta(paydayLimit, { days: -5 });
+    const oneDayBefore = addRelativeDelta(paydayLimit, { days: -1 });
+
+    const payload = {
+      type: 'payment_reminder',
+      owner_id: loan.id,
+      user_ids: [loan.user_id],
+      target: `/loan/${loan.id}`,
+      message:
+        `Recuerde que la fecha límite de pago para el crédito ${loan.id}, ` +
+        `es el: ${formatDateEs(paydayLimit)}`,
+    };
+
+    await this.notifications.scheduleNotification(fiveDaysBefore, payload, 0, tx);
+    await this.notifications.scheduleNotification(oneDayBefore, payload, 0, tx);
+  }
+
+  /**
+   * `__create_loan_detail(loan, detail)` — **upserted**, not inserted (**D6**).
+   *
+   * ```python
+   * LoanDetail.objects.create(
+   *     total_payment=detail['total_payment'], minimum_payment=detail['minimum_payment'],
+   *     payday_limit=detail['payday_limit'], from_date=loan.disbursement_date,
+   *     interests=detail['interests'], capital_balance=loan.value, loan=loan)
+   * ```
+   *
+   * ⚠️ **`from_date` is the loan's `disbursement_date` and `capital_balance` is `loan.value`**
+   * — neither comes from the amortisation summary. The model's `default=date.today` on
+   * `from_date` therefore never fires on this path.
+   */
+  private async upsertLoanDetail(
+    tx: LoanSqlClient,
+    loan: { id: number; value: bigint; disbursement_date: Date },
+    summary: {
+      total_payment: bigint;
+      minimum_payment: bigint;
+      payday_limit: PlainDate;
+      interests: bigint;
+    },
+  ): Promise<{
+    minimum_payment: bigint;
+    total_payment: bigint;
+    payday_limit: Date;
+    interests: bigint;
+    capital_balance: bigint;
+    from_date: Date;
+  }> {
+    const data = {
+      total_payment: summary.total_payment,
+      minimum_payment: summary.minimum_payment,
+      payday_limit: plainDateToUtcDate(summary.payday_limit),
+      from_date: loan.disbursement_date,
+      interests: summary.interests,
+      capital_balance: loan.value,
+    };
+
+    const existing = await tx.loanDetail.findFirst({
+      where: { loan_id: loan.id },
+      orderBy: { id: 'asc' },
+      select: { id: true },
+    });
+    if (existing !== null) {
+      // D6: v1 would INSERT a second row here and make `GET /api/loan/<id>` a permanent 500.
+      return tx.loanDetail.update({ where: { id: existing.id }, data });
+    }
+    return tx.loanDetail.create({ data: { ...data, loan_id: loan.id } });
+  }
+
+  /** `LoanDetail.objects.get(loan_id=...)`, made deterministic — see **D6**. */
+  private async readLoanDetail(loanId: number): Promise<{
+    minimum_payment: bigint;
+    total_payment: bigint;
+    payday_limit: Date;
+    interests: bigint;
+    capital_balance: bigint;
+    from_date: Date;
+  } | null> {
+    return this.prisma.loanDetail.findFirst({
+      where: { loan_id: loanId },
+      orderBy: { id: 'asc' },
+    });
+  }
+}
+
+/**
+ * The legal `Loan.state` transitions — **deviation D9** (operator Q14).
+ *
+ * ```
+ *   0 WAITING_APPROVAL ──► 1 APPROVED ──► 3 PAID_OUT
+ *          │                   │
+ *          └──────────────────►2 DENIED
+ * ```
+ *
+ * Everything else — `1→1` (re-approval), `3→1` (re-opening a closed loan), `2→anything`,
+ * `x→x`, and the negative states `LoanDetailView.patch`'s `new_state <= 3` check lets through
+ * — is refused. v1 permits them all and each one corrupts the record differently: `1→1`
+ * re-sends the borrower's email and writes a second `LoanDetail`; `3→1` is the auto-close
+ * recovery path that D6 exists for; a negative state is stored verbatim and renders as an
+ * unknown state on every screen.
+ */
+const LEGAL_LOAN_TRANSITIONS: ReadonlyMap<number, readonly number[]> = new Map([
+  [LOAN_WAITING_APPROVAL, [LOAN_APPROVED, LOAN_DENIED]],
+  [LOAN_APPROVED, [LOAN_PAID_OUT, LOAN_DENIED]],
+]);
+
+/** @throws ApiException 409 `{'message': 'Invalid state transition'}` */
+export function assertLegalLoanTransition(current: number, next: number): void {
+  const allowed = LEGAL_LOAN_TRANSITIONS.get(current) ?? [];
+  if (!allowed.includes(next)) {
+    throw ApiException.withMessage(HttpStatus.CONFLICT, 'Invalid state transition');
+  }
+}
+
+/**
+ * `datetime.strptime(value, '%Y-%m-%d').date()`.
+ *
+ * ⚠️ **Stricter than `DateField.to_python`** and that difference is v1's, not v2's: the
+ * *body* of a create goes through Django's field coercion (which accepts `2017-12-9`), while
+ * `paymentProjection`'s `to_date` and `refinanceLoan`'s `disbursement_date` go through
+ * `strptime`. `%m`/`%d` accept one *or* two digits, so `'2017-12-9'` parses here too — but a
+ * trailing newline does not, and neither does anything after the day.
+ *
+ * `strptime` also validates the calendar date, so `'2018-02-30'` raises.
+ */
+export function strptimeIsoDate(value: unknown): PlainDate {
+  if (typeof value !== 'string') {
+    throw new PythonTypeError(
+      `TypeError: strptime() argument 1 must be str, not ${value === null ? 'NoneType' : typeof value}`,
+    );
+  }
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(value);
+  if (match === null) {
+    throw new PythonTypeError(`ValueError: time data '${value}' does not match format '%Y-%m-%d'`);
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day
+  ) {
+    throw new PythonTypeError(
+      `ValueError: unconverted data remains, or day is out of range: '${value}'`,
+    );
+  }
+  return { year, month, day };
+}
+
+/**
+ * `"{}-{}-{}".format(date[2], date[1], date[0])` over `data[n].strip().split("/")`, then
+ * Django's `DateField.to_python` on the result.
+ *
+ * The file carries `D/M/Y`; the code re-assembles `Y-M-D` **without zero-padding**, which is
+ * exactly why `toDjangoDate` has to accept `\d{1,2}`. A short row (`'1/1'`) produces
+ * `IndexError` in v1 — reproduced by {@link requireColumn}'s sibling below.
+ */
+function parseSlashDate(raw: string): PlainDate {
+  const parts = raw.trim().split('/');
+  const day = parts[0];
+  const month = parts[1];
+  const year = parts[2];
+  if (year === undefined || month === undefined || day === undefined) {
+    throw new PythonTypeError('IndexError: list index out of range (date column)');
+  }
+  return toDjangoDate(`${year}-${month}-${day}`, 'payday_limit/from_date');
+}
+
+/**
+ * Python truthiness, as `if new_loan['includeInterests']:` applies it.
+ *
+ * `False`, `None`, `0`, `''`, `[]` and `{}` are falsy; **every** other value — including the
+ * string `'false'` — is truthy. `Boolean(value)` in JS agrees on all of those except the
+ * empty array and the empty object, which JS calls truthy and Python calls falsy.
+ */
+function isPythonTruthy(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (typeof value === 'object' && value !== null && !(value instanceof Date)) {
+    return Object.keys(value).length > 0;
+  }
+  return Boolean(value);
+}
+
+/** `Loan.comments` is `TextField(null=True)`, so a JSON `null` stays SQL NULL. */
+function toDjangoNullableText(value: unknown): string | null {
+  return value === null || value === undefined ? null : toDjangoText(value);
+}
+
+/** `Loan.disbursement_value` is `BigIntegerField(null=True)`. */
+function toDjangoNullableInt(value: unknown): bigint | null {
+  return value === null || value === undefined ? null : toDjangoInt(value, 'disbursement_value');
+}

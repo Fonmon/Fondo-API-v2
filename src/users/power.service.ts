@@ -1,5 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable } from '@nestjs/common';
 import { assertOwnership } from '../auth/policies/ownership';
+import { ApiException } from '../common/http/api.exception';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user';
 import { formatDateEs } from '../common/i18n/spanish-format';
 import {
@@ -59,6 +60,24 @@ export const POWER_REJECTED = 2;
  * **D5 — the letter goes out blind.** v1 puts every member's address in `ToAddresses` with an
  * empty `Bcc`, disclosing all 15 addresses to all 15 members on every approval. Q18: move them
  * to `Bcc`. The recipient list is unchanged (Q10: all members).
+ *
+ * ## Two more, added in Phase 4
+ *
+ * **D26 — `requester === requestee` is refused at creation, with 406.** `requester` is always
+ * the caller, so no member can give away another's vote — but a member acting **alone**, with
+ * no second party's consent (which every other power requires under D2), could create and then
+ * approve a power naming themselves and make the fund emit the formal power-of-attorney letter,
+ * on Fondo Montañez letterhead and addressed to the president of the assembly, to all 15
+ * members. Live on 2026-09-03: **0 of 20 rows are self-directed**. Refused at *creation*, not
+ * approval, so no row and no self-addressed push notification are produced; 406 is v1's house
+ * style for a business-rule refusal on a create (`create_loan`).
+ *
+ * ⚠️ **No `(requester, meeting_date)` uniqueness rule is added, deliberately.** Operator
+ * **Q30a**: a second request *superseding* the first is the fund's real idiom — member 14 holds
+ * rows 18 and 20 for the 2026-01-31 assembly — so self-naming is not a revocation workaround,
+ * and a uniqueness rule would break behaviour that is live in the data.
+ *
+ * **D27 — legal state transitions only.** See {@link assertLegalPowerTransition}.
  */
 @Injectable()
 export class PowerService {
@@ -126,6 +145,14 @@ export class PowerService {
     const requestee = await this.users.getProfile(requesteeId);
     if (requester === null || requestee === null) {
       throw new PythonTypeError('UserProfile matching query does not exist.');
+    }
+
+    if (requester.user_ptr_id === requestee.user_ptr_id) {
+      // D26 — refused at *creation*, so no row and no self-addressed push are produced.
+      throw ApiException.deviation(
+        HttpStatus.NOT_ACCEPTABLE,
+        'Requester and requestee must be different users',
+      );
     }
 
     await this.prisma.power.create({
@@ -246,9 +273,13 @@ export class PowerService {
     // D2 (Q17). Not in v1 at all.
     assertOwnership(actor, power.requestee_id);
 
+    // D27 — before the write and before the mail. Mirrors D9 for loans.
+    const nextState = toDjangoSmallInt(submittedState, 'state');
+    assertLegalPowerTransition(power.state, nextState);
+
     await this.prisma.power.update({
       where: { id: powerId },
-      data: { state: toDjangoSmallInt(submittedState, 'state') },
+      data: { state: nextState },
     });
 
     if (submittedState !== POWER_APPROVED) {
@@ -271,6 +302,36 @@ export class PowerService {
       },
       recipients,
     );
+  }
+}
+
+/**
+ * The legal `Power.state` transitions — **deviation D27**.
+ *
+ * ```
+ *   0 PENDING ──► 1 APPROVED
+ *        └──────► 2 REJECTED
+ * ```
+ *
+ * `handle_power_request` writes `power.state` unconditionally and mails on approval
+ * (`services/user.py:193-206`), so **re-approving an already-approved power re-sends the
+ * fund-wide power-of-attorney letter to all 15 members, unbounded** — the same defect class
+ * as **D9** for loans, and guarded in neither v1 nor the Phase 3 port. Anything that is not
+ * `0 → 1` or `0 → 2` is a **409** with no mail and no write. Re-sending a lost letter becomes
+ * an ops task rather than an API state write.
+ *
+ * The status mirrors D9's (operator Q14) exactly; D27 itself needed no operator input.
+ *
+ * @throws ApiException 409 `{'message': 'Invalid state transition'}`, flagged `isDeviation`
+ */
+const LEGAL_POWER_TRANSITIONS: ReadonlyMap<number, readonly number[]> = new Map([
+  [POWER_PENDING, [POWER_APPROVED, POWER_REJECTED]],
+]);
+
+export function assertLegalPowerTransition(current: number, next: number): void {
+  const allowed = LEGAL_POWER_TRANSITIONS.get(current) ?? [];
+  if (!allowed.includes(next)) {
+    throw ApiException.deviation(HttpStatus.CONFLICT, 'Invalid state transition');
   }
 }
 

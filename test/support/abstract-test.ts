@@ -3,7 +3,9 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { DjangoPasswordService } from '../../src/auth/password/django-password.service';
 import { Role } from '../../src/auth/permissions/roles';
+import { Prisma } from '../../src/prisma/prisma-client';
 import { PrismaService } from '../../src/prisma/prisma.service';
+import { todayForAutoNowDateColumn } from '../../src/common/utils/timezone.util';
 import { assertDisposableDatabase } from '../shared-database-guard';
 import { TEST_DATABASE_URL } from '../test-database';
 
@@ -44,6 +46,11 @@ const passwords = new DjangoPasswordService();
  *
  * Phase 3 added `fondo_api_power`, `fondo_api_schedulertask` (the birthday task) and
  * `fondo_api_savingaccount` (read by `UserFinanceSerializer.get_total_savingaccounts`).
+ * Phase 4 adds `fondo_api_loan` and `fondo_api_loandetail`.
+ *
+ * ⚠️ `fondo_api_loan` has a **self-referential** FK (`prev_loan_id`) as well as the FK from
+ * `fondo_api_loandetail`, so the two must be truncated together — `CASCADE` covers it, and
+ * `RESTART IDENTITY` matters here because `bulk_update_loans` selects by id.
  *
  * The e2e database is disposable (`test/test-database.ts`) and never the shared dev one, but
  * suites still start from a clean slate so ordering between files cannot matter.
@@ -58,9 +65,94 @@ export async function resetDatabase(prisma: PrismaService): Promise<void> {
   await prisma.$executeRawUnsafe(
     'TRUNCATE TABLE authtoken_token, fondo_api_notificationsubscriptions, ' +
       'fondo_api_schedulertask, fondo_api_power, fondo_api_savingaccount, ' +
+      'fondo_api_loandetail, fondo_api_loan, ' +
       'fondo_api_userfinance, fondo_api_userpreference, fondo_api_userprofile, auth_user ' +
       'RESTART IDENTITY CASCADE',
   );
+}
+
+/**
+ * `Loan.objects.create(...)` for an e2e fixture, with every application-set default supplied.
+ *
+ * ⚠️ `created_at` is `auto_now_add` and `state` / `payment` have Python-side defaults, so none
+ * of them has a DB default (plan §4 rule 5). `rate` must be given as a **string** — a JS float
+ * would not round-trip through `numeric(5,3)`.
+ */
+export async function seedLoan(
+  prisma: PrismaService,
+  options: {
+    userId: number;
+    value: bigint;
+    timelimit: number;
+    fee: number;
+    rate: string;
+    disbursementDate: string;
+    state?: number;
+    payment?: number;
+    comments?: string | null;
+    createdAt?: Date;
+    prevLoanId?: number | null;
+    refinancedLoan?: bigint | null;
+    disbursementValue?: bigint | null;
+  },
+): Promise<number> {
+  const loan = await prisma.loan.create({
+    data: {
+      value: options.value,
+      timelimit: options.timelimit,
+      disbursement_date: new Date(`${options.disbursementDate}T00:00:00.000Z`),
+      payment: options.payment ?? 0,
+      created_at: options.createdAt ?? new Date(),
+      fee: options.fee,
+      comments: options.comments === undefined ? '' : options.comments,
+      state: options.state ?? 0,
+      rate: new Prisma.Decimal(options.rate),
+      user_id: options.userId,
+      prev_loan_id: options.prevLoanId ?? null,
+      refinanced_loan: options.refinancedLoan ?? null,
+      disbursement_value: options.disbursementValue ?? null,
+    },
+    select: { id: true },
+  });
+  return loan.id;
+}
+
+/**
+ * `LoanDetail.objects.create(...)`.
+ *
+ * v1's `test_bulk_update_loans` creates these with **only** `payday_limit` and `loan`, letting
+ * the model defaults supply the rest (`0` for the four money columns, `date.today` for
+ * `from_date`). Those defaults are Python-side, so they are spelled out here.
+ */
+export async function seedLoanDetail(
+  prisma: PrismaService,
+  options: {
+    loanId: number;
+    paydayLimit: string;
+    fromDate?: string;
+    totalPayment?: bigint;
+    minimumPayment?: bigint;
+    interests?: bigint;
+    capitalBalance?: bigint;
+  },
+): Promise<number> {
+  const detail = await prisma.loanDetail.create({
+    data: {
+      total_payment: options.totalPayment ?? 0n,
+      minimum_payment: options.minimumPayment ?? 0n,
+      payday_limit: new Date(`${options.paydayLimit}T00:00:00.000Z`),
+      interests: options.interests ?? 0n,
+      capital_balance: options.capitalBalance ?? 0n,
+      // `DateField(default=date.today)` — Bogota, never the host zone (condition C28).
+      from_date:
+        options.fromDate === undefined
+          ? todayForAutoNowDateColumn()
+          : new Date(`${options.fromDate}T00:00:00.000Z`),
+      loan_id: options.loanId,
+    },
+    select: { id: true },
+  });
+  return detail.id;
 }
 
 /** `AbstractTest.create_user` — the ADMIN every v1 view test authenticates as. */

@@ -28,17 +28,24 @@ describe('Phase 0 application boot', () => {
     expect(response.body).toEqual({ status: 'ok', database: 'up' });
   });
 
-  it('ships no Phase 4-8 business endpoints yet', async () => {
-    // Loans, activities, saving accounts, files and admin are Phases 4-8.
-    for (const path of [
-      '/api/loan',
-      '/api/activity/year',
-      '/api/saving-account',
-      '/api/file',
-      '/api/admin',
-    ]) {
+  it('ships no Phase 5-8 business endpoints yet', async () => {
+    // Activities, saving accounts, files and admin are Phases 5-8.
+    // ⚠️ `/api/loan` moved to the *guarded* list below when Phase 4 landed. A route that does
+    // not exist 404s at `DjangoUrlResolverMiddleware`; one that exists but is unauthenticated
+    // 401s at the guard. Keeping the two lists apart is what makes this assertion mean
+    // something — an empty list would pass for either reason.
+    for (const path of ['/api/activity/year', '/api/saving-account', '/api/file', '/api/admin']) {
       await request(app.getHttpServer()).get(path).expect(404);
     }
+  });
+
+  it('exposes the Phase 4 loan routes, guarded', async () => {
+    await request(app.getHttpServer()).get('/api/loan').expect(401);
+    await request(app.getHttpServer()).get('/api/loan/1').expect(401);
+    await request(app.getHttpServer()).post('/api/loan/1/refinance').expect(401);
+    // ⚠️ v1's detail pattern has no trailing `/?`, so this is a resolver 404 and never
+    // reaches the guard (finding S7).
+    await request(app.getHttpServer()).get('/api/loan/1/').expect(404);
   });
 
   it('exposes the Phase 3 user routes, guarded', async () => {

@@ -1,3 +1,5 @@
+import { daysInMonth, type PlainDate } from './date.util';
+
 /**
  * The CPython behaviours v1's services rely on when they read a parsed request body,
  * reproduced so that a malformed body fails in v2 exactly where and how it fails in v1.
@@ -153,6 +155,62 @@ export function toDjangoText(value: unknown): string {
     return value ? 'True' : 'False';
   }
   return describeValue(value);
+}
+
+/**
+ * Django's `DateField.get_prep_value` → `to_python(value)` → `django.utils.dateparse.parse_date`.
+ *
+ * ```python
+ * date_re = re.compile(r'(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})$')
+ *
+ * def to_python(self, value):
+ *     ...
+ *     try:
+ *         parsed = parse_date(value)
+ *         if parsed is not None:
+ *             return parsed
+ *     except ValueError:
+ *         raise ValidationError(self.error_messages['invalid_date'], ...)
+ *     raise ValidationError(self.error_messages['invalid'], ...)
+ * ```
+ *
+ * ⚠️ **The month and day are `\d{1,2}`, not `\d{2}`.** v1's own loan fixtures post
+ * `'2017-12-9'` and `'2018-1-1'` (`tests/test_loan_views.py:64,110`), so a `YYYY-MM-DD`-only
+ * regex refuses bodies v1 accepts and writes. It is a `re.match`, so the pattern is anchored
+ * at the start but **not** at the end beyond Python's `$`, which also matches before a single
+ * trailing newline — `'2018-01-01\n'` parses in v1 and therefore here.
+ *
+ * ⚠️ An out-of-range date (`'2018-13-01'`) matches the regex and then raises `ValueError`
+ * inside `datetime.date(...)`, which `to_python` converts to a `ValidationError`. A
+ * **non-string** raises `TypeError` from `re.match` instead, which `to_python` does *not*
+ * catch. Both are uncaught 500s at every v1 call site in Phases 3-8, so both throw here.
+ *
+ * Returns a {@link PlainDate}, never a `Date`: plan rule 5c makes the `@db.Date` /
+ * `timestamptz` choice explicit at the call site (`plainDateToUtcDate` on the way to Prisma).
+ */
+export function toDjangoDate(value: unknown, field: string): PlainDate {
+  if (typeof value !== 'string') {
+    throw new PythonTypeError(
+      `TypeError: expected string or bytes-like object (${field}), got '${describeType(value)}'`,
+    );
+  }
+  // `re.match` + Python's `$`, which also matches immediately before one trailing '\n'.
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})\n?$/.exec(value);
+  if (match === null) {
+    throw new PythonTypeError(
+      `ValidationError: '${value}' value has an invalid date format. It must be in YYYY-MM-DD format (${field})`,
+    );
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) {
+    // `datetime.date(...)` raises ValueError -> ValidationError('invalid_date').
+    throw new PythonTypeError(
+      `ValidationError: '${value}' value has the correct format (YYYY-MM-DD) but it is an invalid date (${field})`,
+    );
+  }
+  return { year, month, day };
 }
 
 /**

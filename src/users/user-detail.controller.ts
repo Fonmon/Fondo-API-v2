@@ -55,20 +55,31 @@ import { resolveDetailUserId, UserService } from './user.service';
  * who may write which section, who may change a `role` — is **D1**, and lives in
  * `UserService.updateUser`; the route-level matrix is unchanged so Phase 1's 280-cell parity
  * criterion still holds.
+ *
+ * Phase 4 adds **D25** to the `GET` cell — see {@link UserDetailController.read}. The
+ * matrix row is still v1's; the ownership rule sits below it, exactly as D1's does.
  */
 @V1View('UserDetailView')
 @Controller('api/user/detail')
 export class UserDetailController {
   constructor(private readonly users: UserService) {}
 
-  /** `UserDetailView.get`. `-1` means the caller (**D14**: unchanged from v1 on this verb). */
+  /**
+   * `UserDetailView.get`. `-1` means the caller (**D14**: unchanged from v1 on this verb).
+   *
+   * **D25** — the record's owner plus roles `[0, 1, 2]`, the **same predicate and the same
+   * roles as D10**'s loan read. v1 gates only on `GET: 3`, so any member could read any other
+   * member's `utilized_quota` and `total_savingaccounts`. The check lives in
+   * {@link UserService.getUser} beside the read it protects; the `-1` substitution happens
+   * first, so "me" always takes the owner branch.
+   */
   @Get(':id')
   @HttpCode(HttpStatus.OK)
   async read(
     @Param('id') rawId: string,
     @CurrentUser() actor: AuthenticatedUser,
   ): Promise<UserFullInfoDto> {
-    return this.users.getUser(resolveDetailUserId(parseDetailId(rawId), actor, 'GET'));
+    return this.users.getUser(actor, resolveDetailUserId(parseDetailId(rawId), actor, 'GET'));
   }
 
   /**

@@ -15,6 +15,7 @@ import { DrfParserInterceptor } from './common/http/drf-parser.interceptor';
 import { DrfRequestParsingMiddleware } from './common/http/drf-request-parsing.middleware';
 import { JsonBigIntSetup } from './common/http/json-bigint';
 import { HealthModule } from './health/health.module';
+import { LoanModule } from './loans/loan.module';
 import { MailModule } from './mail/mail.module';
 import { NotificationModule } from './notifications/notification.module';
 import { PasswordResetModule } from './password-reset/password-reset.module';
@@ -40,7 +41,10 @@ import { UserModule } from './users/user.module';
  * its birthday notification needs (`SchedulerModule`, pulled in through
  * {@link NotificationModule}).
  *
- * Loans, activities, saving accounts, files and the scheduler runner arrive in Phases 4-8.
+ * Phase 4 adds {@link LoanModule} — `GET|POST|PATCH /api/loan`, `GET|PATCH /api/loan/<id>`
+ * and `POST /api/loan/<id>/<paymentProjection|refinance>`.
+ *
+ * Activities, saving accounts, files and the scheduler runner arrive in Phases 5-8.
  */
 @Module({
   imports: [
@@ -50,6 +54,7 @@ import { UserModule } from './users/user.module';
     MailModule,
     NotificationModule,
     UserModule,
+    LoanModule,
     PasswordResetModule,
     // Registered now so Phase 7 only has to add the cron provider. Declares no jobs yet.
     ScheduleModule.forRoot(),

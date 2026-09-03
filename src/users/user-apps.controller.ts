@@ -52,9 +52,13 @@ const FORBIDDEN: number = HttpStatus.FORBIDDEN;
  * branch calls {@link assertRequestDataParsable} itself (review condition **C10**, which names
  * this exact handler).
  *
- * The one thing deliberately **not** swallowed is **D2**'s 403: it is a v2-added
- * authorisation control, and turning a refusal into a 500 would hide it. See
- * {@link PowerService.updatePower}.
+ * The things deliberately **not** swallowed are the three v2-added controls on this route —
+ * **D2**'s 403 (approving a power you were not asked to hold), **D26**'s 406
+ * (`requester === requestee`, refused at creation) and **D27**'s 409 (an illegal power state
+ * transition). Turning a deliberate refusal into v1's blanket 500 would hide it from the
+ * caller and make `manual-tester` read it as an unrelated crash. See
+ * {@link PowerService.createPower}, {@link PowerService.updatePower} and
+ * {@link ApiException.deviation}.
  */
 @V1View('UserAppsView')
 @Controller('api/user/apps')
@@ -84,8 +88,15 @@ export class UserAppsController {
         return await this.powers.handlePowerRequest(actor, request.body);
       }
     } catch (error) {
+      if (error instanceof ApiException && error.isDeviation) {
+        // D26 (406) and D27 (409) — deliberate v2 controls. v1's blanket `except Exception`
+        // would turn them into a 500, hiding the refusal from the caller and from
+        // `manual-tester`. See `ApiException.deviation`.
+        throw error;
+      }
       if (error instanceof DrfException && error.getStatus() === FORBIDDEN) {
         // D2 — the requestee check. A v2 control; it must not be laundered into a 500.
+        // Still a plain `DrfException`, so its body stays byte-identical to a role denial.
         throw error;
       }
       this.logger.error(

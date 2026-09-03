@@ -8,7 +8,7 @@ import {
   userPatchAllowlist,
   type UserSection,
 } from '../auth/policies/user-patch.policy';
-import { SELF_USER_ID } from '../auth/policies/ownership';
+import { assertOwnership, SELF_USER_ID } from '../auth/policies/ownership';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user';
 import { ApiException } from '../common/http/api.exception';
 import { djangoFileLines, parseMoneyColumn, requireColumn } from '../common/http/django-tsv';
@@ -57,6 +57,17 @@ import {
 
 /** The two halves of `UserProfile(User)`, as every read here loads them. */
 const WITH_AUTH_USER = { auth_user: true } as const;
+
+/**
+ * The roles that may read **any** member's detail alongside the record's own owner —
+ * deviation **D25** (operator Q29a).
+ *
+ * ⚠️ **This must stay equal to `LOAN_READ_PRIVILEGED_ROLES`** (`src/loans/loan.service.ts`).
+ * D25 and D10 are the same decision applied to two routes and the plan requires them to land
+ * in the same phase so they cannot drift; `test/loan.e2e-spec.ts` asserts the two arrays are
+ * equal, which is the only mechanical guard against someone tightening one of them alone.
+ */
+export const USER_READ_PRIVILEGED_ROLES: readonly number[] = Object.freeze([0, 1, 2]);
 
 /** Thrown to abort `create_user`'s transaction after a failed activation email. */
 class MailRollback extends Error {}
@@ -278,9 +289,39 @@ export class UserService {
    * ⚠️ **No `is_active` filter** — a soft-deleted member's profile is still readable by id.
    * That is deliberate in v1 (the admin screen needs it) and is ported unchanged.
    *
+   * ## D25 — the record's owner, plus roles `[0, 1, 2]`
+   *
+   * v1 gates this route on `list_permissions['UserDetailView']['GET'] = 3` and nothing else
+   * (`permissions.py:13-17`, `views/user.py:43-50`), so **any member reads any other
+   * member's full `finance` block** — `utilized_quota` (their aggregate outstanding debt)
+   * and `total_savingaccounts` (their CAP deposits). v1 is inconsistent with itself about
+   * this: it hard-filters the *loan list* by role (`views/loan.py:33-41`) and returns no
+   * finance at all on the *user list* (`services/user.py:60-70`), so this by-id route was the
+   * only unscoped path to another member's money position.
+   *
+   * The predicate and the role set are **identical to D10**'s loan read
+   * ({@link LOAN_READ_PRIVILEGED_ROLES}), and the two land in the same phase for exactly that
+   * reason — a later reader must not be able to tighten one and leave the other.
+   *
+   * Operator **Q29a**: no client screen lets a member read another member's detail, so
+   * nothing breaks and D10 is not reopened. `GET /api/user/-1` is unaffected — the caller is
+   * substituted before this runs, so it always takes the owner branch.
+   *
+   * ⚠️ **The check precedes the lookup**, which is the same ordering `updateUser`'s section
+   * gate uses (§7 "C8 resolved", step 3): a MEMBER asking for an id that is not theirs gets
+   * **403 whether or not the row exists**, so the route cannot be used to enumerate members.
+   * v1 answers 404 for a non-existent id and roles `[0,1,2]` still do. Registered in
+   * `docs/phase-4-deviations.md` so it is not read as an unregistered diff.
+   *
+   * The 403 body is DRF's generic `PermissionDenied`, byte-identical to a role denial.
+   *
+   * @throws DrfException 403 when D25 refuses.
    * @throws ApiException 404 with a zero-byte body when either row is missing.
    */
-  async getUser(id: number): Promise<UserFullInfoDto> {
+  async getUser(actor: AuthenticatedUser, id: number): Promise<UserFullInfoDto> {
+    // D25 — same predicate, same roles as D10. See LOAN_READ_PRIVILEGED_ROLES.
+    assertOwnership(actor, id, USER_READ_PRIVILEGED_ROLES);
+
     const finance = await this.readFinance({ user_id: id });
     const preference = await this.readPreference(id);
     if (finance === null || preference === null) {

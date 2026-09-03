@@ -1742,4 +1742,346 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
         .expect(404);
     });
   });
+
+  // ==========================================================================
+  // Phase 4 deviations on the user routes — D25, D26, D27
+  //
+  // These are user-route behaviours, so they live beside the rest of the user suite rather
+  // than in `test/loan.e2e-spec.ts`. They are Phase **4** work: D25 must land with D10 (same
+  // predicate, same roles), and D26/D27 were decided in the same operator round.
+  // ==========================================================================
+
+  describe('D25 — GET /api/user/<id> is the owner plus roles [0,1,2]', () => {
+    it('a MEMBER reads their own detail', async () => {
+      const member = await seedUser(prisma, {
+        email: 'd25-member@mail.com',
+        identification: 31_001n,
+        role: Role.MEMBER,
+      });
+      const memberToken = await obtainToken(app, member.email);
+      await request(app.getHttpServer())
+        .get(`/api/user/${member.id}`)
+        .set(authHeader(memberToken))
+        .expect(200);
+    });
+
+    it('GET /api/user/-1 stays on the owner branch and is unaffected', async () => {
+      const member = await seedUser(prisma, {
+        email: 'd25-self@mail.com',
+        identification: 31_002n,
+        role: Role.MEMBER,
+      });
+      const memberToken = await obtainToken(app, member.email);
+      const response = await request(app.getHttpServer())
+        .get('/api/user/-1')
+        .set(authHeader(memberToken))
+        .expect(200);
+      expect((response.body as { user: { id: number } }).user.id).toBe(member.id);
+    });
+
+    it.each([
+      ['ADMIN', Role.ADMIN],
+      ['PRESIDENT', Role.PRESIDENT],
+      ['TREASURER', Role.TREASURER],
+    ])('%s reads any member’s detail', async (label, role) => {
+      const privileged = await seedUser(prisma, {
+        email: `d25-${label}@mail.com`,
+        identification: BigInt(32_000 + role),
+        role,
+      });
+      const privilegedToken = await obtainToken(app, privileged.email);
+      await request(app.getHttpServer())
+        .get(`/api/user/${members[0].id}`)
+        .set(authHeader(privilegedToken))
+        .expect(200);
+    });
+
+    /**
+     * ⚠️ The exposure this closes, stated as the assertion: v1 gates only on `GET: 3`, so any
+     * member could read `utilized_quota` (another member's outstanding debt) and
+     * `total_savingaccounts` (their CAP deposits). Operator **Q29a**: no client screen does
+     * this, so nothing breaks.
+     */
+    it('a MEMBER is refused another member’s detail — the finance block is the point', async () => {
+      const member = await seedUser(prisma, {
+        email: 'd25-stranger@mail.com',
+        identification: 31_003n,
+        role: Role.MEMBER,
+      });
+      const memberToken = await obtainToken(app, member.email);
+      const response = await request(app.getHttpServer())
+        .get(`/api/user/${members[0].id}`)
+        .set(authHeader(memberToken))
+        .expect(403);
+      // Byte-identical to a role denial, so it is not an id-enumeration oracle.
+      expect(response.body).toEqual({
+        detail: 'You do not have permission to perform this action.',
+      });
+
+      // Positive control: the same caller reading their OWN record is a 200 carrying finance,
+      // so the 403 above is D25 and not a broken route.
+      const own = await request(app.getHttpServer())
+        .get(`/api/user/${member.id}`)
+        .set(authHeader(memberToken))
+        .expect(200);
+      expect(own.body).toHaveProperty('finance.utilized_quota');
+    });
+
+    /**
+     * ⚠️ **Registered divergence**: the check precedes the lookup, so a MEMBER asking for an
+     * id that does not exist gets a **403** where v1 gives a 404. That is deliberate — it is
+     * the same ordering `updateUser`'s section gate uses, and it stops the route being an
+     * id-enumeration oracle. See `docs/phase-4-deviations.md` §D25.
+     */
+    it('for a MEMBER a non-existent id is also 403, not 404 (registered)', async () => {
+      const member = await seedUser(prisma, {
+        email: 'd25-missing@mail.com',
+        identification: 31_004n,
+        role: Role.MEMBER,
+      });
+      const memberToken = await obtainToken(app, member.email);
+      await request(app.getHttpServer())
+        .get(`/api/user/${missingId}`)
+        .set(authHeader(memberToken))
+        .expect(403);
+      // A privileged caller still gets v1's 404 for the same id.
+      await request(app.getHttpServer()).get(`/api/user/${missingId}`).set(asAdmin()).expect(404);
+    });
+
+    it('the unrestricted list and POST /api/user/birthdates are untouched', async () => {
+      const member = await seedUser(prisma, {
+        email: 'd25-list@mail.com',
+        identification: 31_005n,
+        role: Role.MEMBER,
+      });
+      const memberToken = await obtainToken(app, member.email);
+      // The list carries no finance at all, which is why it stays open.
+      const list = await request(app.getHttpServer())
+        .get('/api/user')
+        .set(authHeader(memberToken))
+        .expect(200);
+      expect((list.body as { list: unknown[] }).list.length).toBeGreaterThan(1);
+      expect(JSON.stringify(list.body)).not.toContain('utilized_quota');
+
+      await request(app.getHttpServer())
+        .post('/api/user/birthdates')
+        .set(authHeader(memberToken))
+        .expect(200);
+    });
+  });
+
+  describe('D26 — a power request naming yourself is refused at creation, with 406', () => {
+    it('requester === requestee is 406 and writes no row', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(asAdmin())
+        .send({ type: 'post', meeting_date: '2020-01-01', requestee: admin.id })
+        .expect(406);
+      expect(response.body).toEqual({
+        message: 'Requester and requestee must be different users',
+      });
+      await expect(prisma.power.count()).resolves.toBe(0);
+    });
+
+    it('the 406 survives UserAppsView’s blanket `except Exception` — it is not a 500', async () => {
+      // ⚠️ The whole handler body is wrapped in `except Exception: return 500` in v1. Without
+      // `ApiException.deviation`'s marker this refusal would be laundered into a 500 and be
+      // invisible to both the caller and `manual-tester`.
+      const response = await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(asAdmin())
+        .send({ type: 'post', meeting_date: '2020-01-01', requestee: admin.id })
+        .expect(406);
+      expect(response.status).not.toBe(500);
+    });
+
+    it('no self-addressed push notification is produced, because the refusal precedes the row', async () => {
+      const spy = jest.spyOn(notifications, 'sendNotification');
+      spy.mockClear();
+      await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(asAdmin())
+        .send({ type: 'post', meeting_date: '2020-01-01', requestee: admin.id })
+        .expect(406);
+      expect(spy).not.toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it('a request naming somebody else still works — positive control', async () => {
+      await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(asAdmin())
+        .send({ type: 'post', meeting_date: '2020-01-01', requestee: members[0].id })
+        .expect(200);
+      await expect(prisma.power.count()).resolves.toBe(1);
+    });
+
+    /**
+     * ⚠️ **No `(requester, meeting_date)` uniqueness rule** — operator **Q30a**. A second
+     * request superseding the first is the fund's live idiom (member 14 holds rows 18 and 20
+     * for the 2026-01-31 assembly). A uniqueness rule would break real behaviour, so this
+     * cell exists to stop one being added.
+     */
+    it('Q30a: a SECOND request for the same assembly is allowed — the supersede idiom', async () => {
+      for (const requestee of [members[0].id, members[1].id]) {
+        await request(app.getHttpServer())
+          .post('/api/user/power')
+          .set(asAdmin())
+          .send({ type: 'post', meeting_date: '2026-01-31', requestee })
+          .expect(200);
+      }
+      await expect(prisma.power.count({ where: { requester_id: admin.id } })).resolves.toBe(2);
+    });
+
+    it('Q30a: even two requests naming the SAME requestee for one assembly are allowed', async () => {
+      for (let i = 0; i < 2; i += 1) {
+        await request(app.getHttpServer())
+          .post('/api/user/power')
+          .set(asAdmin())
+          .send({ type: 'post', meeting_date: '2026-01-31', requestee: members[0].id })
+          .expect(200);
+      }
+      await expect(prisma.power.count()).resolves.toBe(2);
+    });
+  });
+
+  describe('D27 — power state transitions 0->1 and 0->2 only', () => {
+    const createPower = async (): Promise<{ id: number; requesteeToken: string }> => {
+      const requestee = members[0];
+      await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(asAdmin())
+        .send({ type: 'post', meeting_date: '2020-01-01', requestee: requestee.id })
+        .expect(200);
+      const power = await prisma.power.findFirstOrThrow({ orderBy: { id: 'desc' } });
+      return { id: power.id, requesteeToken: await obtainToken(app, requestee.email) };
+    };
+
+    it('0 -> 1 is allowed and sends the letter once', async () => {
+      const { id, requesteeToken } = await createPower();
+      sendMail.mockClear();
+      await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(authHeader(requesteeToken))
+        .send({ type: 'patch', id, state: 1 })
+        .expect(200);
+      expect(sendMail).toHaveBeenCalledTimes(1);
+      await expect(
+        prisma.power.findUniqueOrThrow({ where: { id } }).then((p) => p.state),
+      ).resolves.toBe(1);
+    });
+
+    it('0 -> 2 is allowed and sends nothing', async () => {
+      const { id, requesteeToken } = await createPower();
+      sendMail.mockClear();
+      await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(authHeader(requesteeToken))
+        .send({ type: 'patch', id, state: 2 })
+        .expect(200);
+      expect(sendMail).not.toHaveBeenCalled();
+    });
+
+    /**
+     * ⚠️ The v1 defect: `handle_power_request` writes `power.state` unconditionally and mails
+     * on approval, so re-approving an already-approved power **re-sends the fund-wide
+     * power-of-attorney letter to all 15 members, unbounded**. Same class as D9.
+     */
+    it('1 -> 1 is 409 with NO second letter', async () => {
+      const { id, requesteeToken } = await createPower();
+      await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(authHeader(requesteeToken))
+        .send({ type: 'patch', id, state: 1 })
+        .expect(200);
+      sendMail.mockClear();
+
+      const response = await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(authHeader(requesteeToken))
+        .send({ type: 'patch', id, state: 1 })
+        .expect(409);
+      expect(response.body).toEqual({ message: 'Invalid state transition' });
+      expect(sendMail).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [1, 2],
+      [2, 1],
+      [2, 2],
+      [1, 0],
+      [2, 0],
+    ])('%i -> %i is 409 and leaves the row alone', async (from, to) => {
+      const { id, requesteeToken } = await createPower();
+      await prisma.power.update({ where: { id }, data: { state: from } });
+
+      await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(authHeader(requesteeToken))
+        .send({ type: 'patch', id, state: to })
+        .expect(409);
+      await expect(
+        prisma.power.findUniqueOrThrow({ where: { id } }).then((p) => p.state),
+      ).resolves.toBe(from);
+    });
+
+    it('0 -> 0 is 409 too — a no-op write is still not a legal transition', async () => {
+      const { id, requesteeToken } = await createPower();
+      await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(authHeader(requesteeToken))
+        .send({ type: 'patch', id, state: 0 })
+        .expect(409);
+    });
+
+    it('the 409 survives UserAppsView’s blanket `except Exception`', async () => {
+      const { id, requesteeToken } = await createPower();
+      await prisma.power.update({ where: { id }, data: { state: 2 } });
+      const response = await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(authHeader(requesteeToken))
+        .send({ type: 'patch', id, state: 1 })
+        .expect(409);
+      expect(response.status).not.toBe(500);
+    });
+
+    /**
+     * ⚠️ **D2 still runs first, and its 403 body must stay generic.** An ownership failure
+     * must be indistinguishable from a role denial, so it must not leak "that transition would
+     * have been illegal anyway".
+     */
+    it('D2 precedes D27: a non-requestee gets the generic 403, not a 409', async () => {
+      const { id } = await createPower();
+      await prisma.power.update({ where: { id }, data: { state: 1 } });
+      const response = await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(asAdmin())
+        .send({ type: 'patch', id, state: 1 })
+        .expect(403);
+      expect(response.body).toEqual({
+        detail: 'You do not have permission to perform this action.',
+      });
+    });
+
+    /**
+     * ⚠️ **v1's quirk is preserved**: `power.state == 1` compares the *submitted* value, and
+     * Django does not refresh the instance after `save()`. So `{"state": "1"}` writes 1 to the
+     * column (the field coerces) and then compares `'1' == 1`, which is `False` in Python — the
+     * row is approved and **no email is sent**. D27 guards on the *coerced* value, so the
+     * transition is still legal; only the mail branch keeps the quirk.
+     */
+    it('a stringified state approves the row but sends no mail (v1 quirk, kept)', async () => {
+      const { id, requesteeToken } = await createPower();
+      sendMail.mockClear();
+      await request(app.getHttpServer())
+        .post('/api/user/power')
+        .set(authHeader(requesteeToken))
+        .send({ type: 'patch', id, state: '1' })
+        .expect(200);
+      await expect(
+        prisma.power.findUniqueOrThrow({ where: { id } }).then((p) => p.state),
+      ).resolves.toBe(1);
+      expect(sendMail).not.toHaveBeenCalled();
+    });
+  });
 });

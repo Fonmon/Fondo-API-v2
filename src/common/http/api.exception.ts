@@ -23,6 +23,8 @@ export class ApiException extends HttpException {
     status: number,
     /** `undefined` renders an empty body, matching DRF's `Response(status=...)`. */
     readonly body: MessageBody | undefined,
+    /** See {@link ApiException.deviation}. */
+    readonly isDeviation: boolean = false,
   ) {
     super(body ?? '', status);
   }
@@ -39,5 +41,38 @@ export class ApiException extends HttpException {
    */
   static empty(status: number): ApiException {
     return new ApiException(status, undefined);
+  }
+
+  /**
+   * A refusal raised by a **deliberate v2 control** that v1 does not have — i.e. by a row in
+   * `MIGRATION_PLAN.md` §5. Renders exactly like {@link withMessage}; the flag exists only so
+   * a caller can tell the two apart.
+   *
+   * ## Why the flag exists
+   *
+   * `UserAppsView.post` wraps its whole body in `except Exception: return Response(status=500)`
+   * (`views/user.py:57-68`), and v2 reproduces that faithfully. But the deviations added on
+   * that route are *refusals*, not failures:
+   *
+   * | # | refusal |
+   * |---|---|
+   * | **D26** | a power request naming yourself → **406** at creation |
+   * | **D27** | an illegal power state transition → **409**, no mail |
+   *
+   * Laundering either into v1's blanket 500 would hide the control from the caller *and* from
+   * `manual-tester`, who would read it as an unrelated crash rather than as the registered
+   * behaviour. So `UserAppsController` re-raises anything carrying this flag and swallows the
+   * rest.
+   *
+   * ⚠️ **Not** for reproductions of v1's own error paths: those use {@link withMessage} and
+   * *should* be swallowed where v1 swallows them. **D9**'s 409 does not need the flag either —
+   * `LoanDetailView.patch` has no bare `except`, so nothing there swallows it.
+   *
+   * ⚠️ **D2** predates this and still throws `DrfException.permissionDenied()`, deliberately:
+   * its body must be byte-identical to a role denial so an ownership failure is not a probe
+   * for which ids exist. `UserAppsController` therefore checks for both.
+   */
+  static deviation(status: number, message: string): ApiException {
+    return new ApiException(status, { message }, true);
   }
 }

@@ -8,6 +8,7 @@ import {
   PythonTypeError,
   pythonNotEqual,
   toDjangoBool,
+  toDjangoDate,
   toDjangoInt,
   toDjangoSmallInt,
   toDjangoText,
@@ -147,6 +148,67 @@ describe('python-obj', () => {
     it('is True for null and for objects', () => {
       expect(pythonNotEqual(1n, null)).toBe(true);
       expect(pythonNotEqual(1n, {})).toBe(true);
+    });
+  });
+
+  describe('toDjangoDate — `DateField.to_python` / `dateparse.parse_date`', () => {
+    it('accepts a zero-padded date', () => {
+      expect(toDjangoDate('2018-01-01', 'd')).toEqual({ year: 2018, month: 1, day: 1 });
+    });
+
+    /**
+     * ⚠️ The regex is `\d{1,2}` for month and day, and v1's own loan fixtures rely on it:
+     * `test_loan_views.py:64` posts `'2017-12-9'` and `:110` posts `'2018-1-1'`. A
+     * `YYYY-MM-DD`-only implementation refuses bodies v1 accepts and writes.
+     */
+    it('accepts an UNPADDED month and day, as Django’s date_re does', () => {
+      expect(toDjangoDate('2017-12-9', 'd')).toEqual({ year: 2017, month: 12, day: 9 });
+      expect(toDjangoDate('2018-1-1', 'd')).toEqual({ year: 2018, month: 1, day: 1 });
+      expect(toDjangoDate('2018-1-15', 'd')).toEqual({ year: 2018, month: 1, day: 15 });
+    });
+
+    it('accepts one trailing newline, because Python’s `$` matches before it', () => {
+      expect(toDjangoDate('2018-01-01\n', 'd')).toEqual({ year: 2018, month: 1, day: 1 });
+    });
+
+    it('rejects two trailing newlines — `$` allows exactly one', () => {
+      expect(() => toDjangoDate('2018-01-01\n\n', 'd')).toThrow(/invalid date format/);
+    });
+
+    it.each([
+      '',
+      '18-01-01',
+      '2018/01/01',
+      '01-01-2018',
+      '2018-01-01T00:00:00',
+      ' 2018-01-01',
+      'abc',
+    ])('rejects %p with a ValidationError', (value) => {
+      expect(() => toDjangoDate(value, 'd')).toThrow(/invalid date format/);
+    });
+
+    it('rejects an out-of-range date after the regex matches — Django’s invalid_date branch', () => {
+      expect(() => toDjangoDate('2018-13-01', 'd')).toThrow(/invalid date/);
+      expect(() => toDjangoDate('2018-02-30', 'd')).toThrow(/invalid date/);
+      expect(() => toDjangoDate('2019-02-29', 'd')).toThrow(/invalid date/);
+      expect(() => toDjangoDate('2018-00-01', 'd')).toThrow(/invalid date/);
+      expect(() => toDjangoDate('2018-01-00', 'd')).toThrow(/invalid date/);
+    });
+
+    it('accepts 29 February in a leap year, including the century rule', () => {
+      expect(toDjangoDate('2020-02-29', 'd')).toEqual({ year: 2020, month: 2, day: 29 });
+      expect(toDjangoDate('2000-02-29', 'd')).toEqual({ year: 2000, month: 2, day: 29 });
+      expect(() => toDjangoDate('2100-02-29', 'd')).toThrow(/invalid date/);
+    });
+
+    it('a non-string is a TypeError from `re.match`, which to_python does NOT catch', () => {
+      expect(() => toDjangoDate(20180101, 'd')).toThrow(/TypeError/);
+      expect(() => toDjangoDate(null, 'd')).toThrow(/TypeError/);
+      expect(() => toDjangoDate({ year: 2018 }, 'd')).toThrow(/TypeError/);
+    });
+
+    it('names the field in the message, so a 500 log says which column failed', () => {
+      expect(() => toDjangoDate('nope', 'disbursement_date')).toThrow(/disbursement_date/);
     });
   });
 
