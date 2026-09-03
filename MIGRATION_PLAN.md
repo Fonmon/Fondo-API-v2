@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-09-03 | v2.5 | **Phase 3 parity round 2: F1–F5 all fixed, nothing regressed** — 280/280 F3 cells, both metadata documents byte-identical, F5's four discriminating cells correct. Still **FAIL** on two *pre-existing* findings: **F6** (v1 returns **406 before authentication and before the handler** for an unacceptable `Accept`; v2 ignores `Accept` and executes — on a write endpoint that is v1 refusing and v2 **mutating**) and **F8** (malformed multipart crosses the 400/500 line both ways). The green-test sweep found **five** false-green instances, three in the tester's own harness. §7 dump rule amended: **persistent storage, and restore from the dump**. |
 | 2026-09-02 | v2.4 | **Phase 3 parity failures F1–F5 fixed; back to `manual-tester`.** All five were at the HTTP edge, as filed; nothing in the users, finance, powers, scheduler-write or mail core was touched. **F3** (medium, security) — the four password-reset routes are `django.contrib.auth` views with **no DRF layer**, so nothing authenticates them; `@Public()` was the wrong analogue (it models `permission_classes = []`, which leaves DRF's authenticators running). New `@DjangoView()`, honoured by both guards **only when the resolved URL-table entry agrees** (`view !== null && drf === null`), so every disagreement leaves authentication running. **F5** (medium, security) — Django reads `csrfmiddlewaretoken` from the body for `POST` alone; v2 read it on every unsafe method, which let a body-borne token run `PasswordResetView.post` on a `PUT`. ⚠️ **An existing green e2e cell was asserting that bug**, not v1. **F1** — the 500-header strip now asks *who built the response* (`convert_exception_to_response` vs `finalize_response`) rather than what the status is; `UserAppsView`'s caught 500 keeps `Allow` and `Vary: Accept`. **P3-D6**'s claim corrected and its scope narrowed to the uncaught 500. **F2** — `HttpResponseRedirect` carries Django's default `Content-Type`; not D13's shape. **F4** — DRF's `OPTIONS` metadata document **implemented**, not registered (two constants, 164 and 172 bytes, captured from live v1): **P1-D2 withdrawn**, and its real residual — v1 renders *every* DRF response as browsable-API HTML under `Accept: text/html` — registered as **P3-D8**. Rule 12 clause 3 rewritten. Gate: lint + typecheck clean, **1503 unit / 49 suites**, **647 e2e + 1 skipped / 13 suites**; every fix re-verified against the live v1 (`:8451`, production settings). `fondo_api_schedulertask` **626, unchanged**; `pg_dump` of it and of the seven other in-scope tables taken before the first probe, per the new §7 rule. |
 | 2026-09-02 | v2.3 | **Phase 3 parity: FAIL** — five unregistered diffs, all at the HTTP edge; the substance is exact (72-cell D1 matrix, byte-identical reset pages, `SchedulerTask` payload, SES/SQS payloads, four-table rollback). **F3 and F5 are security-relevant.** ⚠️ **Fixture incident: six historical `fondo_api_schedulertask` rows for owner 13 were deleted by a probe and are unrecoverable** — the table is 626, not 632. New §7 rule: **snapshot every table a phase writes, before the first write cell.** |
 | 2026-09-02 | v2.2 | ✅ **PHASE 3 IMPLEMENTED** (`feat/phase-3-users`) — users, finance, powers of attorney, password reset, plus **Phase 7a** (the `SchedulerTask` write half, pulled forward because Phase 3 and Phase 4 both write rows). **C22–C25 closed.** Ten §5 deviations implemented (**D1, D2, D5, D11, D14–D17, D19, D20**); seven new ones registered (**P3-D1–P3-D7**) in `docs/phase-3-deviations.md`. **The session question is decided: keep the redirect hop, drop the store** — the token rides an `HttpOnly` cookie and is re-validated by `check_token`, exactly as Django re-validates its session copy (P3-D3). ⚠️ **Five behaviours corrected against the live v1, one a real defect: `@parser_classes` on an `APIView` *method* is a no-op**, so `PATCH /api/user` with JSON is a 500 and not a 415 — and the same decorator is misused in `LoanView.patch` and `FileView.post`, so Phases 4 and 8 inherit the correction. Gate: lint + typecheck clean, **1476 unit / 48 suites**, **617 e2e + 1 skipped / 13 suites**. `fondodev` unchanged (94 / 1468 / 1). |
@@ -1044,10 +1045,36 @@ what Phase 7 exists to test**. Recommend **re-snapshotting `fondodev` from produ
 7**, and re-verifying the guards afterwards.
 
 **Rule added — this is the process failure, not the probe:** every parity round must
-`pg_dump` **each table the phase writes** before its first write cell. Phase 3 guarded
+`pg_dump` **each table the phase writes** before its first write cell.
+⚠️ **Amended after round 2:** the dump must live on **persistent storage** — round 2's went to
+`/tmp`, which is **tmpfs** (verified), and the host reboot destroyed it. Use
+`~/.fondo-parity-dumps/`. And **restore from the dump, never from statements the probe
+reconstructs** — round 1's six rows were lost precisely because reconstruction was the only
+option. Round 2 had two incidents, including a probe that **soft-deleted the only ADMIN** (after
+which ~150 later cells "agreed" at 401/401); both were recovered in one command **because the
+dump existed**. Phase 3 guarded
 `notificationsubscriptions` (the Phase 2 fixture) and not `schedulertask`, because the brief named
 the tables of the *previous* phase. Phase 4 writes `loan`, `loandetail` and `schedulertask`; Phase
 5 writes `activity*`; Phase 6 writes `savingaccount`.
+
+### False-green findings — a standing hazard, not a one-off
+
+Six instances found so far, in four different mechanisms. A test that passes for the wrong reason
+is worse than a missing one, because it is counted as coverage.
+
+| # | Instance | Why it passed |
+|---|---|---|
+| 1 | supertest strips fragments | the transport normalised the thing under test |
+| 2 | `pg_dump` md5 as a fixture guard | `synchronize_seqscans` rotates rows; the value was never reproducible |
+| 3 | e2e cell "PUT behaves exactly like POST" | sent the CSRF token in the **body** — asserting the very defect F5 describes |
+| 4 | D1 matrix printing "72/72, 0 mismatches" | **every cell was a 401** (`is_active::text` is `true`, not `t`). A matrix asking only "did both sides agree" is satisfied by any *uniform failure*. |
+| 5 | URL sweep after `DELETE /api/user/1` | the probe soft-deleted the ADMIN, so ~150 later cells agreed at 401/401 |
+| 6 | round-1 SES check | compared only `Message.Body.Html.Data`, never the envelope — so it passed on a payload that is deliberately different (D5) |
+
+**Countermeasures now required of every parity harness:** assert **positive controls** (prove the
+matrix can produce a 200, not only agreement), print the **status distribution** rather than a
+pass count, use `curl --path-as-is` (curl normalises dot-segments like supertest), and compare
+**whole payloads**, not one field.
 
 ### Open review conditions
 
@@ -1109,7 +1136,7 @@ set, as defence in depth rather than as the primary control.
 | 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab` + C1–C4) | ✅ | n/a | ✅ **APPROVED** | n/a |
 | 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
 | 2 Mail + notifications | ✅ **CLOSED — APPROVED** (`fe261fc`) | ✅ | ✅ PASS r3 | ✅ **Approved w/ conditions** | ⬜ |
-| 3 Users + finance | 🔴 **parity FAIL → back to dev** | ✅ | ❌ **FAIL** (F1–F5) | ⬜ | ⬜ |
+| 3 Users + finance | 🔴 **FAIL r2** (F6, F8 pre-existing) → dev | ✅ | ❌ F1–F5 fixed; F6/F8 open | ⬜ | ⬜ |
 | 4 Loans | ⬜ Blocked on P3 | — | — | — | — |
 | 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ |
 | 7b Scheduler *runner* | ⬜ Blocked on P4 | — | — | — | — |

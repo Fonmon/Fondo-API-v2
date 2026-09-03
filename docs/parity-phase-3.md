@@ -747,3 +747,734 @@ metadata path, and the CSRF token source).
 | SES / SQS | ✅ 100 % of sends captured locally; **no traffic left the host** (`endpoint_url` shim on v1, `AWS_ENDPOINT_URL_*` on v2) |
 | v1 repo | ✅ untouched — bind-mounted read-only; the boto3 shim lives at `/probe/sitecustomize.py` inside the throwaway container |
 | test rows | ✅ 7 users (ids 23–29), their profiles/finance/preferences/tokens, 2 power rows and 16 subscriptions created and **all deleted**; `django_session` restored to 20 |
+
+---
+---
+
+# Round 2 — re-test of the F1–F5 fixes
+
+**Tester:** `manual-tester` (black-box). **Date:** 2026-09-02 (round 2, same day).
+**v1 (oracle, frozen):** `~/Projects/Fondo-API` @ `5bef585`, container `fondo-v1-p3`
+(gunicorn `0.0.0.0:8444`, reached on the loopback proxy `127.0.0.1:8451`),
+`api.settings.production`, database `fondodev`.
+**v2 (under test):** `~/Projects/Fondo-API-v2` @ `1344b48` (`feat/phase-3-users`), working tree
+**clean**, `dist/` **reproduced** (`npm run build` re-emitted byte-identical output —
+`md5(md5sum of every dist *.js/*.html/*.json) = b7d2f372…` before and after), restarted as
+`node dist/main.js` on `127.0.0.1:8450` with `ENVIRONMENT=production` / `NODE_ENV=production`.
+**Database:** the shared `fondodev`.
+
+## Verdict: **FAIL** — but every one of F1–F5 is **fixed** and nothing regressed.
+The failure is two *pre-existing, unregistered* differences found this round: **F6** (v1's
+`406` content negotiation, which P3-D8 does not cover) and **F8** (malformed `multipart/form-data`
+on the other side of the 400/500 line). Both are candidates for **registration** rather than code
+changes. Full reasoning in R2.14.
+
+### R2 harness note — the ports moved, the oracle did not
+
+The host restarted overnight and took `/tmp` (and therefore the round-1 harness, the capture
+servers and the loopback proxies) with it. Rebuilt from scratch:
+
+* **v1** is the same container `fondo-v1-p3`, same image, same read-only bind-mount of
+  `~/Projects/Fondo-API` @ `5bef585`, `api.settings.production`, `fondodev`. Its own entrypoint
+  gunicorn listens on `:8444` **without** the boto3 capture shim; the oracle used for every cell
+  below is a second gunicorn `docker exec`-ed into the same container with
+  `PYTHONPATH=/probe PARITY_AWS_ENDPOINT=http://127.0.0.1:4599`, bound to `127.0.0.1:8451` —
+  which is what `:8451` was in round 1. Confirmed serving `fondodev` (the fixture admin token
+  authenticates; `fondo_api_test` has 0 rows in `auth_user`).
+* `/creds/gcp.json` had to be regenerated (it lived in the wiped scratchpad). `fondo_api/views/file.py`
+  builds a `storage.Client()` at **import** time, so Django will not boot without a loadable
+  credentials file. It is an `authorized_user`-shaped throwaway with placeholder values, never used:
+  no Phase 3 route touches GCS. **The v1 repo is still untouched** — the mount is `ro`.
+* **v2** `1344b48`, tree clean apart from this report. `npm run build` re-emitted `dist/`
+  **byte-identical** (`b7d2f3721960c404f6ac221e4de1ab4c` before and after), so the running binary
+  is the reviewed source.
+* SES/SQS capture servers back on `:4599` (v1) / `:4598` (v2); redis 7 + `celery -A api worker`
+  back for v1's `send_notification.delay`.
+
+**⚠️ Data-safety note.** The round-2 `pg_dump` taken under §7 *was itself in `/tmp` and was lost
+in the restart.* Retaken before the first write cell of this round, to a location that survives a
+reboot: `~/.fondo-parity-dumps/r2/` (per-table `--column-inserts` + a full dump). Both are
+byte-for-byte the same size as the pre-restart pair, and every `snap.sh` guard hash below equals
+round 1's closing value, so nothing changed while the box was down. **§7 should say the dump must
+not live on a tmpfs** — that is a second way to lose the fixture, and it nearly cost this round
+its baseline.
+
+Baseline = round 1's closing state, re-verified: `schedulertask` **626** / `c3bf5409…`,
+`notificationsubscriptions` **94 / 1468 / xmin-distinct 1** / `7a6afbcc…`, `auth_user` **15** /
+`eb2217b4…`, `power` **20** / `002cbae3…`, `loan` **425**, `django_session` **20**,
+schema/constraint/index hashes `613a748c…` / `6dc19981…` / `fbacaf14…`.
+
+---
+
+## R2.1 — F1: the caught 500 keeps `Allow` and `Vary: Accept` — **FIXED**
+
+The fix moved the strip from "is it a 500" to "did Django throw this response away", which is the
+right axis. Probed **both** directions, 22 cells, comparing the full
+`HTTP/`+`Allow`+`Vary`+`Content-Type`+`Content-Length`+`X-Frame-Options` set.
+
+| Direction | Cases | v1 | v2 | Verdict |
+|---|---|---|---|---|
+| **Caught** — `UserAppsView.post`'s `except: return Response(status=500)` | 9 bodies: `page:0`, missing `page`, missing `type`, `patch` of a nonexistent id, `obj:"nonsense"`, `type:"nonsense"`, `{}`, `page:-1`, `page:"x"` | `500` + `Allow: POST, OPTIONS` + `Vary: Accept, Origin` (7 of them; 2 are 200s) | **identical, all 9** | **PASS** |
+| **Uncaught** — `convert_exception_to_response` builds a fresh `HttpResponse` | `GET /api/user?page=abc`, `?page=`, `?page=1.5`, `POST /api/notification/subscribe` (no body), `PATCH /api/user` (no CT / JSON CT), `POST /api/user` bad body | `500`, **no** `Allow`, `Vary: Origin` only, `X-Frame-Options: SAMEORIGIN` | **same status and same header set**, all 7 | **PASS** |
+| Controls that must keep both headers | 401 (no creds), 401 (bad token), 403, 400, 200, 400 on `/api/notification/subscribe` | — | identical, 6/6 | **PASS** |
+
+Residual on the uncaught rows is the **body only** — v1 sends Django's 27-byte
+`<h1>Server Error (500)</h1>` with `Content-Type: text/html`, v2 sends zero bytes and no
+`Content-Type`. That is **D13**, registered, unchanged from round 1, and it is now the *sole*
+difference on that path.
+
+**P3-D6's narrowed scope is accurate**: `Allow`/`Vary: Accept` survive on the DRF-returned 500 and
+are absent on the uncaught one, on both sides, on every input I could find.
+
+---
+
+## R2.2 — F5: the CSRF token comes from the body on `POST` only — **FIXED**
+
+44 cells. Every one matches, **including the four that discriminate between a correct fix and a
+fix that merely reorders the two sources**. This is the part round 1 got wrong, so it is worth
+being explicit about which cell rules out which wrong implementation.
+
+| Cell | Request | v1 | v2 | Rules out |
+|---|---|---|---|---|
+| `POST-badbody-goodhdr` | `POST`, `csrfmiddlewaretoken=zzz…` (32×`z`) in the form body **and** a valid `X-CSRFToken` | **403**, 1019-byte page | **403**, byte-identical page | *"read the header first, fall back to the body"* — that implementation returns **302** here. `django/middleware/csrf.py:299` only falls back when the body token is the **empty string**, not when it is wrong. |
+| `POST-emptybody-goodhdr` | `POST`, `csrfmiddlewaretoken=` (empty) + valid `X-CSRFToken` | **302** | **302** | *"body wins unconditionally on POST"* — that returns 403. The `if request_csrf_token == "":` fallback must fire. |
+| `PUT-badbody-goodhdr` | `PUT`, bad body token + valid `X-CSRFToken` | **302** (the view runs) | **302** | *"the body is read on every unsafe method"* — round 1's actual defect. A bad body token must be **invisible** on `PUT`. |
+| `POST-goodbody-badhdr` | `POST`, valid body token + garbage `X-CSRFToken` | **302** | **302** | confirms the body genuinely wins on `POST`. |
+
+⚠️ Note `PUT-badbody-goodhdr` and `POST-badbody-goodhdr` are the same bytes on the wire except for
+the method, and they disagree — **302 vs 403**. That pair is the whole of F5 in two requests, and
+either one alone proves nothing. Round 1's e2e cell had only the always-agreeing half.
+
+Everything else in the matrix, all matching:
+
+| Group | Cells | Result |
+|---|---|---|
+| method × body-token-only | `POST` 302; `PUT`/`PATCH`/`DELETE` **403** | identical, 4/4 |
+| method × `X-CSRFToken`-only | `POST` 302, `PUT` 302, `PATCH` 405, `DELETE` 405 | identical, 4/4 |
+| token in a container `request.POST` does not populate — JSON body, query string, `text/plain` body | **403** each | identical, 3/3 |
+| `multipart/form-data` body token | **302** — `request.POST` parses multipart too | identical |
+| `_sanitize_token` shapes — no cookie (+hdr / +body), cookie but no token, empty cookie, non-alphanumeric token, 3-char token, a *different* valid 64-char token | 403 each, and the **two distinct failure pages** are served in the right cases | identical, 9/9 |
+| cookie value used as the form token; cookie value used as the header | **302** both (`_compare_salted_tokens` unsalts) | identical, 2/2 |
+| safe methods (`GET`, `OPTIONS`, `TRACE`) exempt | 200 / 200 / 405 | identical (`GET` body identical after masking the random `csrfmiddlewaretoken`) |
+| the whole matrix repeated on `/reset/<uid>/<token>/` | 9 cells | identical, 9/9 |
+
+**Both CSRF failure pages are byte-identical to v1**, and v2 picks the right one:
+`REASON_BAD_TOKEN` → **1019 bytes**, `REASON_NO_CSRF_COOKIE` → **1386 bytes** (the longer page
+carries the extra "this site requires a CSRF cookie when submitting forms" paragraph). v2 is not
+serving one page for both reasons.
+
+## R2.3 — F2: the 302s carry `Content-Type` and `Content-Length: 0` — **FIXED**
+
+Six different routes into a 302 (`POST` with a body token, with a header token, `PUT` with a header
+token, multipart, cookie-as-token, good-body-bad-header). All six, both sides:
+
+```
+HTTP/1.1 302 Found
+Content-Length: 0
+Content-Type: text/html; charset=utf-8
+Location: /password_reset/done/
+Vary: Origin
+X-Frame-Options: SAMEORIGIN
+```
+
+Byte-identical header sets. The `APPEND_SLASH` **301** still carries it too (re-checked in R2.7).
+
+---
+
+## R2.4 — F3: the password-reset routes are plain Django views — **FIXED**, and the exemption is fail-closed
+
+`@DjangoView()` replaces the wrong analogue (`@Public()` = `permission_classes = []`, which leaves
+DRF's authenticators running). 409 cells across four groups.
+
+### A. The exemption works — 280/280
+
+5 URLs (`/password_reset/`, `/password_reset/done/`, `/reset/done/`,
+`/reset/<uid>/<token>/`, `/reset/<uid>/set-password/`) × 7 methods
+(`GET OPTIONS PUT POST DELETE PATCH TRACE`) × 8 `Authorization` shapes (absent, `Token deadbeef`,
+a *valid* admin token, an *inactive* user's token, bare `Token`, `Token a b`, `Bearer <valid>`,
+lower-case `authorization: token <valid>`).
+
+**Every URL/method pair returns one single result across all 8 header shapes, on both sides.**
+The header is now completely invisible on these routes, which is the point:
+
+| Method | `/password_reset/` | `/password_reset/done/` | `/reset/done/` | `/reset/<uid>/<token>/` | `/reset/<uid>/set-password/` |
+|---|---|---|---|---|---|
+| `GET` | 200 / 1324 | 200 / 966 | 200 / 779 | 200 / 1001 | 200 / 1001 |
+| `OPTIONS` | 200 / 0 | 200 / 0 | 200 / 0 | 200 / 1001 | 200 / 1001 |
+| `POST`/`PUT`/`PATCH`/`DELETE` | 403 / 1386 | 403 / 1386 | 403 / 1386 | 403 / 1386 | 403 / 1386 |
+| `TRACE` | 405 / 0 | 405 / 0 | 405 / 0 | 200 / 1001 | 200 / 1001 |
+
+(The 403/1386 is `REASON_NO_CSRF_COOKIE` — these cells send no cookie. The confirm view's odd
+`OPTIONS`/`TRACE` 200s are v1's, reproduced.) Round 1's F3 was **401** in the `deadbeef` and
+inactive-token columns; all of those are gone.
+
+### B. FAIL-CLOSED 1 — the exemption does not leak to DRF routes — 84/84
+
+7 DRF routes (`/api/user`, `/api/user/1`, `/api/user/power`, `/api/user/birthdates`,
+`/api/user/activate/13`, `/api-token-auth`, `/api/notification/subscribe`) × `GET POST OPTIONS` ×
+4 bad-credential shapes. **Every cell is 401 on both sides**, with the four DRF bodies matching
+byte-count exactly — 27 (`Invalid token.`), 38 (`User inactive or deleted.`), 59
+(`…No credentials provided.`), 74 (`…should not contain spaces.`).
+
+This covers the two `@Public()` DRF views specifically: `POST /api/user/activate/<id>` and
+`POST /api-token-auth` still **401 on a malformed token**, which is the behaviour `@Public()` is
+supposed to keep and `@DjangoView()` is supposed to drop. The two decorators are observably
+distinct.
+
+### C. FAIL-CLOSED 2 — no look-alike target reaches the exempted controller — 28/28
+
+18 path shapes that resemble a reset route but are not the URL-table entry: case variants
+(`/PASSWORD_RESET/`, `/Password_Reset/`, `/RESET/MTM/set-password/`), doubled and empty segments
+(`//password_reset/`, `/password_reset//`, `/reset//<token>/`), extra segments
+(`/password_reset/x/`, `/reset/done/x/`, `/reset/MTM/`), missing slashes, dot segments and
+encodings (`/api/../password_reset/`, `/./password_reset/`, `/password_reset/./`,
+`/password_reset/%2e/`, `/password_reset/%2E%2E/done/`), `%00`, and a `;`-param.
+
+**Status agrees on every one**, with and without `Authorization: Token deadbeef`: 404 where v1
+404s, 301 where v1 `APPEND_SLASH`-redirects (`/password_reset`, `/password_reset/done`,
+`/reset/done`, `/reset/MTM/aaaaa-bbbbbbbb`), 200 where v1 genuinely matches
+(`/reset/MTM/SET-PASSWORD/` — `SET-PASSWORD` satisfies the token regex, so it is the invalid-link
+page; `/password_reset/?x=1`). A bad token never turns any of them into a 401. Body-size deltas on
+the 404s are **D13**.
+
+⚠️ **My round-1-style probe was wrong here and I fixed it mid-round.** The dot-segment cells were
+first run without `--path-as-is`, so **curl** collapsed `/api/../password_reset/` to
+`/password_reset/` before it left the client and both sides returned the 200 reset page — a cell
+that agrees because of the HTTP client, not the server. With `--path-as-is` the raw target reaches
+both servers and both 404. Same class of defect as the two the developer found; see R2.11.
+
+### D. FAIL-CLOSED 3 — `view: null` still authenticates — confirmed
+
+`/health` is the v2-only route (**P0-D2**) whose URL-table entry has `view: null`. It carries
+`@Public()`, so if `isPlainDjangoView` were satisfied by the decorator alone the guard would step
+aside. It does not:
+
+| Request | v2 |
+|---|---|
+| `GET /health` | **200** / 31 |
+| `GET /health` + `Authorization: Token deadbeef` | **401** / 27 |
+| `GET /health` + an inactive user's token | **401** / 38 |
+| `POST` / `OPTIONS /health` | 404 / 405-shaped |
+
+The 401s prove `TokenAuthGuard` still ran. (v1 404s `/health` — the whole route is the registered
+deviation, not these codes.)
+
+### What I could **not** probe black-box
+
+The remaining fail-closed direction — **`@DjangoView()` applied to a controller whose URL entry is
+a DRF view** — is not reachable from outside: it needs a source change to put the decorator
+somewhere it does not belong, and I do not modify code. What I can say is that the observable
+consequence is absent (group B: no DRF route behaves as exempt) and that the guard's condition is
+`route !== undefined && route.view !== null && route.drf === null`, i.e. it reads the same URL
+table `RolesGuard` already trusts for C20. The unit coverage for the unreachable branch is
+`src/auth/decorators/…` / `token-auth.guard.spec.ts`; verifying it is `nestjs-reviewer`'s call,
+not mine.
+
+---
+
+## R2.5 — F4: DRF's `OPTIONS` metadata document — **FIXED**
+
+| Route | v1 | v2 |
+|---|---|---|
+| `OPTIONS /api/user/activate/13` | `200`, `Allow: POST, OPTIONS`, `Vary: Accept, Origin`, `Content-Type: application/json`, **172 bytes** | **byte-identical** |
+| `OPTIONS /api-token-auth` | `200`, `Allow: POST, OPTIONS`, **`Vary: Origin`** (single renderer — no `Accept`), **164 bytes** | **byte-identical** |
+
+Both documents `cmp`-clean:
+
+```
+{"name":"User Activate","description":"","renders":["application/json","text/html"],"parses":["application/json","application/x-www-form-urlencoded","multipart/form-data"]}
+{"name":"Obtain Auth Token","description":"","renders":["application/json"],"parses":["application/x-www-form-urlencoded","multipart/form-data","application/json"]}
+```
+
+Note the two `Vary` strings differ *correctly* — `Accept, Origin` on the view that has the
+browsable renderer, `Origin` alone on the JSON-only one. That asymmetry is easy to get wrong and
+v2 has it right.
+
+Controls, all matching: `OPTIONS` on a guarded view is `403` for an allowed caller and `401`
+anonymous (v1's deny-on-lookup-miss, unchanged); `OPTIONS` on the two metadata views with a *bad*
+token is `401` (the `@Public()` authenticator still runs); with a *valid* admin token it is still
+`200` + the document. **P1-D2's withdrawal is justified** — the document is served, not deviated.
+
+---
+
+## R2.6 — 🔴 **NEW: F6** — P3-D8 understates its own width: v1's content negotiation is a **406 before the handler**, not a body difference
+
+The brief asked me to probe how wide P3-D8 really is. It is wider than the registration, and in a
+different *kind* of way. P3-D8 says v1 renders HTML where v2 renders JSON — "**D13's species**",
+a body difference. Measured across 8 `Accept` values × 9 request shapes (72 cells):
+
+| `Accept` | v1 | v2 | Covered by P3-D8 as written? |
+|---|---|---|---|
+| `*/*`, `application/json` | JSON | JSON | n/a — **identical, 18/18** |
+| `application/json;q=0.1,text/html;q=0.9` | **JSON** (DRF sorts by q, JSON wins on the ordering DRF uses) | JSON | n/a — **identical, 9/9** |
+| a real browser's `text/html,…,*/*;q=0.8` | HTML on browsable views; **JSON** on `/api-token-auth` via `*/*;q=0.8` | JSON | yes, body only |
+| `text/html` | HTML: `GET /api/user` 14 173 B, `GET /api/user/1` 9 002, `POST /api/user/birthdates` 7 262, the **401** 5 028 / 4 997, the **404** 5 781 | JSON | yes, body only |
+| `text/html` on `/api-token-auth` (JSON-only renderer) | **`406 Not Acceptable`** | `400` / `200` | **no — status code** |
+| `application/xml`, `text/plain`, `nonsense/nonsense` | **`406` on every DRF route, every time** | the normal 200/400/401/404 | **no — status code** |
+
+And the 406 is not a rendering decision, it is a **control-flow** one.
+`APIView.initial()` calls `perform_content_negotiation()` **before** `perform_authentication()` and
+long before the handler. Two zero-write probes prove it on the live v1:
+
+```
+POST /api/user/power  {"type":"get","obj":"requested","page":0}   # the input that makes the view throw
+  Accept: */*              v1 500   v2 500      <- handler ran on both
+  Accept: application/xml  v1 406   v2 500      <- v1 never reached the handler; v2 did
+
+GET /api/user  Authorization: Token deadbeef
+  Accept: */*              v1 401   v2 401
+  Accept: application/xml  v1 406   v2 401      <- v1 never reached authentication; v2 did
+```
+
+**Why this matters beyond cosmetics.** On a *write* endpoint the same ordering means v1 refuses the
+request before any side effect and v2 performs it. A client (or a proxy, or a misconfigured
+`Accept`) that would have been safely rejected by v1 will mutate data against v2. That is a
+different risk class from "the error page is HTML instead of JSON", and P3-D8's rationale — "no v1
+client sends `Accept: text/html`; the React app sends `application/json`" — argues only about the
+HTML branch. It does not argue about `Accept: application/xml`, and the `*/*` fallback that saves
+real browsers does not save a client that sends a single unacceptable type.
+
+**Not a regression** — v2 has never negotiated content, and this is invisible under the `Accept`
+values any real client sends. But it is **not covered by the deviation as registered**, so per §7 I
+have to file it. Severity **low–medium**. `business-analyst` should decide whether v2 owes a 406,
+or whether P3-D8 is re-worded to say plainly: *"v2 ignores `Accept` entirely; v1 returns 406 for
+any `Accept` matching no renderer, before authentication and before the handler, so v2 will accept
+and execute requests v1 rejects."*
+
+**Not affected:** the four plain-Django reset routes ignore `Accept` on both sides — 12/12 cells
+identical across `*/*`, `text/html`, `application/xml`, `nonsense/nonsense`.
+
+---
+
+## R2.7 — Round-1 coverage, re-proved
+
+### The 72-cell D1 matrix — **PASS**, unchanged from round 1
+
+Re-run in full (4 actors × {self, other} × 9 bodies), restoring every touched row from a pristine
+copy of the database around **each** leg so v1 and v2 both act on identical input. Classification
+of all 72:
+
+| Class | Cells |
+|---|---|
+| byte-identical (status, body, all four tables) | **23** |
+| same status, same rows, body differs only because v1's uncaught-500 page is 27 bytes of HTML and v2's is empty (**D13**) | **16** |
+| v2 **403** where v1 acted — the **D1 / D16 / P3-D1** family | **33** |
+| anything else | **0** |
+
+The escalation cells that motivate D1 still behave as registered:
+
+| Cell | v1 | v2 |
+|---|---|---|
+| `MEMBER` → self, `personal` with `role` changed | **200, writes `fondo_api_userprofile`** (self-escalation to ADMIN) | **403**, no write |
+| `MEMBER` → self, `finance` changed | **200, writes `fondo_api_userfinance`** (member sets own quota) | **403**, no write |
+| `MEMBER`/`PRESIDENT` → another member, every body | 200 (or 409/500), writes | **403**, no write |
+| `TREASURER` → another member, `finance` | 200, writes | **200, writes** — cross-member finance kept |
+| `PRESIDENT` → self, `personal` name only / `preferences` | 200 | **200** — self-service kept (Q25a) |
+| `ADMIN`, every cell | as v1 | as v1 |
+
+### 🔴 A gap in round 1's D1 harness that I inherited, and closed
+
+The matrix compares `auth_user`, `fondo_api_userprofile`, `fondo_api_userfinance` and
+`fondo_api_userpreference`. It does **not** look at `fondo_api_notificationsubscriptions` or
+`fondo_api_schedulertask` — and `PATCH /api/user/<id>` writes both. Running the matrix destroyed
+**76 subscription rows and 31 scheduler rows** while reporting no mismatch, because neither table
+was in the comparison.
+
+Two v1 behaviours are responsible, both in `services/user.py`:
+
+* `__update_user_preferences` (line 217): when `notifications` goes **true → false** it calls
+  `remove_all_subscriptions(id)`, which **deletes every push subscription the user has**.
+  User 2 alone holds 64 of the fixture's 94 rows.
+* `__update_user_personal` → `__create_birthdate_notification` → `remove_sch_notitfications`
+  (`services/notification.py:70`): `SchedulerTask.objects.filter(payload__owner_id=…,
+  payload__type='birthdate').delete()` deletes **all** of that owner's birthday tasks, *including
+  processed historical ones*, before creating the replacement. This is round 1 §9's incident,
+  confirmed as v1's own documented behaviour rather than a probe accident.
+
+So I tested them deliberately, one user at a time, restore-from-pristine around each leg:
+
+| Probe (target = user 5, actor = ADMIN) | v1 | v2 | Verdict |
+|---|---|---|---|
+| `preferences`, `notifications` **true → false** | 200; the user's **6** subscriptions deleted (94 → 88) | 200; **the same 6 deleted** (94 → 88) | **PASS** |
+| `preferences`, `notifications` stays **true** (control) | 200; **nothing deleted** | 200; nothing deleted | **PASS** |
+| `personal` echo **with** `birthdate` | 200; the owner's **8** birthday tasks deleted and **1** created (626 → 619) | 200; **same 8 deleted, 1 created** | **PASS** |
+| `personal` echo with the `birthdate` key **removed** (control) | 200; scheduler untouched | 200; untouched | **PASS** |
+
+v2 reproduces both destructive side effects exactly, including the "only when the flag actually
+flips" and "only when the key is present" guards.
+
+### The birthday `SchedulerTask`, field by field — **PASS**
+
+Reference row `fondodev` **2458** (the historical row for the same owner):
+
+```
+2458 | 0 | 2027-08-25 05:00:00+00 | 4 | f | "type"=>"birthdate", "target"=>"/",
+       "message"=>"Hoy está cumpliendo años N@CHO Montañez Herrera", "owner_id"=>"5",
+       "user_ids"=>"[2, 4, 3, 13, 11, 10, 1, 9, 12, 6, 7, 8]"
+```
+
+The row each stack creates today, `cmp`-compared across `type`, `run_date`, `repeat`, `processed`
+and `payload::text`:
+
+```
+0
+2026-08-25 05:00:00+00
+4
+false
+"type"=>"birthdate", "target"=>"/", "message"=>"Hoy está cumpliendo años N@CHO Montañez Herrera",
+"owner_id"=>"5", "user_ids"=>"[1, 12, 11, 2, 7, 14, 4, 8, 10, 6, 9, 13]"
+```
+
+**Byte-identical.** Note `user_ids` is `[1, 12, 11, 2, 7, 14, …]` — neither sorted nor row 2458's
+order: it is Postgres's *current* heap order for `get_users_attr("id")`, and v2 reproduces it
+exactly rather than emitting a sorted list. `05:00:00+00` (America/Bogota midnight), `repeat = 4`,
+`type = 0`, the owner excluded from `user_ids`, and the two inactive members (3, 15) absent — all
+matching.
+
+### `create_user` — four-table write and the rollback at zero rows — **PASS**
+
+| Leg | v1 | v2 |
+|---|---|---|
+| SES `ok`, `POST /api/user` | **201**; `auth_user` 15→16, `userprofile` 15→16, `userfinance` 15→16, `userpreference` 15→16, `authtoken_token` **15→15** (no token until activation), `auth_user_id_seq` 29→30 | **identical on every count and the sequence** |
+| the created rows | `987654321\|3\|Parity\|Probe\|parity.probe@nowhere.test\|parity.probe@nowhere.test\|false\|true` (username := email, inactive, `key_activation` set); finance `0\|0\|0\|0\|0`; preference `false\|#800000\|#c83737` | **`cmp`-identical** |
+| SES `fail` (capture server answers 500) | **409** `{"message":"Invalid email"}`; **0 rows left in all four tables**; sequence still advanced (nextval is not transactional) | **identical, including the advanced sequence** |
+
+### SES payloads — **PASS on two of three**, one new difference
+
+| Mail | Result |
+|---|---|
+| **user activation** | `Source`, `Destination.ToAddresses.member.1`, `BccAddresses` (empty), `Subject.Data` (`[Fondo Montañez] Activación de cuenta`), `Charset`, and the HTML body **identical** — the only textual difference is the random `key_activation` inside the activation URL, which is volatile by construction |
+| **password reset** | identical on every field; only the random reset token inside `https://localhost/reset/NA/<token>/` differs. Note both build the link on `https://localhost` — P3-D7's `Secure`/https behaviour agrees |
+| **power approved** | `Source`, `Subject.Data`, `Charset` and the **whole HTML body** identical, same 13 recipient addresses — but **in a different SES field**. **D5**, as registered — see R2.8. |
+
+### SQS — **PASS**
+
+`POST /api/user/power` `{"type":"post","requestee":5,…}` (requestee 5 has 6 push subscriptions;
+the first attempt used requestee 4, who has none, and **correctly produced no publish on either
+side** — `send_notification` returns early when the subscription set is empty).
+`MessageBody` **2 391 bytes, byte-identical**, subscriptions, keys, endpoints and `expirationTime`
+included. v1 publishes through `celery -A api worker` + redis, v2 inline; the bytes on the wire are
+the same.
+
+---
+
+## R2.8 — F7 **raised and withdrawn**: the power-approval `To`/`Bcc` inversion is **D5**
+
+I filed this as a new finding and then found it registered. Recording both halves, because the
+*measurement* stands and one sentence of round 1 does not.
+
+```
+POST /api/user/power  {"type":"post","requestee":4,"meeting_date":"2026-12-01"}   (ADMIN)
+POST /api/user/power  {"type":"patch","id":<id>,"state":1}                        (member 4)
+```
+
+| SES field | v1 | v2 |
+|---|---|---|
+| `Destination.ToAddresses.member.1…13` | **13 member addresses** | *(absent)* |
+| `Destination.BccAddresses.member.1…13` | *(absent)* | **the same 13 addresses** |
+| `Source`, `Message.Subject.Data`, `Message.Body.Html.Data`, both `Charset`s | identical | identical |
+
+**This is `docs/phase-3-deviations.md` D5**, decided in `MIGRATION_PLAN.md` (Q18/Q10): *"Power-approval
+email puts every member in `ToAddresses` with empty `Bcc` → move to `Bcc`; recipient list stays
+every member — only the disclosure is fixed."* The deviation even flags the empty `To:` as worth an
+operator confirmation, which is exactly the deliverability concern I was going to raise.
+`test/user.e2e-spec.ts:1651` asserts `recipients == []` and an 11-address `bcc` with a D5 citation.
+**Verdict: behaving as registered. F7 withdrawn — not a finding.**
+
+⚠️ **But round 1's summary is wrong about it.** Round 1 says the "SES activation / power-approval /
+password-reset payloads" were identical. The power-approval payload is *deliberately not* identical,
+and round 1 could not have seen that: it compared `ses-v1.html` / `ses-v2.html`, i.e. the rendered
+`Message.Body.Html.Data` **only**, which does match. Round 1 recorded a pass on the envelope without
+ever comparing the envelope. That is a fourth instance of the green-for-the-wrong-reason class, in
+my own prior report rather than in the suite — see R2.11.
+
+---
+
+## R2.9 — `PATCH /api/user`, the multipart TSV bulk finance update — **PASS on the data**, one new edge (**F8**)
+
+### Banker's rounding and the payload shapes — **PASS**
+
+`int(round(float(x), 0))` is Python 3's round-half-**to-even**. Seven payloads, whole
+`fondo_api_userfinance` table `cmp`-compared after each:
+
+| Payload | v1 | v2 |
+|---|---|---|
+| `.5` on every column (`100.5 200.5 300.5 400.5`, `2.5 3.5 4.5 5.5`, `1.4999 1.5001 -0.5 2.5`) + one unknown identification | 200, rows written | **identical rows** |
+| all zeroes | 200 | identical |
+| empty file | 200 | identical |
+| no trailing newline | 200 | identical |
+| CRLF line ending | 200 | identical |
+| non-numeric identification | **500**, whole transaction rolled back | identical |
+| a single blank line | **500** | identical |
+
+The rounding that actually landed, identical on both sides:
+
+```
+100.5 -> 100    200.5 -> 200    300.5 -> 300    400.5 -> 400     (half to even)
+  2.5 ->   2      3.5 ->   4      4.5 ->   4      5.5 ->   6
+1.4999 ->   1   1.5001 ->   2     -0.5 ->   0      2.5 ->   2
+available_quota = total - utilized, so user 1 lands on -200 on both stacks
+```
+
+**`last_modified` no-op**: re-sending a user's current four values leaves the date at `2026-08-12`
+on both — `__update_user_finance` only saves when one of the four differs, and v2 reproduces the
+comparison rather than always writing. **Unknown identification** is skipped and logged, the rest
+of the file still applies, on both.
+
+**Role matrix**: ADMIN 200, TREASURER 200, PRESIDENT 403, MEMBER 403 — identical.
+
+### 🔴 **NEW: F8** — malformed `multipart/form-data` lands on the other side of the 400/500 line
+
+Eight `Content-Type` values on `PATCH /api/user`. Five agree exactly (`multipart/mixed` 415,
+`text/plain` 415, `application/json` 400 with an identical `JSON parse error` detail,
+`application/x-www-form-urlencoded` 500, no `Content-Type` 500). **Three disagree, in opposite
+directions**, stable across repeats:
+
+| `Content-Type` | v1 | v2 |
+|---|---|---|
+| `multipart/form-data` (no `boundary` at all) | **500** `<h1>Server Error (500)</h1>` | **400** `{"detail":"Multipart form parse error - Multipart: Boundary not found"}` |
+| `multipart/form-data; boundary=` (empty boundary) | **400** `{"detail":"Multipart form parse error - Invalid boundary in multipart: "}` | **500**, empty body |
+| `multipart/form-data; boundary=zzz` (declared boundary, body is not multipart) | **500** | **400** `{"detail":"Multipart form parse error - Unexpected end of form"}` |
+
+The two stacks have swapped which malformed multipart inputs their parser catches as a client error
+and which escape as an unhandled 500. Two of the three are v2 being *better* (400 where v1 500s),
+but the middle row is v2 turning a request v1 answers with a **400 and a diagnostic** into a bare
+**500**. Round 1 probed four content types and none of these three.
+
+Severity **low** — malformed-request handling, no data at risk, no v1 client sends these. But it is
+an unregistered status-code difference on an implemented Phase 3 endpoint. For `nestjs-developer`
+(match v1's three outcomes) or `business-analyst` (register the parser-boundary difference once,
+since it will recur on every multipart endpoint in later phases — `POST /api/file`, the loan
+detail upload).
+
+---
+
+## R2.10 — the rest of round 1's surface, and Phase 2's edges
+
+| Check | Cells | Result |
+|---|---|---|
+| **All six `Vary` strings** (in fact 13 distinct response shapes) | 13 | **identical** — `Accept, Origin` (DRF multi-renderer, its 401/403/400 and the caught 500), `Origin` (single-renderer `OPTIONS`, the uncaught 500, the 302, the 404, the preflight), `Cookie, Origin` (the reset form), **`Origin, Cookie`** (the set-password page — *the other order*, preserved), and **no `Vary` at all** on the `APPEND_SLASH` 301 |
+| **The four reset pages + the set-password page**, byte for byte after masking the per-render `csrfmiddlewaretoken` | 5 | **identical**: 1 265 / 966 / 779 / 1 001 / 1 001 bytes |
+| **Both CSRF failure pages**, byte for byte | 2 | **identical**: 1 019 (`REASON_BAD_TOKEN`) and 1 386 (`REASON_NO_CSRF_COOKIE`) |
+| **URL sweep**, 33 path shapes × 6 methods, `--path-as-is`, restoring the fixture around every unsafe method | 198 | **30 mismatches, all expected**: 29 are later-phase routes v1 serves and v2 404s (`/api/loan`, `/api/activity/5/`, `/api/file`, `/api/admin`, `/api/saving-account`) and 1 is `/health` (P0-D2). **Every Phase 1–3 path matches on every method.** The fail-closed direction holds: v2 serves no path v1 does not |
+| **`ALLOWED_HOSTS`** — 6 paths × {`evil.test`, `localhost:9999`, `localhost.`, absent} | 24 | **identical except the three `/health` rows** (the registered v2-only route). `Host: evil.test` is **400 on every path on both**, including `/nope/nope` and `/api-token-auth` — C19 holds |
+| **Bare `OPTIONS` vs genuine preflight** — 7 paths | 14 | **identical**, bare `401/401/401/200/404/200/200` and preflight `200` everywhere |
+| **Pagination envelope** — `page=1`, `2`, `99`, `0`, `-1`, absent, `?page=1&page=2` | 7 | **identical**, including `page=99` → `{"list":[],"num_pages":2,"count":13}` **200** (not 404) and QueryDict last-value semantics on the repeated parameter |
+| **`DELETE /api/user/<id>`** role matrix, unknown id, re-delete of an already-inactive user | 6 | **identical**, rows identical |
+| **D14 `-1` sentinel** | 3 | `GET` 200 both, `DELETE` 404 both, `PATCH` **v1 404 / v2 200** — **D14 as registered** |
+| **D15 / P3-D2 shared-email account 13** | 1 | `PATCH` name → **v1 409 / v2 200** — as registered |
+
+---
+
+## R2.11 — the sweep for tests that pass for the wrong reason
+
+The brief asked where else an assertion might be satisfied by the transport or the middleware
+rather than by the behaviour under test. I found **five** instances. Two are in my own harness,
+one is in round 1's report, one is a coverage gap in the suite, and one is a shape the suite
+already defends against well.
+
+### 1. 🔴 In my own D1 matrix — a 72-cell matrix that agreed on nothing
+
+The first round-2 run of the D1 matrix printed `cells=72 mismatches=0`. **Every single cell was a
+401.** My restore helper read `is_active::text`, which Postgres renders as `true`/`false`, and
+compared it to psql's *display* format `t` — so it wrote `is_active = false` for all five actors,
+and every subsequent request authenticated as a deactivated user. v1 and v2 agreed perfectly,
+because they agree perfectly on rejecting a dead token.
+
+A parity matrix that asks only *"did the two sides agree"* is satisfied by **any uniform failure**.
+The rewritten driver now asserts **positive controls** — that no cell returned 401, that the run
+produced at least one 200, one 409 and one 500, and that **both** sides actually wrote rows
+somewhere — and prints the status distribution (`v1 {200: 41, 409: 7, 500: 24}`,
+`v2 {200: 22, 403: 33, 409: 1, 500: 16}`) so the shape of the run is visible, not just its verdict.
+**Every comparison harness in this project should carry that assertion**, including
+`role-matrix.e2e-spec.ts`'s 280-cell replay.
+
+### 2. 🔴 In my own URL sweep — the probe destroyed its own credentials
+
+The 198-cell sweep runs `DELETE /api/user/1` with the **ADMIN's own token**. v1 answered 200 and
+soft-deleted the admin; every one of the ~150 later cells then ran with a dead token and both
+stacks returned 401, so they "agreed". The sweep reported 32 mismatches when the honest number is
+30, and roughly three quarters of it was measuring nothing. Fixed by restoring the fixture around
+every `POST`/`PATCH`/`DELETE` cell.
+
+### 3. 🔴 In my own F3 probe — curl normalised the request target
+
+`/api/../password_reset/`, `/./password_reset/` and `/password_reset/./` all returned **200 on both
+sides** until I added `--path-as-is`: curl was collapsing the dot segments before the request left
+the client, so the cells asserted that both servers serve `/password_reset/`. With the raw target
+on the wire both 404. **This is the same defect as the supertest-normalisation instance already
+known** — it recurs whenever the client is allowed to rewrite what is being tested.
+
+### 4. 🔴 In round 1's report — the SES check never looked at the envelope
+
+Round 1 recorded the "SES activation / power-approval / password-reset payloads" as identical. It
+compared `ses-v1.html` / `ses-v2.html`, i.e. `Message.Body.Html.Data` alone. The power-approval
+envelope is **deliberately different** (D5: `ToAddresses` → `BccAddresses`), and round 1 could not
+have seen it. The assertion was green because it was pointed at the part that matches. Round 2
+compares **every SES form field** (`Source`, `Destination.ToAddresses.*`, `Destination.BccAddresses.*`,
+`Subject.Data`, both `Charset`s, `Body.Html.Data`) and reports per-field.
+
+### 5. 🟠 A coverage gap in the F5 e2e block — the sharpest cell is missing
+
+`test/password-reset.e2e-spec.ts` now covers `PUT`/`PATCH`/`DELETE` with a body token (403),
+`POST` with a body token (302), `PUT` with a header token (302), `PUT` with **both** where the body
+token is garbage (302), and `POST` with an **empty** body token plus a header (302). It does **not**
+cover:
+
+> **`POST` with a non-empty *wrong* body token **and** a valid `X-CSRFToken`.**
+
+Django's fallback is `if request_csrf_token == "": request_csrf_token = META[CSRF_HEADER]` — it fires
+only on the *empty* string. So that request must be **403**. An implementation that read the header
+first, or that fell back to the header whenever the body token failed to validate, would satisfy
+**every cell in the current suite** and still be wrong in exactly F5's direction.
+
+**v2 is correct here** — I measured `POST` + `csrfmiddlewaretoken=zzzz…` + valid header as **403 on
+both stacks**, with byte-identical 1 019-byte failure pages. This is a missing test, not a defect.
+It is worth adding precisely because it is the one cell that distinguishes the fix from the two
+plausible near-misses.
+
+### 6. 🟢 Shapes the suite defends well
+
+For balance — I went looking for these and did not find problems:
+
+* **Request-target tests use a raw socket.** `http-edge.e2e-spec.ts`'s `rawRequest` helper is used
+  for every fragment/`#`/`Host`-forgery case, which is the correct response to instance 3.
+* **Negative mock assertions have positive controls beside them.**
+  `notification.e2e-spec.ts:430` (`sqs.send` not called for a member with no subscriptions) sits
+  directly after two cells that prove the same mock *does* fire — so it cannot pass because the
+  wiring is dead. I hit exactly that trap myself: my first SQS probe used requestee 4, who has **0**
+  subscriptions, and captured nothing on either side. The right reading was not "SQS matches" but
+  "this probe cannot see SQS"; re-run against requestee 5 (6 subscriptions) it captured a
+  **byte-identical 2 391-byte `MessageBody`**.
+* **The role matrix replays a captured oracle.** `v1-role-matrix.fixture.ts` is 280 real v1
+  responses, not hand-written expectations, so the cells cannot drift to whatever v2 does. Its one
+  structural limit is that it replays through **synthetic** controllers (`MATRIX_CONTROLLERS`), so
+  it pins the guard wiring rather than the real Phase 3 controllers — which is why the live 72-cell
+  D1 matrix and the 84-cell DRF-authentication matrix in R2.4 matter as the complement.
+* **The N3 percent-encoding cells are v1-accurate.** I re-measured all five against the oracle:
+  `POST /api%2Dtoken%2Dauth` → 400 + `{"non_field_errors":["Unable to log in with provided
+  credentials."]}`, the two `%6E`/`%61` paths → 401, `%41PI` and `sub%2Fscribe` → 404, on both
+  stacks. Those assertions test what they claim to.
+
+---
+
+## R2.12 — what I could not test
+
+| Not tested | Why | Who can close it |
+|---|---|---|
+| **`@DjangoView()` on a controller whose URL entry is a DRF view** | Needs a source change to put the decorator where it does not belong; I do not modify code. The three *reachable* fail-closed directions are proved (R2.4 B, C, D) and the guard's condition is `route !== undefined && route.view !== null && route.drf === null`, but the fourth arm is only covered by unit tests | `nestjs-reviewer` — read `token-auth.guard.spec.ts` / `roles.guard.spec.ts` and confirm the DRF-route arm is asserted |
+| **v1's browsable-API HTML rendered by v2** | P3-D8: v2 ships no browsable API by design. I measured the *sizes* and the 406 control flow (F6) but cannot diff HTML that one side does not produce | n/a — registered |
+| **v2's scheduler / worker** | Phase 7b; v2 has no scheduler process yet. I verified the `SchedulerTask` **row** v2 writes, not its later execution | Phase 7b's tester |
+| **Real SES / SQS** | Both stacks were pointed at a local capture server; no traffic left the host. Credential handling, throttling and SES bounce behaviour are out of reach | integration environment |
+| **v1's Celery retry/loss semantics under a broker failure** | P2-D7 is a Phase 2 registration; I confirmed the happy-path `MessageBody` only | Phase 2's owner |
+| **D19 (29 Feb), D20 (soft-deleted member), D11 (duplicate child rows)** | Round 1 proved these with hand-injected rows and a leap-year birthdate. I did **not** re-run them this round — they need row injection into `fondodev`, and after two fixture incidents I judged the risk not worth re-proving a result no fix touched (nothing in F1–F5 goes near `UserFinance`/`UserPreference` lookup or the birthdate clamp). **Round 1's evidence stands unrefreshed** | a later round, or accept round 1 |
+| **Later-phase routes** (`/api/loan`, `/api/activity`, `/api/file`, `/api/admin`, `/api/saving-account`) | Not implemented in v2; the sweep confirms they 404 and that v2 serves nothing v1 does not | Phases 4–8 |
+| **`POST /api/alexa`, `GET/POST /api/authorize`** | Out of scope by instruction | — |
+
+---
+
+## R2.13 — system health
+
+| Check | Result |
+|---|---|
+| v1 boots | ✅ `fondo-v1-p3` restarted after the host reboot; gunicorn 19.9.0, `api.settings.production`, `fondodev`. A second shimmed gunicorn on `127.0.0.1:8451` is the oracle for every cell |
+| v1 repo untouched | ✅ still bind-mounted `ro`; `git status` clean at `5bef585`. The boto3 shim lives at `/probe` inside the throwaway container |
+| v2 boots | ✅ `node dist/main.js`, 21 routes mapped, Prisma connected, `production` |
+| v2 build current | ✅ `npm run build` re-emitted `dist/` byte-identical (`b7d2f372…`) — the running binary is `1344b48`'s source |
+| lint / typecheck | ✅ `eslint` clean, `tsc --noEmit` clean |
+| unit | ✅ **1 503 passed / 49 suites** |
+| e2e | ✅ **647 passed, 1 skipped / 13 suites** |
+| e2e isolation | ✅ the suite ran against the disposable test database; `fondodev`'s `snap.sh` output is **byte-identical before and after the whole e2e run**. `shared-database-guard.ts` is a well-built positive-evidence guard (Django ledger rows + `0_init` step count + a name denylist) |
+| migrations / schema untouched | ✅ `django_migrations` **38**, `_prisma_migrations.0_init.applied_steps_count` **0** (marked, never executed); `information_schema.columns`, `pg_constraint`, `pg_indexes` hashes all equal to baseline |
+| fixture integrity, final | ✅ `snap.sh` **identical to the round-2 baseline on every line**: `auth_user` 15 / `eb2217b4…`, `userprofile` `279ef0f6…`, `userfinance` `8ec339bd…`, `userpreference` `94e8bc42…`, `power` 20 / `002cbae3…`, `authtoken_token` 15 / `36770022…`, `notificationsubscriptions` **94 / 1468 / xmin-distinct 1 / `7a6afbcc…`**, `schedulertask` **626 / `c3bf5409…`**, `django_session` 20, both sequences at 29 / 2528 |
+| scheduler / worker | ✅ redis 7 + `celery -A api worker` restarted for v1 and consumed every `send_notification`; v2 publishes inline. v2 has no scheduler process (Phase 7b) |
+| SES / SQS | ✅ 100 % captured locally on `:4599` (v1) / `:4598` (v2); no traffic left the host |
+| stray writes | ✅ none. Every write was one a probe asked for, and every one was restored |
+
+### ⚠️ Two fixture incidents this round, both fully recovered
+
+Unlike round 1's, **both were reversed with zero residue** — the §7 dump did its job.
+
+1. **`auth_user` and `fondo_api_userpreference` corrupted** by the `is_active::text` bug in §R2.11.1
+   (five users deactivated, five preference rows flipped). Repaired from the pristine copy; both
+   guard hashes back to baseline.
+2. **76 `fondo_api_notificationsubscriptions` rows and 31 `fondo_api_schedulertask` rows deleted**
+   by the D1 matrix, through v1's own `remove_all_subscriptions` and `remove_sch_notitfications`
+   (R2.7). Both tables restored wholesale from the pristine copy, sequences reset; counts, max ids,
+   `xmin`-distinct and content hashes all back to baseline.
+
+**A §7 amendment I would ask for.** The round-2 dump taken before the first write cell was written
+into the agent scratchpad under `/tmp` — and the host rebooted and took it with it. The rule should
+say the dump must live on **persistent storage, not a tmpfs**. Round 2's replacement is in
+`~/.fondo-parity-dumps/r2/` (a per-table `--column-inserts` dump and a full dump), and it is what
+made both recoveries above one command each. A second clause worth adding: **restore from the dump,
+never from statements reconstructed by the probe** — incident 1 was caused by hand-built `UPDATE`s,
+and incident 2 was cleaned by `pg_dump`/`psql` in seconds.
+
+---
+
+## R2.14 — verdict
+
+### F1–F5: all five **fixed**
+
+| # | Round-1 finding | Status | Evidence |
+|---|---|---|---|
+| **F1** | the caught 500 lost `Allow` and `Vary: Accept` | ✅ **fixed** | 9 caught-500 inputs keep both headers; 7 uncaught 500s correctly drop both; 6 controls unaffected. The strip now keys on *who built the response*, and the narrowed **P3-D6** is accurate |
+| **F2** | the password-reset 302s omitted `Content-Type` | ✅ **fixed** | 6 different routes into a 302, byte-identical header sets with `text/html; charset=utf-8` and `Content-Length: 0`; the `APPEND_SLASH` 301 did not regress |
+| **F3** | v2 authenticated the four plain-Django views | ✅ **fixed, and fail-closed** | 280/280 cells identical across 5 routes × 7 methods × 8 `Authorization` shapes; 84/84 DRF routes still 401; 28/28 look-alike targets never reach the exemption; `/health` (`view: null`) still 401s a bad token. One arm unreachable black-box (R2.12) |
+| **F4** | bare `OPTIONS` on the anonymous-allowed views 405'd | ✅ **fixed** | both metadata documents byte-identical (172 B / 164 B) with the correct asymmetric `Vary`; 11 controls match. **P1-D2's withdrawal is justified** |
+| **F5** | the CSRF token was read from the body on every unsafe method | ✅ **fixed** | 44 cells identical, including all four that discriminate a correct fix from a source-reordering one. See the coverage gap in R2.11.5 — the fix is right, the suite does not fully pin it |
+
+**No regression** from the five fixes: the 72-cell D1 matrix, `create_user`'s four-table write and
+zero-row rollback, the birthday `SchedulerTask` byte for byte, the SES and SQS payloads, the TSV
+bulk update with banker's rounding, all 13 `Vary` shapes, the five reset pages and both CSRF failure
+pages, the 198-cell URL sweep, `ALLOWED_HOSTS`, and bare-`OPTIONS`-vs-preflight all behave as round 1
+recorded them.
+
+### New this round
+
+| # | Finding | Severity | For |
+|---|---|---|---|
+| **F6** | **P3-D8 understates its own width.** v1's content negotiation returns **`406 Not Acceptable`** for any `Accept` matching no renderer — `application/xml`, `text/plain`, anything — and for `text/html` on the JSON-only `ObtainAuthToken`. It fires in `APIView.initial()` **before authentication and before the handler**, proved by `Accept: application/xml` turning a 500 into a 406 and a 401 into a 406. v2 ignores `Accept` entirely and runs the request. P3-D8 registers only "HTML body vs JSON body" | low–medium (a write endpoint v1 refuses, v2 executes) | `business-analyst` — re-word P3-D8, or `nestjs-developer` if v2 owes a 406 |
+| **F8** | **Malformed `multipart/form-data` lands on the other side of the 400/500 line**, in both directions: no `boundary` → v1 500 / v2 400; `boundary=` empty → **v1 400 / v2 500**; `boundary=zzz` with a non-multipart body → v1 500 / v2 400. `phase-1-drf-auth-bodies.md` registers the multipart *message text* on the premise that "both are 400" — these three show that premise is not always true | low | `nestjs-developer` or `business-analyst` — will recur on every multipart endpoint in Phases 4–8 |
+| ~~F7~~ | ~~power-approval mail uses `Bcc` where v1 uses `To`~~ | — | **withdrawn** — this is **D5**, decided and registered (R2.8) |
+
+Plus, not a defect in v2: **one coverage gap** (R2.11.5, the missing `POST` + wrong-body-token +
+valid-header cell) and **one correction to round 1's own report** (R2.11.4, the SES check never
+compared the envelope).
+
+### Verdict by endpoint
+
+| Endpoint | Round 2 |
+|---|---|
+| `GET /api/user` | **PASS** — pagination envelope, both 400s, the uncaught 500's header set, `Vary`, all identical |
+| `POST /api/user` | **PASS** — four-table write identical, mail-failure rollback to zero rows on both, sequence behaviour identical, SES payload identical |
+| `PATCH /api/user` (TSV) | **FAIL (F8 only)** — rounding, `last_modified` no-op, unknown-identification skip, rollback and role matrix all identical; three malformed-multipart content types differ |
+| `GET /api/user/<id>` | **PASS** |
+| `PATCH /api/user/<id>` | **PASS with the registered D1/D14/D15/D16/D19/D20/P3-D1/P3-D2 divergences** — 72 cells fall into exactly three classes, none unexplained; both destructive side effects (subscription wipe, scheduler-task wipe) reproduced exactly |
+| `DELETE /api/user/<id>` | **PASS** |
+| `POST /api/user/birthdates` | **PASS** |
+| `POST /api/user/power` | **PASS** — F1 closed; SQS `MessageBody` byte-identical; the approval mail is **D5** |
+| `POST /api/user/activate/<id>` | **PASS** — F4 closed |
+| `GET\|POST /password_reset/` | **PASS** — F2, F3, F5 all closed |
+| `GET /password_reset/done/`, `GET /reset/done/` | **PASS** — byte-identical with any `Authorization` header |
+| `GET\|POST /reset/<uid>/<token>/`, `…/set-password/` | **PASS** — F2, F3, F5 closed; the hop, the validators and single-use all identical |
+| Phase 7a `SchedulerTask` write | **PASS** — byte-identical including `user_ids` heap order |
+| **cross-cutting: content negotiation** | **FAIL (F6)** — affects every DRF route in every phase |
+
+## Phase verdict: **FAIL**
+
+**But a different failure from round 1's.** All five filed defects are genuinely fixed, the two
+security-adjacent ones (F3, F5) are fixed in the fail-closed direction and I could not find a way
+around either, and nothing regressed. The phase fails only on §7 — *"an unregistered behavioural
+diff is a parity failure"* — for **F6** and **F8**, both of which are **pre-existing**, neither of
+which the F1–F5 work introduced, and both of which may well be closed by **registering** them
+rather than by changing code. That is `business-analyst`'s and `nestjs-reviewer`'s call, not mine.
+
+If F6 and F8 are registered as deviations, this phase is a **PASS** on everything else measured:
+**1 100+ live cells** this round with no unexplained difference.
+
+**Routing:** F6 and F8 → `business-analyst` first (both are more likely re-wordings than code
+changes), then `nestjs-developer` if a fix is chosen. The R2.11.5 coverage gap → `nestjs-developer`
+(one e2e cell). The §7 amendment (dump must not live on a tmpfs; restore from the dump, never from
+reconstructed statements) → `nestjs-reviewer` for the plan. This report → `nestjs-reviewer`.
