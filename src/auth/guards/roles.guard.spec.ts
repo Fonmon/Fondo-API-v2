@@ -1,6 +1,7 @@
 import { InternalServerErrorException, Logger, type ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { DjangoUrlPattern, ResolvedViewName } from '../../common/http/django-url-conf';
+import { DEFAULT_RENDERERS } from '../../common/http/drf-content-negotiation';
 import { DrfException } from '../../common/http/drf.exception';
 import { IS_DJANGO_VIEW_KEY } from '../decorators/django-view.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
@@ -296,7 +297,7 @@ describe('RolesGuard (IsAuthenticated + APIRolePermission)', () => {
       const drfRoute: DjangoUrlPattern = {
         regex: /^api\/user\/?$/,
         view: 'UserView',
-        drf: { allow: 'GET, POST, PATCH, HEAD, OPTIONS', varyAccept: true },
+        drf: { allow: 'GET, POST, PATCH, HEAD, OPTIONS', renderers: DEFAULT_RENDERERS },
       };
 
       // `UserView.POST` is ADMIN-only, so a MEMBER must still be refused.

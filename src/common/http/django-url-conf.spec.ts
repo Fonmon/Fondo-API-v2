@@ -1,4 +1,5 @@
 import { DJANGO_URL_CONF, decodePathInfo, resolveDjangoUrl } from './django-url-conf';
+import { BROWSABLE_API_RENDERER, JSON_RENDERER } from './drf-content-negotiation';
 
 /**
  * The URL table is the whole of condition **C9**, so it is tested as a table: every status
@@ -109,14 +110,14 @@ describe('DJANGO_URL_CONF', () => {
     it('gives NotificationView `Allow: POST, OPTIONS` and `Vary: Accept`', () => {
       expect(resolveDjangoUrl('/api/notification/subscribe')?.drf).toEqual({
         allow: 'POST, OPTIONS',
-        varyAccept: true,
+        renderers: [JSON_RENDERER, BROWSABLE_API_RENDERER],
       });
     });
 
     it('gives ObtainAuthToken no `Vary: Accept` — it declares a single renderer', () => {
       expect(resolveDjangoUrl('/api-token-auth')?.drf).toEqual({
         allow: 'POST, OPTIONS',
-        varyAccept: false,
+        renderers: [JSON_RENDERER],
       });
     });
 

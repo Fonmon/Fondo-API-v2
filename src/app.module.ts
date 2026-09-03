@@ -10,6 +10,7 @@ import { DjangoCorsMiddleware } from './common/http/django-cors.middleware';
 import { DjangoResponseHeadersMiddleware } from './common/http/django-response-headers.middleware';
 import { DJANGO_URL_CONF, DJANGO_URL_CONF_TOKEN } from './common/http/django-url-conf';
 import { DjangoUrlResolverMiddleware } from './common/http/django-url-resolver.middleware';
+import { DrfContentNegotiationMiddleware } from './common/http/drf-content-negotiation.middleware';
 import { DrfParserInterceptor } from './common/http/drf-parser.interceptor';
 import { DrfRequestParsingMiddleware } from './common/http/drf-request-parsing.middleware';
 import { JsonBigIntSetup } from './common/http/json-bigint';
@@ -97,7 +98,7 @@ export class AppModule implements NestModule {
    * | 6 | `MessageMiddleware` | not modelled; no view uses the messages framework |
    * | 7 | `XFrameOptionsMiddleware` | {@link DjangoResponseHeadersMiddleware} (+ the Express-isms v1 does not emit) |
    * | 8 | `corsheaders.CorsMiddleware` | {@link DjangoCorsMiddleware} |
-   * | — | `BaseHandler._get_response` — URL resolution and the view, *below* all eight | {@link DjangoUrlResolverMiddleware}, then {@link DrfRequestParsingMiddleware} |
+   * | — | `BaseHandler._get_response` — URL resolution and the view, *below* all eight | {@link DjangoUrlResolverMiddleware}, then {@link DrfContentNegotiationMiddleware}, then {@link DrfRequestParsingMiddleware} |
    *
    * Slot 3 is **two** classes for the same reason the URL layer is: they are the two steps
    * of one `process_request`, in its order. `request.get_host()` runs first
@@ -105,6 +106,15 @@ export class AppModule implements NestModule {
    * `APPEND_SLASH` check, the CORS preflight and the resolver — condition **C19**, and the
    * control that stops Phase 3's `PasswordResetView` from emailing a reset link built from a
    * forged `Host` header.
+   *
+   * ## The last three rows are one v1 layer, in `APIView.dispatch`'s order
+   *
+   * `BaseHandler` resolves the URL, then the view runs. Inside the view,
+   * `initial()` negotiates a renderer **before** `perform_authentication` — so a request
+   * whose `Accept` matches no renderer is a **406 before the guards, the handler and any
+   * write** (parity finding **F6**). {@link DrfContentNegotiationMiddleware} therefore sits
+   * between the resolver, which tells it which view's `renderer_classes` apply, and the body
+   * parser, which in v1 does not run until the handler touches `request.data` at all.
    *
    * The last row is why the URL layer is **two** middlewares (finding N1, condition C15).
    * `CommonMiddleware`'s 301 is emitted at depth 3, above CORS; the resolver's 404 is emitted
@@ -144,6 +154,7 @@ export class AppModule implements NestModule {
         DjangoResponseHeadersMiddleware,
         DjangoCorsMiddleware,
         DjangoUrlResolverMiddleware,
+        DrfContentNegotiationMiddleware,
         DrfRequestParsingMiddleware,
       )
       .forRoutes('/');

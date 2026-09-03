@@ -99,7 +99,8 @@ export class DjangoUrlResolverMiddleware implements NestMiddleware {
     }
 
     response.setHeader('Allow', drf.allow);
-    if (drf.varyAccept) {
+    // `if len(self.renderer_classes) > 1: headers['Vary'] = 'Accept'` (`views.py:158-159`).
+    if (drf.renderers.length > 1) {
       patchVaryHeaders(response, ['Accept']);
     }
 

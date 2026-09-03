@@ -1,6 +1,7 @@
 import type { ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
 import type { DjangoUrlPattern } from '../../common/http/django-url-conf';
+import { JSON_ONLY_RENDERERS } from '../../common/http/drf-content-negotiation';
 import { DrfException } from '../../common/http/drf.exception';
 import { IS_DJANGO_VIEW_KEY } from '../decorators/django-view.decorator';
 import type { AuthService } from '../auth.service';
@@ -224,7 +225,7 @@ describe('TokenAuthGuard', () => {
         djangoRoute: {
           regex: /^api-token-auth\/?$/,
           view: 'ObtainAuthToken',
-          drf: { allow: 'POST, OPTIONS', varyAccept: false },
+          drf: { allow: 'POST, OPTIONS', renderers: JSON_ONLY_RENDERERS },
         } satisfies DjangoUrlPattern,
       };
 

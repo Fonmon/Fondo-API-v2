@@ -38,6 +38,11 @@
  */
 
 import type { V1ViewName } from '../../auth/permissions/permission-matrix';
+import {
+  DEFAULT_RENDERERS,
+  JSON_ONLY_RENDERERS,
+  type DrfRenderer,
+} from './drf-content-negotiation';
 
 /**
  * DRF's `APIView.default_response_headers`, per view. `null` for a plain Django view.
@@ -70,8 +75,19 @@ import type { V1ViewName } from '../../auth/permissions/permission-matrix';
 export interface DrfViewHeaders {
   /** `Allow` — `[m.upper() for m in http_method_names if hasattr(self, m)]`, DRF's order. */
   readonly allow: string;
-  /** `Vary: Accept`, set when the view has more than one renderer class. */
-  readonly varyAccept: boolean;
+  /**
+   * The view's `renderer_classes`, in declaration order — parity finding **F6**.
+   *
+   * Two things read this, and both are DRF reading the same attribute:
+   *
+   *  * `APIView.default_response_headers` (`views.py:154-160`) sets `Vary: Accept` when
+   *    `len(self.renderer_classes) > 1`. That used to be a hand-set `varyAccept` boolean;
+   *    deriving it removes the chance of the flag and the renderer list disagreeing.
+   *  * `perform_content_negotiation` negotiates against it in `initial()`, **before**
+   *    authentication — a 406, or a 404 for an unmatched `?format=`. See
+   *    {@link DrfContentNegotiationMiddleware}.
+   */
+  readonly renderers: readonly DrfRenderer[];
 }
 
 /**
@@ -186,11 +202,16 @@ export interface RequestWithDjangoRoute {
   djangoRoute?: DjangoUrlPattern;
 }
 
-const DRF_JSON_ONLY = (allow: string): DrfViewHeaders => ({ allow, varyAccept: false });
+/** A view that narrows `renderer_classes` to `JSONRenderer` — only `ObtainAuthToken`. */
+const DRF_JSON_ONLY = (allow: string): DrfViewHeaders => ({
+  allow,
+  renderers: JSON_ONLY_RENDERERS,
+});
 
 /** The captured segment of a two-segment `/api/user/<x>` path. */
 const lastSegment = (pathInfo: string): string => pathInfo.slice(pathInfo.lastIndexOf('/') + 1);
-const DRF = (allow: string): DrfViewHeaders => ({ allow, varyAccept: true });
+/** A view on DRF's `DEFAULT_RENDERER_CLASSES`: `JSONRenderer` + `BrowsableAPIRenderer`. */
+const DRF = (allow: string): DrfViewHeaders => ({ allow, renderers: DEFAULT_RENDERERS });
 
 /**
  * `api/urls.py` followed by `fondo_api/urls.py`, in v1's order (first match wins in Django;

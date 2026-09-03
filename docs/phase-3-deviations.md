@@ -49,7 +49,50 @@ Audience: `nestjs-reviewer` (§1–§3), `manual-tester` (§4 — everything it 
 | **P3-D6** | An **uncaught** exception renders Django's HTML 500 page: `<h1>Server Error (500)</h1>`, `Content-Type: text/html`, `Content-Length: 27`. | A zero-byte 500 with no `Content-Type` (the DRF-empty-body shape). | The same species as **D13** (v2 answers JSON/empty where Django answers HTML), extended to the 500 page. ⚠️ Note v1 has **two** different 500 bodies and v2 reproduces the other one exactly: `UserAppsView`'s `except Exception: return Response(status=500)` is a *DRF* response and really is zero bytes in both. **Corrected 2026-09-02** (parity finding **F1**): that last sentence was true of the *body* and false of the *headers* — v2 stripped `Allow` and `Vary: Accept` off every 500, where v1 keeps them on the DRF-returned one. Fixed, not deviated; the caught 500 is now byte-identical to v1 on all seven inputs that reach that `except`. The **scope of this row is therefore the uncaught 500 only.** |
 | **P3-D7** | The `csrftoken` cookie carries `Secure` in production (`CSRF_COOKIE_SECURE = True`) and not in development/test. | Same, keyed on `ENVIRONMENT`. | Not a deviation; recorded because the live comparison in §3 shows it as the one header difference between the two running servers, and it is a settings difference rather than a code one. |
 
-| **P3-D8** | With `Accept: text/html` **every** DRF response is rendered by `BrowsableAPIRenderer` as an HTML page — not only errors. Measured on the live v1: `GET /api/user` as ADMIN is **3 005** bytes of JSON under `Accept: */*` and **15 760** bytes of HTML under `Accept: text/html`; the 405 on `GET /api/user/activate/1` is 40 bytes vs 5 913; the `OPTIONS` metadata document 172 vs 6 135. (The Django-rendered 500 page is unaffected — it never reaches DRF.) | v2 always answers JSON, whatever the `Accept` header. | v2 ships no browsable API: it is a development affordance — a styled HTML console for poking at the API from a browser — with no client, and porting a Django template pack for every DRF response is not migration work. **D13's species**, generalised: v1 answers HTML where v2 answers JSON. ⚠️ Registered now rather than earlier because it was conflated with **P1-D2**, which was about the `OPTIONS` *document* and is now withdrawn — that document is four static keys and v2 serves it byte for byte (finding **F4**). What remains is the HTML rendering, and it reaches routes Phases 1 and 2 already shipped, not just `OPTIONS`. No v1 client sends `Accept: text/html`; the React app sends `application/json`. |
+| **P3-D8** | With `Accept: text/html` (or `?format=api`) **every** DRF response is rendered by `BrowsableAPIRenderer` as an HTML page — not only errors. Measured live: `GET /api/user` as ADMIN is **3 005** bytes of JSON under `Accept: */*` and **15 760** bytes of HTML under `Accept: text/html`; the 405 on `GET /api/user/activate/1` is 40 bytes vs 5 913; the `OPTIONS` metadata document 172 vs 6 135. `Accept: text/*` selects it too. Separately, `JSONRenderer` honours an **`indent` media-type parameter**: `Accept: application/json;indent=8` renders `json.dumps(..., indent=8, separators=(',', ': '))` — the `/api-token-auth` 400 is 79 bytes compact and **152** indented. (Django's own HTML 500/400 pages are unaffected — they never reach DRF; those are **P3-D6** and **D13**.) | v2 always answers **compact JSON**, whatever the `Accept`. It ships one renderer, `JSONRenderer`. | v2 ships no browsable API: it is a development affordance — a styled HTML console for poking at the API from a browser — with no client, and porting a Django template pack for every DRF response is not migration work. **D13's species**, generalised: v1 answers HTML where v2 answers JSON. The `indent` parameter is the same species one level down — a *renderer* rendering the same data differently — and is registered rather than implemented because reaching it means threading a per-request indent through the Express `json replacer` that condition **C2** installed for money fields, which is a real risk for a header no client sends. **No v1 client sends either**: the React app sends `application/json`. ⚠️ Registered now rather than earlier because it was conflated with **P1-D2**, which was about the `OPTIONS` *document* and is now withdrawn — that document is four static keys and v2 serves it byte for byte (finding **F4**). |
+
+> ### ⚠️ P3-D8 was rewritten on 2026-09-03, and what it used to cover is now **implemented**
+>
+> Round 2 (**F6**) proved the old wording — "v1 renders HTML where v2 renders JSON", a body
+> difference — understated the deviation by a whole risk class. `Accept` does not only pick a
+> *renderer* in DRF, it can **refuse the request**:
+> `APIView.initial()` runs `perform_content_negotiation` **before** `perform_authentication`,
+> before `check_permissions`, and before `dispatch` even looks up the handler
+> (`rest_framework/views.py:398-414, 490-501`). An `Accept` matching no renderer is therefore a
+> **406 before anything happens**, and the `?format=` override can be a **404** the same way.
+> Measured live, all zero-write:
+>
+> ```
+> GET  /api/user            Token deadbeef   Accept: application/xml  -> 406  (401 under */*)
+> GET  /api/user/activate/1                  Accept: application/xml  -> 406  (405 under */*)
+> OPTIONS /api-token-auth                    Accept: application/xml  -> 406  (200 under */*)
+> POST /api/user/power {"type":"get",...}    Accept: application/xml  -> 406  (500 under */*)
+> DELETE /api/user/<id>     ADMIN            Accept: application/xml  -> 406, row untouched
+> GET  /api/user?format=xml Token deadbeef                            -> 404 {"detail":"Not found."}
+> ```
+>
+> The last two rows are why this was **not** re-registered as a deviation. v2 ignored `Accept`
+> entirely, so on a *write* endpoint v1 refused the request before any side effect and v2
+> performed it: a proxy or a misconfigured client sending one unacceptable `Accept` would
+> mutate data against v2 that it could never have mutated against v1. That is not a rendering
+> difference, and no argument about "no client sends `Accept: text/html`" reaches it —
+> `application/xml` is not the HTML branch, and the `*/*` fallback that saves real browsers
+> does not save a client sending a single unacceptable type.
+>
+> **Implemented** in `src/common/http/drf-content-negotiation.ts` (a port of
+> `DefaultContentNegotiation.select_renderer`, `order_by_precedence` and `_MediaType`) and
+> `drf-content-negotiation.middleware.ts`, which sits between the URL resolver and the body
+> parser so it runs before both guards — v1's order exactly. `BrowsableAPIRenderer` is present
+> in the renderer table so that negotiation reaches the same *decision* v1 reaches; what v2
+> then renders is JSON, and **that** is all P3-D8 now claims.
+>
+> Residual, deliberately not ported: `SuspiciousMultipartForm`'s "the multipart parser got
+> stuck" guard, and the fact that Python's `order_by_precedence` returns *sets*, so when two
+> equally-specific media types match the same renderer v1's reported `accepted_media_type` is
+> hash-ordered. Neither is observable — v2's `Content-Type` comes from `renderer.media_type`,
+> which is what `Response.rendered_content` uses in v1 too (verified: v1 answers
+> `Content-Type: application/json` even for `Accept: application/json;indent=8`).
+
 
 Nothing else in Phase 3 departs from v1.
 
@@ -361,9 +404,9 @@ three measured orders with no per-route string. Recorded in `django-url-conf.ts`
 ## 6. Parity round 1 — the five findings, fixed
 
 `docs/parity-phase-3.md` filed **FAIL** on five unregistered differences, all at the HTTP
-edge. All five are fixed and re-verified against the same live v1 the tester used
-(`fondo-v1-p3`, gunicorn 19.9.0, `api.settings.production`, `fondodev`, host port **8451**).
-One commit each.
+edge, and round 2 added two more (**F6**, **F8**) plus one coverage gap (**R2.11.5**). All are
+fixed and re-verified against the same live v1 the tester used (`fondo-v1-p3`,
+gunicorn 19.9.0, `api.settings.production`, `fondodev`, host port **8451**). One commit each.
 
 | # | Fixed by | Where |
 |---|---|---|
@@ -372,6 +415,7 @@ One commit each.
 | **F3** | `@DjangoView()` — "the v1 counterpart is a plain Django view, so there are no `authentication_classes` and no `permission_classes`". Both guards honour it, **and only when the resolved URL-table entry agrees** (`view !== null && drf === null`). | `auth/decorators/django-view.decorator.ts`, both guards, `password-reset.controller.ts` |
 | **F4** | DRF's `OPTIONS` metadata document implemented for the two views that clear `permission_classes`. **P1-D2 withdrawn**; the browsable-API residual registered as **P3-D8**. | `common/http/drf-metadata.ts`, `auth.controller.ts`, `user-activate.controller.ts` |
 | **F5** | `csrfmiddlewaretoken` is read from the body for `POST` alone, then the `X-CSRFToken` fallback — Django's three lines, in order. | `password-reset.controller.ts::rejectCsrf` |
+| **F6** | **DRF's content negotiation, ported.** `DefaultContentNegotiation.select_renderer` + `order_by_precedence` + `_MediaType`, run from a middleware placed between the URL resolver and the body parser — i.e. **before both guards**, which is where `APIView.initial()` runs it. An `Accept` matching no renderer is a **406**; a `?format=` no renderer declares is a **404**; both precede authentication, permissions, the handler and any write. Round 2 filed this as "re-word P3-D8"; it was implemented instead, because on `DELETE /api/user/<id>` v1 refused and **v2 mutated the row** — a difference in what the database ends up containing, not in what a page looks like. P3-D8 rewritten to claim only the rendering. | `common/http/drf-content-negotiation.ts`, `drf-content-negotiation.middleware.ts`, `django-parse-header.ts`, `django-url-conf.ts` (`DrfViewHeaders.varyAccept` → `renderers`) |
 
 ### 6.1 Three things in the report were approximate
 
