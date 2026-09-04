@@ -41,9 +41,13 @@ describe('amortization — fondo_api/services/loan.py __generate_table / __calcu
       expect(getRate(timelimit)).toBe(expected);
     });
 
-    it('falls through to 0.015 above 36 — reachable only if the clamp is removed', () => {
+    it('falls through to 0.015 above 36 — reachable only if D4 stops guarding the boundary', () => {
       // `services/loan.py:320-326` has no `else`; the final `return 0.015` catches both
-      // `<= 6` and `> 36`. `create_loan` clamps first, which is why the second half is dead.
+      // `<= 6` and `> 36`. What keeps the second half dead **changed with D4**: in v1 it is
+      // `create_loan`'s silent clamp to 36, in v2 it is D4's `1 <= timelimit <= 36`
+      // validation, which refuses 37 with a 400 before the lookup runs. Delete that check and
+      // this branch goes live, pricing a 48-month loan at the 6-month rate. The cell documents
+      // the trap; it does not endorse it.
       expect(getRate(37)).toBe('0.015');
       expect(getRate(1000)).toBe('0.015');
     });

@@ -37,9 +37,10 @@ import {
  * Two further deviations are *additive* — they refuse things v1 allowed, and no v1 test
  * exercised them, so nothing moves:
  *
- * * **D4** — `timelimit < 1` is a 400 at create (v1: 201, then a `DivisionByZero` 500 at
- *   approval). The `> 36` clamp is **unchanged and still silent**, which `test_post_loan_5`
- *   pins.
+ * * **D4** — `1 <= timelimit <= 36` is a 400 at create, **both bounds** (operator Q9). Below 1,
+ *   v1 answers 201 and then dies with `DivisionByZero` at approval, so nothing moves. Above 36,
+ *   v1 **silently clamps** and answers 201 — so `test_post_loan_5` **does** move, from 201 to
+ *   400. It is the one moved expectation on the create path.
  * * **D10** — `GET /api/loan/<id>` and `paymentProjection` are restricted to the loan's owner
  *   plus roles `[0,1,2]`. Every v1 test reads its **own** loan as the ADMIN, so none moves.
  *
@@ -199,14 +200,27 @@ describe('Phase 4 — /api/loan (port of test_loan_views.py)', () => {
   });
 
   /**
-   * `test_post_loan_5` — ⚠️ **the `> 36` clamp stays silent.** It is *not* part of D4; the
-   * brief's Phase 4 scope keeps it verbatim, and this cell is the guard against someone
-   * "completing" D4 by turning it into a 400.
+   * `test_post_loan_5` — a **moved expectation**. v1 silently clamps 37 to 36 and answers
+   * `201`; operator **Q9** decided a term outside `1-36` is a **400**, so D4 removes the
+   * clamp and v2 refuses. The plan's §3 describes v1's clamp and §5/§9 decide against it —
+   * where they disagree, §5 wins, because a registered deviation *is* the decision to
+   * diverge from what §3 documents.
    */
-  it('test_post_loan_5: timelimit 37 is silently clamped to 36 and priced at 0.025', async () => {
-    const loan = await loanRow(await postLoan(loanWithQuotaFee(37)));
-    expect(loan.rate.toFixed(3)).toBe('0.025');
+  it('test_post_loan_5 (moved): timelimit 37 is a 400 and writes no row, where v1 clamps to 36', async () => {
+    const response = await request(server())
+      .post('/api/loan')
+      .set(asAdmin())
+      .send(loanWithQuotaFee(37))
+      .expect(400);
+    expect(response.body).toEqual({ message: 'Timelimit must be between 1 and 36' });
+    await expect(prisma.loan.count()).resolves.toBe(0);
+  });
+
+  /** The upper bound from the accepting side, so the boundary is pinned on both sides. */
+  it('D4: timelimit 36 is accepted — the upper bound is inclusive', async () => {
+    const loan = await loanRow(await postLoan(loanWithQuotaFee(36)));
     expect(loan.timelimit).toBe(36);
+    expect(loan.rate.toFixed(3)).toBe('0.025');
   });
 
   /** `test_post_loan_error` */
@@ -227,7 +241,7 @@ describe('Phase 4 — /api/loan (port of test_loan_views.py)', () => {
       .set(asAdmin())
       .send({ ...loanWithQuotaFee5, timelimit: 0 })
       .expect(400);
-    expect(response.body).toEqual({ message: 'Timelimit must be greater or equal than 1' });
+    expect(response.body).toEqual({ message: 'Timelimit must be between 1 and 36' });
     await expect(prisma.loan.count()).resolves.toBe(0);
   });
 
@@ -1489,7 +1503,7 @@ describe('Phase 4 — /api/loan (port of test_loan_views.py)', () => {
       .set(asAdmin())
       .send({ ...refinanceBody(false), timelimit: 0 })
       .expect(400);
-    expect(response.body).toEqual({ message: 'Timelimit must be greater or equal than 1' });
+    expect(response.body).toEqual({ message: 'Timelimit must be between 1 and 36' });
   });
 
   // ==========================================================================

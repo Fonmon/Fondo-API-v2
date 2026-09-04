@@ -217,9 +217,17 @@ export function generateAmortizationTable(loan: AmortizableLoan): AmortizationRe
  * ```
  *
  * ⚠️ **The final `return` is a fall-through, not an "else ≤ 6" branch.** A `timelimit`
- * *above* 36 also lands on `0.015` — which is only unreachable because `create_loan` clamps
- * to 36 first (`services/loan.py:31-32`). Keeping the fall-through shape means the clamp and
- * the table cannot drift apart silently.
+ * *above* 36 also lands on `0.015` — an absurd rate for the longest possible term, and the
+ * table's sharpest edge. It is unreachable, but **what makes it unreachable changed with
+ * deviation D4**: in v1 it is `create_loan`'s silent clamp to 36 (`services/loan.py:31-32`),
+ * and in v2 it is D4's `1 <= timelimit <= 36` **validation**, which refuses 37 with a 400
+ * before the lookup ever runs (operator Q9).
+ *
+ * The fall-through shape is kept rather than tightened into an explicit `<= 6` guard, because
+ * it is what v1 wrote and because it keeps the dependency visible: **delete the validation and
+ * this branch goes live**, pricing a 48-month loan at the 6-month rate. A cell in
+ * `amortization.spec.ts` pins `getRate(37) === '0.015'` for exactly that reason — it documents
+ * the trap, it does not endorse it.
  *
  * ⚠️ The rate is frozen at **request** time (operator Q4), so a loan awaiting approval across
  * a rate change is approved at the old rate. Nothing re-derives it at approval.
@@ -241,5 +249,15 @@ export function getRate(timelimit: number): string {
   return '0.015';
 }
 
-/** `create_loan`'s silent upper clamp: `if int(obj['timelimit']) > 36: obj['timelimit'] = 36`. */
+/**
+ * The term bounds **D4** enforces at the boundary (operator **Q9**: "Term outside 1–36" →
+ * "Reject 400").
+ *
+ * ⚠️ In v1 these are not bounds at all. `MAX_TIMELIMIT` is where `create_loan` *silently
+ * clamps* (`if int(obj['timelimit']) > 36: obj['timelimit'] = 36`, `services/loan.py:31-32`)
+ * and there is **no** lower bound — `timelimit = 0` is written and then raises
+ * `DivisionByZero` in {@link generateAmortizationTable} at approval time. v2 refuses both with
+ * a 400 at create; see `LoanService.createLoan`.
+ */
+export const MIN_TIMELIMIT = 1;
 export const MAX_TIMELIMIT = 36;

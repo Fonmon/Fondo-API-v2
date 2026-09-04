@@ -180,20 +180,49 @@ describe('LoanService (unit)', () => {
       expect(data.timelimit).toBe(timelimit);
     });
 
-    /** `test_post_loan_5` — the clamp is **silent** and is deliberately kept (brief scope). */
-    it('test_post_loan_5: timelimit 37 is silently clamped to 36 and priced at 0.025', async () => {
+    /**
+     * `test_post_loan_5` — a **moved expectation**, not a spec.
+     *
+     * v1 answers `201` with `timelimit == 36` for a submitted `37`, and that test asserts it.
+     * Operator **Q9** ("Term outside 1-36" -> "Reject 400") decided against it, so **D4**
+     * removes the clamp entirely and v2 answers **400**. The plan's §3 *describes* the clamp
+     * and §5/§9 *decide* against it; where they disagree §5 wins, because a registered
+     * deviation is precisely a decision to diverge from what §3 documents. A v1 test asserting
+     * v1's behaviour cannot settle whether v2 keeps it.
+     */
+    it('test_post_loan_5 (moved): timelimit 37 is a 400 and writes nothing, where v1 clamps to 36', async () => {
       const { service, prisma } = build({ available_quota: 500n });
-      await service.createLoan(1, { ...BODY, value: 300, timelimit: 37 });
+      await expectAsyncRefusal(
+        () => service.createLoan(1, { ...BODY, value: 300, timelimit: 37 }),
+        HttpStatus.BAD_REQUEST,
+        { message: 'Timelimit must be between 1 and 36' },
+      );
+      expect(prisma.loan.create).not.toHaveBeenCalled();
+    });
+
+    /** The upper boundary from the accepting side — 36 must still be a 201 at 0.025. */
+    it('D4: timelimit 36 is the highest accepted value, priced at 0.025', async () => {
+      const { service, prisma } = build({ available_quota: 500n });
+      await service.createLoan(1, { ...BODY, value: 300, timelimit: 36 });
       const data = firstArg(prisma.loan.create).data as Record<string, unknown>;
       expect(data.timelimit).toBe(36);
       expect((data.rate as Prisma.Decimal).toFixed(3)).toBe('0.025');
     });
 
-    it('the clamp happens BEFORE the rate lookup, so 1000 is 0.025 and not the 0.015 fallthrough', async () => {
+    /**
+     * v1 clamped *before* the rate lookup, which is what kept `getRate`'s `0.015`
+     * fall-through unreachable. D4's validation is now what keeps it unreachable — the
+     * request is refused before the lookup runs. Same guarantee, different mechanism; see
+     * the fall-through note in `amortization.ts`.
+     */
+    it('an absurd timelimit is refused before the rate lookup, so the 0.015 fallthrough stays unreachable', async () => {
       const { service, prisma } = build({ available_quota: 500n });
-      await service.createLoan(1, { ...BODY, value: 300, timelimit: 1000 });
-      const data = firstArg(prisma.loan.create).data as Record<string, unknown>;
-      expect((data.rate as Prisma.Decimal).toFixed(3)).toBe('0.025');
+      await expectAsyncRefusal(
+        () => service.createLoan(1, { ...BODY, value: 300, timelimit: 1000 }),
+        HttpStatus.BAD_REQUEST,
+        { message: 'Timelimit must be between 1 and 36' },
+      );
+      expect(prisma.loan.create).not.toHaveBeenCalled();
     });
 
     /** `test_post_loan_error`. */
@@ -227,7 +256,7 @@ describe('LoanService (unit)', () => {
     it('D4: timelimit 0 is a 400 and writes nothing (v1 writes the row, then 500s at approval)', async () => {
       const { service, prisma } = build({ available_quota: 500n });
       await expect(service.createLoan(1, { ...BODY, timelimit: 0 })).rejects.toMatchObject({
-        body: { message: 'Timelimit must be greater or equal than 1' },
+        body: { message: 'Timelimit must be between 1 and 36' },
       });
       try {
         await service.createLoan(1, { ...BODY, timelimit: 0 });
@@ -242,7 +271,7 @@ describe('LoanService (unit)', () => {
       await expectAsyncRefusal(
         () => service.createLoan(1, { ...BODY, timelimit: -3 }),
         HttpStatus.BAD_REQUEST,
-        { message: 'Timelimit must be greater or equal than 1' },
+        { message: 'Timelimit must be between 1 and 36' },
       );
     });
 

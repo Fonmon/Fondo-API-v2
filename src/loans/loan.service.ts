@@ -36,6 +36,7 @@ import {
   generateAmortizationTable,
   getRate,
   MAX_TIMELIMIT,
+  MIN_TIMELIMIT,
 } from './amortization';
 import {
   LOAN_APPROVED,
@@ -77,7 +78,7 @@ export const LOAN_READ_PRIVILEGED_ROLES: readonly number[] = Object.freeze([0, 1
  *
  * | # | what changes |
  * |---|---|
- * | **D4** | `timelimit < 1` is a **400** at create instead of a `DivisionByZero` 500 at approval. The `> 36` clamp is **ported unchanged** (silent). |
+ * | **D4** | `1 <= timelimit <= 36` is enforced at create with a **400** (operator Q9). v1 has neither bound: below 1 it 500s at approval, above 36 it **silently clamps**. The clamp is **gone**. |
  * | **D6** | `LoanDetail` is **upserted** on approval, not inserted, and every read of it is deterministic. |
  * | **D8** | the bulk upload returns the ids it auto-closed instead of a bare, bodyless 200. |
  * | **D9** | only `0→1`, `0→2`, `1→3`, `1→2` are legal state transitions; anything else is a **409** with no mail and no write. |
@@ -145,21 +146,33 @@ export class LoanService {
    * It is sent **after** the row is written and **outside** any transaction (v1 has none here,
    * and Phase 2 condition 3 forbids publishing from inside one).
    *
-   * ## D4 — the lower bound v1 does not have
+   * ## D4 — `1 <= timelimit <= 36`, enforced at the boundary. **Both** bounds.
    *
-   * v1 accepts `timelimit = 0`, writes the row, and then dies with `DivisionByZero` inside
-   * `__generate_table` **at approval time** — by which point the member has a loan request
-   * that can never be approved and no error anyone connected to the create call. Operator Q9:
-   * reject. The check sits exactly where v1 first reads the value (after the quota check, so
-   * a member over quota still gets v1's 406) and uses v1's own message register
-   * (`'Page number must be greater or equal than 0'`, `'State must be less or equal than 3'`).
+   * v1 has neither. Below 1 it accepts `timelimit = 0`, writes the row, and then dies with
+   * `DivisionByZero` inside `__generate_table` **at approval time** — by which point the
+   * member holds a request that can never be approved and nothing connected the failure to
+   * the create call. Above 36 it **silently clamps** (`services/loan.py:31-32`), so a member
+   * asking for 48 months gets a 36-month loan and a `201`, with no indication the term was
+   * changed.
    *
-   * The **upper** bound stays v1's silent clamp: `timelimit = 37` is a **201** that writes
-   * `36`, which `test_post_loan_5` asserts.
+   * Operator **Q9** — "Term outside 1–36" → **"Reject 400"** (`MIGRATION_PLAN.md` §9, and the
+   * v0.4 changelog records D4 changing from *validate* to *reject 400*). So **the clamp is
+   * gone**, not just the lower bound.
+   *
+   * ⚠️ **`test_post_loan_5` asserts the clamp — and that is a *moved expectation*, not a
+   * spec.** v1 answers `201` with `timelimit == 36` for a submitted `37`; v2 answers **400**.
+   * §3 of the plan *describes* the clamp and §5/§9 *decide* against it; where the two
+   * disagree, §5 wins by construction, because a registered deviation is precisely a decision
+   * to diverge from what §3 documents. Two descriptions of v1 plus a v1 test will always
+   * agree with each other, and that agreement carries no information about what v2 should do.
+   *
+   * The check sits exactly where v1 first reads the value — **after** the quota check, so a
+   * member over quota still gets v1's 406 — and the message follows v1's own register
+   * (`'State must be between 0 and 4'`, `'Page number must be greater or equal than 0'`).
    *
    * @returns the new loan's id.
    * @throws ApiException 406 `{'message': 'User does not have available quota'}`
-   * @throws ApiException 400 `{'message': 'Timelimit must be greater or equal than 1'}` (D4)
+   * @throws ApiException 400 `{'message': 'Timelimit must be between 1 and 36'}` (D4)
    */
   async createLoan(
     userId: number,
@@ -187,16 +200,17 @@ export class LoanService {
       );
     }
 
-    // `int(obj['timelimit'])`, then the silent clamp — both before the rate lookup.
-    const requestedTimelimit = toDjangoSmallInt(pyGet(obj, 'timelimit'), 'timelimit');
-    if (requestedTimelimit < 1) {
-      // D4. v1 writes the row here and 500s at approval instead.
+    // `int(obj['timelimit'])`, then D4's bounds check — where v1 has its silent clamp, and
+    // before the rate lookup either way.
+    const timelimit = toDjangoSmallInt(pyGet(obj, 'timelimit'), 'timelimit');
+    if (timelimit < MIN_TIMELIMIT || timelimit > MAX_TIMELIMIT) {
+      // D4 / Q9. v1 writes the row for both: below 1 it 500s at approval, above 36 it
+      // silently books a shorter loan than the member asked for.
       throw ApiException.withMessage(
         HttpStatus.BAD_REQUEST,
-        'Timelimit must be greater or equal than 1',
+        `Timelimit must be between ${MIN_TIMELIMIT} and ${MAX_TIMELIMIT}`,
       );
     }
-    const timelimit = Math.min(requestedTimelimit, MAX_TIMELIMIT);
 
     const created = await this.prisma.loan.create({
       data: {

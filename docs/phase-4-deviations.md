@@ -20,8 +20,8 @@ Audience: `nestjs-reviewer` (§1–§3), `manual-tester` (§4 — everything it 
 
 | | before | after |
 |---|---|---|
-| unit | 1628 / 55 suites | **1829 / 58 suites** |
-| e2e | 699 + 1 skipped / 15 suites | **817 + 1 skipped / 16 suites** |
+| unit | 1628 / 55 suites | **1830 / 58 suites** |
+| e2e | 699 + 1 skipped / 15 suites | **818 + 1 skipped / 16 suites** |
 
 `fondodev` verified unchanged after the run: `schedulertask 626`,
 `notificationsubscriptions 94 / max(id) 1468 / 1 distinct xmin`, `auth_user 15`, `power 20`,
@@ -38,7 +38,7 @@ per table, on `/dev/mapper/root` — persistent, not tmpfs).
 
 | # | v1 | v2 | Where |
 |---|---|---|---|
-| **D4** | `timelimit` has **no lower bound**. `timelimit = 0` is accepted at create, the row is written, and approval then dies with `decimal.DivisionByZero` inside `__generate_table` (`Decimal(loan.value) / 0`). The member is left holding a request that can never be approved, and nothing connected the failure to the create call. | **400** `{"message": "Timelimit must be greater or equal than 1"}` at create. Placed exactly where v1 first reads the value — i.e. **after** the quota check, so an over-quota request is still v1's 406. | `loan.service.ts::createLoan` |
+| **D4** | v1 has **neither bound**. Below 1: `timelimit = 0` is accepted, the row is written, and approval dies with `decimal.DivisionByZero` inside `__generate_table` (`Decimal(loan.value) / 0`) — the member holds a request that can never be approved and nothing connected the failure to the create call. Above 36: `create_loan` **silently clamps** (`services/loan.py:31-32`), so a member asking for 48 months is booked at 36 and told `201`. | **400** `{"message": "Timelimit must be between 1 and 36"}` at create, **both bounds** (operator **Q9**). The clamp is **gone**. Placed exactly where v1 first reads the value — **after** the quota check, so an over-quota request is still v1's 406. ⚠️ `test_post_loan_5` is therefore a **moved expectation** (201 → 400), the only one on the create path. | `loan.service.ts::createLoan` |
 | **D6** | `LoanDetail.loan` is a plain `ForeignKey`, so re-approving a loan **inserts a second detail row**; `LoanDetail.objects.get(loan_id=...)` then raises `MultipleObjectsReturned` and `GET /api/loan/<id>` is a permanent **500**. This is the recovery path for a wrongly auto-closed loan, so the recovery *is* the corruption. | The approval write is an **upsert** keyed on `loan_id`, and **every** read of `LoanDetail` is `findFirst` + `orderBy: {id: 'asc'}` — deterministic, so a pre-existing duplicate degrades to "the second row is ignored" instead of a permanent outage. ⚠️ The physical `UNIQUE (loan_id)` is **not** applied — see §5.1. | `loan.service.ts::upsertLoanDetail`, `::readLoanDetail`, `::updateLoanDetail` |
 | **D8** | `bulk_update_loans` answers a bare `200` with **no body**, so nothing tells the treasurer which loans the upload just closed. | `200 {"closed_loans": [<ids>]}`, in close order, with no cap on length (operator Q3). | `loan.service.ts::bulkUpdateLoans` |
 | **D9** | `update_loan` writes `loan.state` unconditionally. Re-approving regenerates the amortisation table, writes a second `LoanDetail` (D6) and re-sends the borrower's email; `3 → 1` re-opens a closed loan; a **negative** state passes `LoanDetailView.patch`'s `new_state <= 3` check and is stored verbatim. | Legal transitions only — `0→1`, `0→2`, `1→3`, `1→2` (operator Q14). Anything else is **409** `{"message": "Invalid state transition"}` with **no mail, no scheduler write and no state change**. The loan is looked up first, so a missing id is still v1's 404. | `loan.service.ts::assertLegalLoanTransition` |
@@ -273,6 +273,7 @@ redone:
 | D25 neutered (`assertOwnership(actor, actor.id, …)`) | **2** |
 | D26 + D27 neutered | **11** |
 | D4 + D6 + D9 + D10 neutered | **10** e2e, **12** unit |
+| D4's clamp restored alone (upper bound removed, `Math.min` back) | **2** unit, **1** e2e — the moved `test_post_loan_5` cells |
 | amortisation date anchoring broken (accumulate instead of anchor) | **13** |
 
 All restored, and the full suites re-run green afterwards.
@@ -289,7 +290,9 @@ All restored, and the full suites re-run green afterwards.
 | `PATCH /api/loan/<id>` `{"state":1}` on an **APPROVED** loan | 200, second `LoanDetail`, second email | **409**, no mail, no write | **D9** / **D6** |
 | `PATCH /api/loan/<id>` `{"state":-1}` | 200, `state = -1` stored | **409** | **D9** |
 | `PATCH /api/loan` (the TSV) | `200`, **no body** | `200 {"closed_loans":[…]}` | **D8** |
-| `POST /api/loan` with `timelimit: 0` | **201** (then a 500 at approval) | **400** `{"message":"Timelimit must be greater or equal than 1"}` | **D4** |
+| `POST /api/loan` with `timelimit: 0` | **201** (then a 500 at approval) | **400** `{"message":"Timelimit must be between 1 and 36"}` | **D4** |
+| `POST /api/loan` with `timelimit: 37` | **201**, silently booked as `36` at rate `0.025` | **400** `{"message":"Timelimit must be between 1 and 36"}`, no row written | **D4** |
+| `POST /api/loan/<id>/refinance` with `timelimit: 0` or `> 36` | **201** / clamped | **400**, same message | **D4** |
 | `GET /api/loan/<id>` as a MEMBER who does not own it | 200 | **403** `{"detail":"You do not have permission to perform this action."}` | **D10** |
 | `POST /api/loan/<id>/paymentProjection` as a MEMBER who does not own it | 200 | **403**, same body | **D10** |
 | `GET /api/user/<id>` as a MEMBER, another member's id | 200 with their `finance` | **403**, same body | **D25** |
