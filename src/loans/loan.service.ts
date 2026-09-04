@@ -16,6 +16,7 @@ import { fromDateColumn, type PlainDate } from '../common/utils/date.util';
 import {
   asPythonDict,
   pyGet,
+  pythonGreaterThan,
   toDjangoDate,
   toDjangoInt,
   toDjangoSmallInt,
@@ -72,6 +73,22 @@ const WITH_OWNER = { user: { include: { auth_user: true } } } as const;
 export const LOAN_READ_PRIVILEGED_ROLES: readonly number[] = Object.freeze([0, 1, 2]);
 
 /**
+ * The smallest `value` a loan may be created with — deviation **D30**.
+ *
+ * ⚠️ **Neither stack has this bound today.** `create_loan`'s only test on `value` is
+ * `> available_quota`, so `0` and `-1000` as plain JSON numbers are a `201` with a row on
+ * **v1 and v2 alike**; this is a divergence v2 introduces *by decision*, not a parity repair,
+ * and `manual-tester` has it in `docs/phase-4-deviations.md` §4.1 as such.
+ *
+ * The operator confirmed the fund has **no minimum loan amount**, so the floor is the weakest
+ * defensible one: money is whole units on a `BigIntegerField`, and a loan for zero or a
+ * negative amount is not a loan. Live evidence that it catches nothing in use: **0 of 425**
+ * rows have `value <= 0`, and the three smallest (ids 132 and 198 at `1`, id 109 at `500`)
+ * were all denied by hand. If a stated minimum ever arrives, it replaces this constant.
+ */
+export const MIN_LOAN_VALUE = 1n;
+
+/**
  * `fondo_api/services/loan.py:LoanService`.
  *
  * ## The deviations this class carries
@@ -83,6 +100,8 @@ export const LOAN_READ_PRIVILEGED_ROLES: readonly number[] = Object.freeze([0, 1
  * | **D8** | the bulk upload returns the ids it auto-closed instead of a bare, bodyless 200. |
  * | **D9** | only `0→1`, `0→2`, `1→3`, `1→2` are legal state transitions; anything else is a **409** with no mail and no write. |
  * | **D10** | `GET /api/loan/<id>` and `paymentProjection` are restricted to the loan's owner plus roles `[0,1,2]`. |
+ * | **D29** | the quota gate compares the **raw** body value and coerces only for the write, as v1 does — with one registered exception, an integer-shaped **string**, which v2 coerces rather than porting v1's `TypeError` 500. |
+ * | **D30** | `value < 1` is a **400** at create. ⚠️ v1 accepts `0` and `-1000` and **so did v2** until this row landed: a divergence by decision, not a parity repair. |
  *
  * ## What is deliberately **not** changed
  *
@@ -171,7 +190,10 @@ export class LoanService {
    * (`'State must be between 0 and 4'`, `'Page number must be greater or equal than 0'`).
    *
    * @returns the new loan's id.
-   * @throws ApiException 406 `{'message': 'User does not have available quota'}`
+   * @throws ApiException 406 `{'message': 'User does not have available quota'}` — on the
+   *   **raw** submitted value (**D29**), so `quota + 0.5` refuses here exactly as v1 does
+   *   rather than truncating into an accepted `quota`.
+   * @throws ApiException 400 `{'message': 'Loan value must be greater than 0'}` (**D30**)
    * @throws ApiException 400 `{'message': 'Timelimit must be between 1 and 36'}` (D4)
    */
   async createLoan(
@@ -192,12 +214,50 @@ export class LoanService {
       throw new PythonTypeError('UserFinance matching query does not exist.');
     }
 
-    const value = toDjangoInt(pyGet(obj, 'value'), 'value');
-    if (value > finance.available_quota && !refinance) {
+    const rawValue = pyGet(obj, 'value');
+
+    // ## D29 — compare **raw**, coerce for the write
+    //
+    // v1's gate is `if obj['value'] > user_finance.available_quota and not refinance`
+    // (`services/loan.py:27`): the comparison runs on the *body* value and `int()` happens
+    // later, on the write. That is the ordering Phase 3 established for the same reason at
+    // `user.service.ts::updateUserFinance` (`pythonNotEqual`, then `toDjangoInt`), and
+    // `createLoan` was the one place in v2 that had it the other way round.
+    //
+    // It is not cosmetic: `toDjangoInt` **truncates**, so with a quota of `Q` a submitted
+    // `Q + 0.5` is `> Q` raw (v1's 406) but `== Q` coerced — v2 answered 201 and stored `Q`,
+    // a different number from the one the member submitted. The divergent window is exactly
+    // `Q < value < Q + 1`; it is a measured cell in both suites.
+    //
+    // ⚠️ The one place v2 stays lenient is a JSON **string**, and it is deliberate: v1's
+    // `'1000' > 1000` is a `TypeError` — an uncaught 500 before any write — which is a crash
+    // and not a rule (D29, `docs/ba-phase-4-p4f1.md` §1). Coercing it here keeps `"1000"` a
+    // 201 and `"30000001"` the fund's real 406. The deviation is taken *here*, at the call
+    // site, so it stays visible; `pythonGreaterThan` itself is faithful to CPython.
+    const compared = typeof rawValue === 'string' ? toDjangoInt(rawValue, 'value') : rawValue;
+    // `and not refinance` is evaluated **after** the comparison in v1, so a body that cannot
+    // be compared at all is a 500 even on the refinance path. Same order here.
+    if (pythonGreaterThan(compared, finance.available_quota) && !refinance) {
       throw ApiException.withMessage(
         HttpStatus.NOT_ACCEPTABLE,
         'User does not have available quota',
       );
+    }
+
+    const value = toDjangoInt(rawValue, 'value');
+    if (value < MIN_LOAN_VALUE) {
+      // ## D30 — the lower bound neither stack has
+      //
+      // ⚠️ **v1 accepts this and so did v2 until now**: `create_loan`'s only test on `value`
+      // is `> available_quota`, so `0` and `-1000` as plain JSON numbers are 201 on both
+      // stacks. This is therefore a *divergence v2 introduces by decision*, not a parity fix
+      // — `manual-tester` must read the new 400 as expected. The operator confirmed the fund
+      // has **no minimum loan amount**, so the floor is 1 as cheap insurance.
+      //
+      // Placed after the coercion (so `0.5`, which truncates to 0, is caught too) and after
+      // the quota gate (so an over-quota request is still v1's 406), in D4's style and with
+      // D4's status.
+      throw ApiException.withMessage(HttpStatus.BAD_REQUEST, 'Loan value must be greater than 0');
     }
 
     // `int(obj['timelimit'])`, then D4's bounds check — where v1 has its silent clamp, and
@@ -466,14 +526,30 @@ export class LoanService {
    * ## D6 — upsert, not insert
    *
    * `__create_loan_detail` becomes an update-or-create keyed on `loan_id`. With D9 in place
-   * the second-row case is unreachable through the API; this is the recovery path for a loan
-   * wrongly closed by {@link bulkUpdateLoans}, whose repair is "set state back to 1 and
-   * re-approve" — which in v1 makes `GET /api/loan/<id>` a permanent 500.
+   * the second-row case is unreachable through the API.
+   *
+   * ⚠️ **D6 makes the repair of a wrongly auto-closed loan *safe when it happens*; it does
+   * not make it *reachable through this API*.** The repair is "set the state back and
+   * re-approve", and D9 refuses every route to it: `3 → 1` is a **409**, `3 → 0` is a 409,
+   * and there is no path from `1` back to `0` either
+   * ({@link LEGAL_LOAN_TRANSITIONS} has entries for states `0` and `1` only). So after an
+   * erroneous {@link bulkUpdateLoans} auto-close — which can close *every* APPROVED loan in
+   * the fund in one upload — **v2 has no API-level recovery at all**: someone with database
+   * access must `UPDATE fondo_api_loan SET state = 0`, and only *then* does D6's upsert earn
+   * its keep, by making the subsequent approval an update instead of v1's second row and
+   * permanent 500 on `GET /api/loan/<id>`.
+   *
+   * That is arguably the better trade — v1's "recovery" left the loan 500ing forever — but it
+   * is a change in operational posture. **Whether a wrongly closed loan should be re-openable
+   * through the API, and by whom, is a fund-policy question escalated to `business-analyst`
+   * (review condition C42); it is deliberately not decided here, and the transition table is
+   * deliberately unchanged.**
    *
    * @returns the serialised `LoanDetail` for an approval, `''` for every other transition —
    *   v1's `Response('', status=200)`, which `JSONRenderer` writes as the two bytes `""`.
    * @throws ApiException 404 `{'message': 'Loan does not exist'}`
-   * @throws ApiException 409 `{'message': 'Invalid state transition'}` (D9)
+   * @throws ApiException 409 `{'message': 'Invalid state transition'}` (D9) — also the answer
+   *   to the loser of a concurrent transition, whose compare-and-set matches no row.
    */
   async updateLoan(id: number, state: number): Promise<LoanDetailDto | ''> {
     return this.prisma.$transaction(async (tx) => this.updateLoanIn(tx, id, state), {
@@ -498,7 +574,26 @@ export class LoanService {
     // D9 — before any write, and before any mail.
     assertLegalLoanTransition(loan.state, state);
 
-    await tx.loan.update({ where: { id }, data: { state } });
+    // ⚠️ **Compare-and-set, not a plain update.** `findUnique` → guard → `update` is a
+    // lost-update race: Prisma's interactive transaction runs at the database default,
+    // **READ COMMITTED**, so two concurrent `PATCH /api/loan/<id> {"state":1}` on the same
+    // WAITING loan both read state `0`, both pass the guard above, both find no `LoanDetail`
+    // and **both insert one** — the exact duplicate D6 exists to survive, and the physical
+    // `UNIQUE (loan_id)` that would stop it is deferred to Phase 9 (§5.1 of
+    // `docs/phase-4-deviations.md`). The window is a double-clicked approve button.
+    //
+    // Adding `state: loan.state` to the predicate makes the write itself the serialisation
+    // point: the second transaction blocks on the first's row lock, re-evaluates the
+    // predicate after it commits, matches nothing and gets `count === 0`. The loser is
+    // answered with **D9's own 409** — the same status and body it would have received had
+    // it arrived a millisecond later and lost the guard instead of the write, which is the
+    // honest answer for a caller that lost the race.
+    //
+    // No migration and no schema change: this is a `WHERE` clause on a column Django owns.
+    const applied = await tx.loan.updateMany({ where: { id, state: loan.state }, data: { state } });
+    if (applied.count === 0) {
+      throw ApiException.withMessage(HttpStatus.CONFLICT, 'Invalid state transition');
+    }
 
     const mailBcc = await this.users.getUserEmails([0, 2]);
 
@@ -940,9 +1035,16 @@ export class LoanService {
  * Everything else — `1→1` (re-approval), `3→1` (re-opening a closed loan), `2→anything`,
  * `x→x`, and the negative states `LoanDetailView.patch`'s `new_state <= 3` check lets through
  * — is refused. v1 permits them all and each one corrupts the record differently: `1→1`
- * re-sends the borrower's email and writes a second `LoanDetail`; `3→1` is the auto-close
- * recovery path that D6 exists for; a negative state is stored verbatim and renders as an
- * unknown state on every screen.
+ * re-sends the borrower's email and writes a second `LoanDetail`; `3→1` re-opens a loan the
+ * fund has recorded as paid; a negative state is stored verbatim and renders as an unknown
+ * state on every screen.
+ *
+ * ⚠️ **There is no entry for state `3`, so this table is also what makes a wrongly
+ * auto-closed loan unrecoverable through the API** — `3→1` and `3→0` are both a 409. D6's
+ * upsert makes such a repair *safe* once someone with database access has set the state back
+ * by hand; it does not make it *reachable*. See {@link LoanService.updateLoan}'s D6 section.
+ * Whether that repair should exist as a route is fund policy, escalated to `business-analyst`
+ * as review condition **C42** — do not add a `3→…` entry here to “fix” it.
  */
 const LEGAL_LOAN_TRANSITIONS: ReadonlyMap<number, readonly number[]> = new Map([
   [LOAN_WAITING_APPROVAL, [LOAN_APPROVED, LOAN_DENIED]],

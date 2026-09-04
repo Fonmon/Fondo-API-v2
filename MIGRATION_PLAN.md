@@ -163,7 +163,16 @@ P9 Cutover (user-performed) + hstore→jsonb + decommission
 
 ---
 
+> **Why this line exists (C40).** Every convention this project carried successfully had a
+> *carrier* — a table, a type error, a unit assertion. Every one that slipped was a
+> paragraph: the §3/§5 precedence (D4's clamp), "compare raw then coerce" (D29), "the same
+> predicate" (P4-F2) — three failures in Phase 4 alone, all in the prose column. This index
+> is the carrier for "which decisions does this phase owe?", so a dispatch brief can be
+> checked against the register mechanically instead of by reading §3's description of v1.
+
 ### Phase 0 — Foundations, Prisma baseline, cross-cutting utilities
+
+**§5 rows this phase owns:** **D13**. *(Plus every cross-cutting row — D21, D22, D23, D24 — which start here and apply to all later phases.)*
 
 **Goal:** a NestJS app that boots against the real schema, with the primitives every later
 phase depends on. **No business endpoints.**
@@ -213,6 +222,8 @@ older than `0017` silently breaks those two phases.
 ---
 
 ### Phase 1 — Authentication and role permissions
+
+**§5 rows this phase owns:** **D1** (decide only — implemented in P3), **D18**.
 
 **Goal:** a request authenticated by v1 is authenticated identically by v2, and every role
 rule matches.
@@ -281,6 +292,8 @@ A decision deferred here gets silently baked in.
 
 ### Phase 2 — Outbound integrations: SES mail + SQS notifications
 
+**§5 rows this phase owns:** none. *(Verified against the register's Phase column, not assumed — the phase closed on conditions C19–C27 instead.)*
+
 **Goal:** v2 emits byte-identical emails and SQS messages. Before users/loans because both
 emit on write paths.
 
@@ -335,6 +348,8 @@ emit on write paths.
 ---
 
 ### Phase 3 — Users, finance, powers of attorney, password reset
+
+**§5 rows this phase owns:** **D1** (implement), **D2**, **D5**, **D11**, **D14**, **D15**, **D16**, **D17**, **D19**, **D20**. Cross-cutting **D22**, **D23**, **D24** land here first.
 
 **Routes:** `POST|GET|PATCH /api/user`, `GET|PATCH|DELETE /api/user/<id>`,
 `POST /api/user/<birthdates|power>`, `POST /api/user/activate/<id>`, `POST /password_reset/`.
@@ -446,6 +461,8 @@ emit on write paths.
 
 ### Phase 4 — Loans
 
+**§5 rows this phase owns:** **D4**, **D6**, **D8**, **D9**, **D10**, **D25**, **D26**, **D27**, **D29**, **D30**. **D28 is WITHDRAWN** — ported from v1 unchanged by operator Q31. ⚠️ **D10 and D25 must land together.**
+
 **The risk centre.** Most code, most money, most tests (33 in v1).
 
 **Routes:** `GET|POST|PATCH /api/loan`, `GET|PATCH /api/loan/<id>`,
@@ -506,6 +523,8 @@ emit on write paths.
 
 ### Phase 5 — Activities
 
+**§5 rows this phase owns:** none recorded. **TBD** — confirm against §5 before writing the phase brief rather than inferring from this line.
+
 **Routes:** `GET|POST /api/activity/year`, `GET|POST /api/activity/year/<id_year>`,
 `GET|PATCH|DELETE /api/activity/<id>`.
 
@@ -526,6 +545,8 @@ identical previous-year `enable` flip; both `patch=` modes identical.
 ---
 
 ### Phase 6 — Saving accounts (CAPs)
+
+**§5 rows this phase owns:** **D12**. **D3 is WITHDRAWN** (operator Q22/Q23).
 
 **Routes:** `GET|POST|PUT /api/saving-account` (GET/POST role ≤ 3, PUT `[0,2]`).
 
@@ -573,6 +594,8 @@ identical previous-year `enable` flip; both `patch=` modes identical.
 > scheduler silently skip or double-run tasks around midnight.
 
 ### Phase 7 — Scheduler (replacing Celery beat)
+
+**§5 rows this phase owns:** **D7**.
 
 > ⚠️ **Split into 7a and 7b (v2.2), because Phases 3 and 4 *write* the rows Phase 7 runs.**
 > Review finding **S9**, condition **C24**. v1's call sites are
@@ -635,6 +658,8 @@ identical previous-year `enable` flip; both `patch=` modes identical.
 
 ### Phase 8 — Files and admin
 
+**§5 rows this phase owns:** none of its own; inherits cross-cutting **D22**/**D23** on the file upload, and **rule 12b** (do not narrow `FileView.post`'s parsers).
+
 **Routes:** `GET|POST /api/file` (POST role ≤ 0), `GET /api/file/<id>`, `GET /api/admin` (role ≤ 0).
 
 **Scope**
@@ -653,6 +678,8 @@ when the blob already exists); signed URLs valid, v4, 5-minute expiry.
 ---
 
 ### Phase 9 — Cutover, hstore→jsonb, decommission
+
+**§5 rows this phase owns:** **TBD** — C39 opens the `_prisma_migrations` / `django_migrations` question, and D6's physical `UNIQUE (loan_id)` is deferred here.
 
 **The user performs the cutover.** This phase delivers the runbook and the post-switch
 migrations.

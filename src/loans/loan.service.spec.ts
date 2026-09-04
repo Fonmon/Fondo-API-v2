@@ -14,6 +14,7 @@ import {
   assertLegalLoanTransition,
   LoanService,
   LOAN_READ_PRIVILEGED_ROLES,
+  MIN_LOAN_VALUE,
   strptimeIsoDate,
 } from './loan.service';
 import { FEE_MONTHLY } from './dto/loan.serializers';
@@ -326,6 +327,175 @@ describe('LoanService (unit)', () => {
       const { service } = build(null);
       await expect(service.createLoan(1, BODY)).rejects.toThrow(/UserFinance matching query/);
     });
+
+    // ------------------------------------------------------------------
+    // D29 — the comparison runs on the RAW body value, coercion is for the write
+    // ------------------------------------------------------------------
+
+    /**
+     * ⚠️ **The measured boundary cell, and the one this ordering exists for.** v1 compares
+     * the raw value (`services/loan.py:27`) and coerces on the write; v2 coerced first, and
+     * `toDjangoInt` **truncates** — so with a quota of `500` a submitted `500.5` was not
+     * merely accepted where v1 refuses, it was written as **`500`**, a different number from
+     * the one the member submitted. The divergent window is exactly `quota < value < quota+1`.
+     *
+     * Measured on both stacks before this cell was written: **v1 406, v2 201 with `value`
+     * 500**. Now 406 on both.
+     */
+    it('D29: `available_quota + 0.5` is a 406, as it is in v1 — not a 201 storing the truncated quota', async () => {
+      const { service, prisma } = build({ available_quota: 500n });
+      await expectAsyncRefusal(
+        () => service.createLoan(1, { ...BODY, value: 500.5 }),
+        HttpStatus.NOT_ACCEPTABLE,
+        { message: 'User does not have available quota' },
+      );
+      expect(prisma.loan.create).not.toHaveBeenCalled();
+    });
+
+    /**
+     * Below the boundary the two stacks always agreed — Python compares `float` to `int`
+     * happily, so `499.5 > 500` is `False` there too — and both store the truncated value.
+     * This is the other half of the window, so a later "fix" cannot make the whole fractional
+     * family a refusal.
+     */
+    it('D29: a fraction below the quota is still accepted, and still stored truncated', async () => {
+      const { service, prisma } = build({ available_quota: 500n });
+      await service.createLoan(1, { ...BODY, value: 499.5 });
+      expect((firstArg(prisma.loan.create).data as Record<string, unknown>).value).toBe(499n);
+    });
+
+    /**
+     * ⚠️ **D29's registered divergence, and it must survive the ordering change.** In v1
+     * `'300' > 500` raises `TypeError` — an uncaught **500** before any write. That is a
+     * crash, not a rule (the same string stores fine through `get_prep_value`, `timelimit` is
+     * explicitly coerced on the next line, and this is v1's only raw ordering comparison), so
+     * v2 coerces a string *before* comparing and gives the member the fund's real answer.
+     */
+    it('D29: an integer-shaped string is coerced and booked, where v1 is a TypeError 500', async () => {
+      const { service, prisma } = build({ available_quota: 500n });
+      await service.createLoan(1, { ...BODY, value: '300' });
+      expect((firstArg(prisma.loan.create).data as Record<string, unknown>).value).toBe(300n);
+    });
+
+    it.each([' 300 ', '+300'])(
+      'D29: `%p` is coerced too — CPython’s `int()` allows whitespace and a sign',
+      async (value) => {
+        const { service, prisma } = build({ available_quota: 500n });
+        await service.createLoan(1, { ...BODY, value });
+        expect((firstArg(prisma.loan.create).data as Record<string, unknown>).value).toBe(300n);
+      },
+    );
+
+    it('D29: an over-quota string gets the fund’s real 406, where v1 gives a 500', async () => {
+      const { service, prisma } = build({ available_quota: 500n });
+      await expectAsyncRefusal(
+        () => service.createLoan(1, { ...BODY, value: '600' }),
+        HttpStatus.NOT_ACCEPTABLE,
+        { message: 'User does not have available quota' },
+      );
+      expect(prisma.loan.create).not.toHaveBeenCalled();
+    });
+
+    it.each(['1e3', '1000.7', '', '0x10'])(
+      'D29: `%p` stays a 500 on both stacks — `int()` refuses it',
+      async (value) => {
+        const { service } = build({ available_quota: 500n });
+        await expect(service.createLoan(1, { ...BODY, value })).rejects.toThrow(/int\(\)/);
+      },
+    );
+
+    /** `and not refinance` short-circuits **after** the comparison in v1. Ordering pinned. */
+    it('D29: a value that cannot be compared at all is a 500 even on the refinance path', async () => {
+      const { service } = build({ available_quota: 500n });
+      await expect(
+        service.createLoan(1, { ...BODY, value: null }, true, { id: 4 }),
+      ).rejects.toThrow(/not supported between instances of 'NoneType' and 'int'/);
+    });
+
+    // ------------------------------------------------------------------
+    // D30 — the lower bound neither stack has
+    // ------------------------------------------------------------------
+
+    /**
+     * ⚠️ **v1 accepts this and so did v2 — a divergence by decision, not a parity repair.**
+     * `create_loan`'s only test on `value` is `> available_quota`, so `0` and `-1000` as
+     * plain JSON numbers are `201` with a row on **both** stacks. The operator confirmed the
+     * fund has no minimum loan amount, so the floor is `1` as cheap insurance. A future
+     * parity round must read the 400 as **expected**, not as a regression.
+     */
+    it.each([0, -1000, -1])(
+      'D30: value %p is a 400 and writes nothing — v1 accepts it and writes the row',
+      async (value) => {
+        const { service, prisma } = build({ available_quota: 500n });
+        await expectAsyncRefusal(
+          () => service.createLoan(1, { ...BODY, value }),
+          HttpStatus.BAD_REQUEST,
+          { message: 'Loan value must be greater than 0' },
+        );
+        expect(prisma.loan.create).not.toHaveBeenCalled();
+      },
+    );
+
+    /** The bound is checked on the **coerced** value, so a fraction that truncates to 0 is caught. */
+    it('D30: 0.5 is a 400 — the check runs after `int()`, which truncates it to 0', async () => {
+      const { service, prisma } = build({ available_quota: 500n });
+      await expectAsyncRefusal(
+        () => service.createLoan(1, { ...BODY, value: 0.5 }),
+        HttpStatus.BAD_REQUEST,
+        { message: 'Loan value must be greater than 0' },
+      );
+      expect(prisma.loan.create).not.toHaveBeenCalled();
+    });
+
+    /** …and, through D29, a negative **string** is refused by the same line. */
+    it('D30: "-1000" is refused by the same bound, not by a rule about JSON types', async () => {
+      const { service } = build({ available_quota: 500n });
+      await expectAsyncRefusal(
+        () => service.createLoan(1, { ...BODY, value: '-1000' }),
+        HttpStatus.BAD_REQUEST,
+        { message: 'Loan value must be greater than 0' },
+      );
+    });
+
+    it('D30: value 1 is the lowest accepted amount — the bound is inclusive', async () => {
+      const { service, prisma } = build({ available_quota: 500n });
+      await service.createLoan(1, { ...BODY, value: 1 });
+      expect((firstArg(prisma.loan.create).data as Record<string, unknown>).value).toBe(1n);
+    });
+
+    /**
+     * ⚠️ **The refinance path shares `createLoan`, so D30 binds there too.** The quota check
+     * is skipped for a refinance but the floor is not, so a projection with no outstanding
+     * capital refuses instead of booking a zero-value loan. Registered in
+     * `docs/phase-4-deviations.md` §4.1.
+     */
+    it('D30: binds the refinance path too, where the quota check is skipped', async () => {
+      const { service, prisma } = build({ available_quota: 500n });
+      await expectAsyncRefusal(
+        () => service.createLoan(1, { ...BODY, value: 0 }, true, { id: 4 }),
+        HttpStatus.BAD_REQUEST,
+        { message: 'Loan value must be greater than 0' },
+      );
+      expect(prisma.loan.create).not.toHaveBeenCalled();
+    });
+
+    /**
+     * Ordering, pinned the way D4's is: the quota gate is v1's and comes first, so a member
+     * who is both over quota and sending a junk value still gets v1's 406.
+     */
+    it('D30 sits BEHIND the quota check, so an over-quota junk value is still a 406', async () => {
+      const { service } = build({ available_quota: -10n });
+      await expectAsyncRefusal(
+        () => service.createLoan(1, { ...BODY, value: 0 }),
+        HttpStatus.NOT_ACCEPTABLE,
+        { message: 'User does not have available quota' },
+      );
+    });
+
+    /** The floor is a constant, so a "minimum loan amount" decision has one place to land. */
+    it('D30: the floor is 1 — the operator confirmed the fund has no minimum amount', () => {
+      expect(MIN_LOAN_VALUE).toBe(1n);
+    });
   });
 
   // ==========================================================================
@@ -454,6 +624,58 @@ describe('LoanService (unit)', () => {
       const { service, notifications } = buildUpdate(loanRow({ state: 1 }));
       await service.updateLoan(5, 2);
       expect(notifications.removeSchNotifications).not.toHaveBeenCalled();
+    });
+
+    // ------------------------------------------------------------------
+    // M3 — the transition write is a compare-and-set
+    // ------------------------------------------------------------------
+
+    /**
+     * ⚠️ **This is a query-shape assertion on purpose.** The defect is a lost update:
+     * `findUnique` → guard → `update` lets two concurrent approvals of the same WAITING loan
+     * both read state `0`, both pass {@link assertLegalLoanTransition} and both insert a
+     * `LoanDetail`, because the physical `UNIQUE (loan_id)` is deferred to Phase 9. A test
+     * that actually raced two transactions would pass or fail on timing, which is worse than
+     * no test — so the guarantee is pinned where it lives, in the predicate: the state that
+     * was read is part of the `WHERE`, which makes the row lock the serialisation point.
+     */
+    it('M3: the state write carries the state that was read, so a lost update cannot happen', async () => {
+      const { service, prisma } = buildUpdate(loanRow({ state: 0 }));
+      await service.updateLoan(5, 1);
+      expect(prisma.loan.updateMany).toHaveBeenCalledTimes(1);
+      expect(firstArg(prisma.loan.updateMany)).toEqual({
+        where: { id: 5, state: 0 },
+        data: { state: 1 },
+      });
+      // …and never as an unconditional `update`, which is what made the race possible.
+      expect(callArgs(prisma.loan.update)).not.toContainEqual({
+        where: { id: 5 },
+        data: { state: 1 },
+      });
+    });
+
+    /**
+     * The loser of the race gets **D9's own 409**, byte for byte — the same answer it would
+     * have received had it arrived a millisecond later and lost the guard instead of the
+     * write. Nothing downstream runs: no second `LoanDetail`, no second borrower email.
+     */
+    it('M3: when the compare-and-set matches no row, the caller gets D9’s 409 and nothing is written', async () => {
+      const { service, prisma, mail } = buildUpdate(loanRow({ state: 0 }), { appliedRows: 0 });
+      await expectAsyncRefusal(() => service.updateLoan(5, 1), HttpStatus.CONFLICT, {
+        message: 'Invalid state transition',
+      });
+      expect(mail.sendMail).not.toHaveBeenCalled();
+      expect(prisma.loanDetail.create).not.toHaveBeenCalled();
+      expect(prisma.loanDetail.update).not.toHaveBeenCalled();
+    });
+
+    it('M3: the compare-and-set also covers a denial, not just the approval leg', async () => {
+      const { service, prisma } = buildUpdate(loanRow({ state: 1 }));
+      await service.updateLoan(5, 2);
+      expect(firstArg(prisma.loan.updateMany)).toEqual({
+        where: { id: 5, state: 1 },
+        data: { state: 2 },
+      });
     });
 
     it('D28 (withdrawn): update_loan never receives an actor — self-approval is not blocked', () => {
@@ -646,10 +868,13 @@ describe('LoanService (unit)', () => {
       const result = await service.bulkUpdateLoans(V1_FILE);
       // 4 and 9 are approved and absent; 1/2/3 are present; 5 is in the file but not approved.
       expect(result.closed_loans).toEqual([4, 9]);
-      const closes = callArgs(prisma.loan.update);
+      // ⚠️ The auto-close goes through `updateLoanIn`, so it is a **compare-and-set**: the
+      // predicate carries the state that was read (`1`, APPROVED). A loan approved between
+      // the read and the write is therefore skipped with a 409 rather than silently closed.
+      const closes = callArgs(prisma.loan.updateMany);
       expect(closes).toEqual([
-        { where: { id: 4 }, data: { state: 3 } },
-        { where: { id: 9 }, data: { state: 3 } },
+        { where: { id: 4, state: 1 }, data: { state: 3 } },
+        { where: { id: 9, state: 1 }, data: { state: 3 } },
       ]);
     });
 
@@ -840,11 +1065,11 @@ function build(finance: { available_quota: bigint } | null): {
 
 function buildUpdate(
   loan: Record<string, unknown> | null,
-  options: { existingDetailId?: number } = {},
+  options: { existingDetailId?: number; appliedRows?: number } = {},
 ): {
   service: LoanService;
   prisma: {
-    loan: { findUnique: jest.Mock; update: jest.Mock };
+    loan: { findUnique: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
     loanDetail: { findFirst: jest.Mock; create: jest.Mock; update: jest.Mock };
     $transaction: jest.Mock;
   };
@@ -863,6 +1088,9 @@ function buildUpdate(
     loan: {
       findUnique: jest.fn().mockResolvedValue(loan),
       update: jest.fn().mockResolvedValue(undefined),
+      // The state write is a compare-and-set (`updateMany` + a `state` predicate), so the
+      // mock must answer with a row count. `{ count: 0 }` is the lost-race case.
+      updateMany: jest.fn().mockResolvedValue({ count: options.appliedRows ?? 1 }),
     },
     loanDetail: {
       findFirst: jest
@@ -962,7 +1190,7 @@ function buildBulk(options: { existingDetailFor: number[]; approved: number[] })
   service: LoanService;
   prisma: {
     loanDetail: { findFirst: jest.Mock; update: jest.Mock; create: jest.Mock };
-    loan: { findMany: jest.Mock; findUnique: jest.Mock; update: jest.Mock };
+    loan: { findMany: jest.Mock; findUnique: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
     $transaction: jest.Mock;
   };
   tx: { loanDetail: { update: jest.Mock } };
@@ -994,6 +1222,7 @@ function buildBulk(options: { existingDetailFor: number[]; approved: number[] })
         Promise.resolve(approvedRows.find((row) => row.id === where.id) ?? null),
       ),
       update: jest.fn().mockResolvedValue(undefined),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       count: jest.fn().mockResolvedValue(approvedRows.length),
     },
     $transaction: jest.fn(),

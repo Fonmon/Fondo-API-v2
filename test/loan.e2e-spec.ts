@@ -251,6 +251,107 @@ describe('Phase 4 — /api/loan (port of test_loan_views.py)', () => {
     expect(loan.rate.toFixed(3)).toBe('0.015');
   });
 
+  // --------------------------------------------------------------------------
+  // D29 — the quota comparison runs on the RAW body value
+  // --------------------------------------------------------------------------
+
+  /**
+   * ⚠️ **The boundary cell the BA and the reviewer both required to be *run*, not assumed.**
+   * `available_quota` is 500 (`AbstractTest.create_user`), so this posts `500.5`.
+   *
+   * Measured before the fix, on both stacks: **v1 `406`** (`500.5 > 500` is `True` in Python —
+   * the `TypeError` is `str` vs `int` only) and **v2 `201` with `value` stored as `500`**,
+   * because `toDjangoInt` truncates *before* the comparison. So v2 did not merely accept what
+   * v1 refuses; it wrote a number the member never submitted. The divergent window is exactly
+   * `quota < value < quota + 1`. Now 406 on both.
+   */
+  it('D29: value = available_quota + 0.5 is a 406 and writes no row, as it is in v1', async () => {
+    const response = await request(server())
+      .post('/api/loan')
+      .set(asAdmin())
+      .send({ ...loanWithQuotaFee5, value: 500.5 })
+      .expect(406);
+    expect(response.body).toEqual({ message: 'User does not have available quota' });
+    await expect(prisma.loan.count()).resolves.toBe(0);
+  });
+
+  /** The other half of the window: below the quota both stacks accept and both truncate. */
+  it('D29: a fraction below the quota is a 201 and is stored truncated, on both stacks', async () => {
+    const loan = await loanRow(await postLoan({ ...loanWithQuotaFee5, value: 499.5 }));
+    expect(loan.value).toBe(499n);
+  });
+
+  /**
+   * ⚠️ **D29's accepted divergence — v1 answers 500 here.** `'100' > 500` is
+   * `TypeError: '>' not supported between instances of 'str' and 'int'`, raised before
+   * `Loan.objects.create`, so v1 writes nothing and returns an uncaught 500. That is a crash,
+   * not a rule, so v2 coerces (register row **D29**). This cell must keep passing after the
+   * comparison ordering changed: only the *ordering* moved, not the leniency.
+   */
+  it('D29: an integer-shaped string value is a 201 with the coerced amount, where v1 is a 500', async () => {
+    const loan = await loanRow(await postLoan({ ...loanWithQuotaFee5, value: '100' }));
+    expect(loan.value).toBe(100n);
+  });
+
+  it('D29: an over-quota string gets the fund’s real 406, where v1 gives a 500', async () => {
+    const response = await request(server())
+      .post('/api/loan')
+      .set(asAdmin())
+      .send({ ...loanWithQuotaFee5, value: '600' })
+      .expect(406);
+    expect(response.body).toEqual({ message: 'User does not have available quota' });
+    await expect(prisma.loan.count()).resolves.toBe(0);
+  });
+
+  // --------------------------------------------------------------------------
+  // D30 — the lower bound neither stack has
+  // --------------------------------------------------------------------------
+
+  /**
+   * ⚠️ **v1 accepts this and writes the row, and so did v2 until D30 landed.** This is a
+   * divergence v2 introduces *by decision* (operator: the fund has no minimum loan amount, so
+   * the floor is 1 as cheap insurance), **not** a parity repair — a future parity round must
+   * read the 400 as expected rather than filing it as a regression.
+   */
+  it.each([0, -1000])(
+    'D30: value %p is a 400 and writes no row — v1 answers 201 and writes it',
+    async (value) => {
+      const response = await request(server())
+        .post('/api/loan')
+        .set(asAdmin())
+        .send({ ...loanWithQuotaFee5, value })
+        .expect(400);
+      expect(response.body).toEqual({ message: 'Loan value must be greater than 0' });
+      await expect(prisma.loan.count()).resolves.toBe(0);
+    },
+  );
+
+  it('D30: 0.5 is a 400 — the bound is checked after `int()` truncates it to 0', async () => {
+    const response = await request(server())
+      .post('/api/loan')
+      .set(asAdmin())
+      .send({ ...loanWithQuotaFee5, value: 0.5 })
+      .expect(400);
+    expect(response.body).toEqual({ message: 'Loan value must be greater than 0' });
+    await expect(prisma.loan.count()).resolves.toBe(0);
+  });
+
+  /** Through **D29** the same bound catches the string shape — it is a rule about money. */
+  it('D30: "-1000" is a 400 from the same bound, not from a rule about JSON types', async () => {
+    const response = await request(server())
+      .post('/api/loan')
+      .set(asAdmin())
+      .send({ ...loanWithQuotaFee5, value: '-1000' })
+      .expect(400);
+    expect(response.body).toEqual({ message: 'Loan value must be greater than 0' });
+    await expect(prisma.loan.count()).resolves.toBe(0);
+  });
+
+  it('D30: value 1 is accepted — the floor is inclusive, and the fund has three such loans', async () => {
+    const loan = await loanRow(await postLoan({ ...loanWithQuotaFee5, value: 1 }));
+    expect(loan.value).toBe(1n);
+  });
+
   // ==========================================================================
   // GET /api/loan
   // ==========================================================================

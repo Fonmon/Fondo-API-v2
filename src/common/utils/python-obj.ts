@@ -240,6 +240,86 @@ export function pythonNotEqual(stored: bigint | boolean | number, submitted: unk
   return true;
 }
 
+/**
+ * CPython's `>` between a value straight off a JSON body and a stored integer column.
+ *
+ * The one call site is `create_loan`'s quota gate — the **only** raw ordering comparison in
+ * v1's entire service layer:
+ *
+ * ```python
+ * if obj['value'] > user_finance.available_quota and not refinance:   # services/loan.py:27
+ * ```
+ *
+ * ⚠️ **This helper exists to carry a *sequencing* rule, not an arithmetic one.** Phase 3
+ * established "compare the **raw** body value, coerce only on the write"
+ * (`user.service.ts::updateUserFinance`, via {@link pythonNotEqual}); `createLoan` was the one
+ * place in v2 that coerced first, and coercing first is observably different because
+ * {@link toDjangoInt} **truncates**: with a quota of `Q`, a submitted `Q + 0.5` compares as
+ * *greater* raw (v1's 406) and as *equal* coerced (a 201 storing `Q` — a different number from
+ * the one the member submitted). The divergent window is exactly `Q < value < Q + 1`. Register
+ * row **D29**; the boundary is pinned in both suites.
+ *
+ * Python semantics reproduced:
+ *
+ * | submitted | CPython | here |
+ * |---|---|---|
+ * | `int` / `float` | numeric, and **exact** — CPython never rounds an int to a float to compare | exact, via `BigInt` (see below) |
+ * | `bool` | `bool` is an `int` subclass: `True > 0` is `True` | `1` / `0` |
+ * | `nan` | every comparison is `False` | `false` |
+ * | `str`, `None`, `list`, `dict` | `TypeError` → an uncaught **500** in v1 | {@link PythonTypeError} |
+ *
+ * ⚠️ The `str` row is where **D29** takes its deviation, and it is taken at the **call site**,
+ * not here: `createLoan` coerces a string *before* calling this, because v1's `TypeError` on
+ * `'1000' > 1000` is a crash and not a rule. Keep the deviation visible there; this helper
+ * stays faithful.
+ *
+ * Exactness: JavaScript cannot apply `>` to a `number` and a `bigint` at the type level, so an
+ * integral `number` converts exactly, and a fractional one uses `ceil` — for a non-integral
+ * `s` and an integral `stored`, `s > stored` iff `ceil(s) > stored`. No double ever has to
+ * represent `stored`, which is what keeps a 19-digit quota from being compared through a
+ * 53-bit mantissa.
+ */
+export function pythonGreaterThan(submitted: unknown, stored: bigint): boolean {
+  if (typeof submitted === 'bigint') {
+    return submitted > stored;
+  }
+  if (typeof submitted === 'boolean') {
+    return (submitted ? 1n : 0n) > stored;
+  }
+  if (typeof submitted === 'number') {
+    if (Number.isNaN(submitted)) {
+      return false;
+    }
+    if (!Number.isFinite(submitted)) {
+      return submitted > 0;
+    }
+    return BigInt(Number.isInteger(submitted) ? submitted : Math.ceil(submitted)) > stored;
+  }
+  throw new PythonTypeError(
+    `TypeError: '>' not supported between instances of '${pythonTypeName(submitted)}' and 'int'`,
+  );
+}
+
+/** CPython's `type(x).__name__` for the shapes a JSON body can carry. */
+function pythonTypeName(value: unknown): string {
+  if (value === null || value === undefined) {
+    return 'NoneType';
+  }
+  if (Array.isArray(value)) {
+    return 'list';
+  }
+  if (typeof value === 'object') {
+    return 'dict';
+  }
+  if (typeof value === 'string') {
+    return 'str';
+  }
+  if (typeof value === 'boolean') {
+    return 'bool';
+  }
+  return 'float';
+}
+
 /** A safe `str()`-ish rendering for an error message; never `[object Object]`. */
 function describeValue(value: unknown): string {
   if (typeof value === 'object' && value !== null) {

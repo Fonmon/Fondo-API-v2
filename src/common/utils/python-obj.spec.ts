@@ -6,6 +6,7 @@ import {
   pythonInt,
   PythonKeyError,
   PythonTypeError,
+  pythonGreaterThan,
   pythonNotEqual,
   toDjangoBool,
   toDjangoDate,
@@ -148,6 +149,79 @@ describe('python-obj', () => {
     it('is True for null and for objects', () => {
       expect(pythonNotEqual(1n, null)).toBe(true);
       expect(pythonNotEqual(1n, {})).toBe(true);
+    });
+  });
+
+  describe('pythonGreaterThan — `create_loan`’s quota gate (`services/loan.py:27`)', () => {
+    /**
+     * Every expectation in this block was run through CPython before it was written here:
+     *
+     * ```
+     * >>> 1000.5 > 1000, 999.5 > 1000, 1000.0 > 1000
+     * (True, False, False)
+     * >>> True > 0, True > 1, False > 0, False > -1
+     * (True, False, False, True)
+     * >>> 9007199254740992.0 > 9007199254740993
+     * False
+     * ```
+     */
+    it('is False at the boundary — the check is `>`, not `>=`', () => {
+      expect(pythonGreaterThan(500, 500n)).toBe(false);
+      expect(pythonGreaterThan(500n, 500n)).toBe(false);
+      expect(pythonGreaterThan(501, 500n)).toBe(true);
+      expect(pythonGreaterThan(499, 500n)).toBe(false);
+    });
+
+    /**
+     * ⚠️ **D29's divergent window, and the whole reason this helper exists.** A fractional
+     * value strictly between the quota and the quota + 1 is *greater* raw — v1's 406 — and
+     * *equal* once `toDjangoInt` has truncated it, which is the 201 v2 used to answer while
+     * storing a number the member never submitted.
+     */
+    it('is True for a fraction inside `(quota, quota + 1)`, where truncation says equal', () => {
+      expect(pythonGreaterThan(500.5, 500n)).toBe(true);
+      expect(toDjangoInt(500.5, 'value')).toBe(500n); // …and this is why ordering matters
+      expect(pythonGreaterThan(500.000001, 500n)).toBe(true);
+    });
+
+    it('is False for a fraction below the quota — both stacks accept and both store the floor', () => {
+      expect(pythonGreaterThan(499.5, 500n)).toBe(false);
+      expect(pythonGreaterThan(-0.5, -1n)).toBe(true);
+    });
+
+    it('treats a bool as an int, as Python’s subclassing does', () => {
+      expect(pythonGreaterThan(true, 0n)).toBe(true);
+      expect(pythonGreaterThan(true, 1n)).toBe(false);
+      expect(pythonGreaterThan(false, 0n)).toBe(false);
+      expect(pythonGreaterThan(false, -1n)).toBe(true);
+    });
+
+    /** CPython compares an `int` and a `float` **exactly**; it never rounds the int. */
+    it('compares exactly beyond 2^53, where a double round-trip would lie', () => {
+      expect(pythonGreaterThan(9_007_199_254_740_992, 9_007_199_254_740_993n)).toBe(false);
+      expect(pythonGreaterThan(9_007_199_254_740_994, 9_007_199_254_740_993n)).toBe(true);
+    });
+
+    it('is False for NaN — every comparison with nan is False in Python', () => {
+      expect(pythonGreaterThan(Number.NaN, 0n)).toBe(false);
+      expect(pythonGreaterThan(Number.POSITIVE_INFINITY, 0n)).toBe(true);
+      expect(pythonGreaterThan(Number.NEGATIVE_INFINITY, 0n)).toBe(false);
+    });
+
+    /**
+     * ⚠️ The helper stays faithful to CPython here. **D29's leniency for a string lives at
+     * `createLoan`'s call site**, which coerces before comparing — deliberately, so the
+     * deviation is visible where it is taken rather than hidden in a shared helper Phases 5–8
+     * will reuse.
+     */
+    it.each([
+      ['1000', "'>' not supported between instances of 'str' and 'int'"],
+      [null, "'>' not supported between instances of 'NoneType' and 'int'"],
+      [{}, "'>' not supported between instances of 'dict' and 'int'"],
+      [[], "'>' not supported between instances of 'list' and 'int'"],
+    ])('raises CPython’s TypeError for %p, which v1 never catches', (value, message) => {
+      expect(() => pythonGreaterThan(value, 1n)).toThrow(PythonTypeError);
+      expect(() => pythonGreaterThan(value, 1n)).toThrow(message);
     });
   });
 
