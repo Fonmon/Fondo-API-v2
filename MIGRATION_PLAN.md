@@ -682,7 +682,9 @@ when the blob already exists); signed URLs valid, v4, 5-minute expiry.
 
 ### Phase 9 — Cutover, hstore→jsonb, decommission
 
-**§5 rows this phase owns:** **TBD** — C39 opens the `_prisma_migrations` / `django_migrations` question, and D6's physical `UNIQUE (loan_id)` is deferred here.
+**§5 rows this phase owns:** **D34** (the two migration ledgers, below). Inherited work that lands
+here: **D6's physical `UNIQUE (loan_id)`** and **D11's `UNIQUE (user_id)`**, both deferred because
+Django owns the schema until step 6.
 
 **The user performs the cutover.** This phase delivers the runbook and the post-switch
 migrations.
@@ -704,6 +706,33 @@ migrations.
      and simplify Phases 2 and 7. **This is the payoff for choosing Prisma — do not skip it.**
    - ⚠️ **One-way door:** Django's `HStoreField` breaks the instant this runs. Rollback to v1
      is dead after step 6. Take a backup first.
+
+**D34 — two migration ledgers, one schema (condition C39)**
+
+`fondodev` carries **both** today: `django_migrations` with **38 applied rows**, and
+`_prisma_migrations` holding a single **inert** `0_init` at `applied_steps_count = 0` — a baseline
+recording the schema Prisma introspected, not a migration Prisma ran. They do not conflict while
+v2 only reads and writes rows, which is why nothing has forced the question through Phases 0–8.
+
+**Step 6 forces it**, because it is the first schema change v2 owns, and the `UNIQUE` constraints
+above are two more. The decision:
+
+* **`django_migrations` is frozen, not dropped.** It is the provenance of every table v2 inherits,
+  and dropping it destroys the only record of how the schema reached 0019. It stops being written
+  the moment v1 is decommissioned; keep the table, add no rows.
+* **`_prisma_migrations` becomes authoritative from step 6 forward.** `0_init` stays at
+  `applied_steps_count = 0` — **do not** "repair" it to 1. It is a baseline marker; marking it
+  applied would claim Prisma created tables it only introspected, and the next `migrate deploy` on
+  a fresh database would then skip them.
+* **Every post-cutover change is a Prisma migration**, including the `hstore → jsonb` conversion
+  and its data-repair pass, and including the two `UNIQUE` constraints. None is applied by hand.
+* ⚠️ **Never run `prisma migrate dev` against a database v1 can still reach.** It drops and
+  recreates on drift, and Prisma reads Django's 38 tables as drift from `0_init`. `migrate deploy`
+  only. This has been the standing rule since Phase 0; step 6 is where it stops being theoretical.
+
+**Rollback consequence:** after step 6 the two ledgers describe *different* schemas — Django's
+last-known state and Prisma's current one. That is the same one-way door the `hstore` note names,
+recorded here in ledger terms so nobody reads a clean `django_migrations` as "v1 can still run".
 
 **Post-migration cleanup backlog** (not during the migration)
 - `refinanced_loan` from a bare BigInteger to a real FK.
@@ -1176,6 +1205,7 @@ is worse than a missing one, because it is counted as coverage.
 | 17 | **The developer's own catch, and the best of the seventeen.** Its first C28 test pinned the host zone with `process.env.TZ = 'UTC'` *inside* the spec | jest's vm context does not propagate that to V8's cached zone, so the pin did nothing. On this `-05:00` host the C28 cell **passed against the buggy line** — a test written specifically to catch a timezone bug, defeated by a timezone bug. Found by measuring it with a throwaway probe rather than trusting the green. Pin moved to `jest.config.ts` + `test/global-setup.ts`, before the workers fork; control run against the old line then produced **exactly one** failure. |
 | 18 | **Mine, fourth of this class — and the first that was not a no-op.** I wrote the §3/§5 precedence note, verified it on disk, and committed it as `56e43b3` — **on `chore/c28-c36-phase-3-conditions`.** `feat/phase-4-loans` had already branched from `d164358`, which predates it, so the note was **absent from the branch all the work continues on**, while `docs/phase-4-deviations.md` §2.1 and §5.2 both told the reader it was there. Found by `business-analyst`, which went to read it and could not. | Verifying an edit on the branch you happen to be standing on says nothing about the branch the work will continue on. **`git branch --contains` before claiming a fix is in place**, and cherry-pick forward when a doc fix is written off the line of work. Earlier instances of the family: a `sys.exit()` before the write, an unreproducible hash, a `.replace()` that matched the wrong document. |
 | 19 | **Mine, fifth of this family — and my *checking method* was the defect, not the edit.** `161d780`'s message claimed the C40/C41/M3/D29/D30 round complete; three required pieces were **not in its tree** — §5.1 still carried the "nothing in v2 can create a second row" claim M3 had just falsified, and §4.1 lacked the D29/D30 rows the manual tester works from. I had verified the *code* and the *gate numbers* and never opened the docs the brief required. Found by `nestjs-developer`, which checked the tree instead of believing my commit message. | ⚠️ **The grep that cleared it was line-wrapped.** The stale sentence spanned a newline, so a single-line fixed-string search counted **0** and I read absence as proof. The same blindness produced two false *alarms* earlier in this phase — pattern `*` unescaped, then an anchor split across lines. A verifier that fails in both directions is not a verifier: **match on a short distinctive fragment that cannot wrap, or normalise whitespace before searching.** And a commit message is a claim about a *tree*, so verify every item the brief listed, not the ones that were easy to check. |
+| 20 | **Mine, sixth — I audited fifteen conditions by `grep` and got two wrong in the *closed* direction.** For **C32** I saw `orderBy: { id: 'asc' }` in `getUserByEmail` and reported the fallback "implemented"; the code computed that order and then **discarded** it, returning `null` — and a unit cell was pinning the `null`, asserting the opposite of the condition. For **C37** I reported two cells present because loose patterns matched *other files*; at `ed363db` both were absent (0 occurrences). Found by `nestjs-developer`, which read the behaviour instead of trusting my audit. | Presence of a token is not presence of a behaviour — this is **#19's defect with the polarity reversed**, and it is the more dangerous direction: #19 made me re-do finished work, #20 would have marked open conditions closed. **An audit that clears a condition must exercise it or read the whole function, never match a string.** The ten I marked closed were re-checked this way before the batch shipped. |
 
 **Countermeasures now required of every parity harness:** assert **positive controls** (prove the
 matrix can produce a 200, not only agreement), print the **status distribution** rather than a
@@ -1255,12 +1285,12 @@ forward into Phase 3 (condition C24) and 7b waits on Phase 4.
 |---|---|---|---|---|---|---|
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — | — |
 | 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab`) | ✅ | n/a | ✅ **Approved** | n/a | C1–C8 ✅ closed (v0.14 / v1.0) |
-| 1 Auth + roles | ✅ **CLOSED** (`151314f`) | ✅ | ⬜ never run | ✅ **Approved** | ⬜ | C1–C8 ✅; **C9–C13 ⚠️ no closure record** |
-| 2 Mail + notifications | ✅ **CLOSED — approved w/ conditions** (`fe261fc`) | ✅ | ✅ PASS r3 | ✅ **Approved w/ conditions** | ⬜ | C22–C25 ✅ closed (`5f4120f`, `af596b0`); **C19–C21, C26–C27 ⚠️ no closure record** |
-| 3 Users + finance | ✅ **CLOSED — approved w/ conditions** (`e926e14`) | ✅ | ✅ PASS r4 | ✅ **Approved** (C28–C39) | ✅ Aligned | C28–C30, C36, C38*(BA half)* ✅; **C31–C35, C37, C39 🔴 open — two gates survived** |
+| 1 Auth + roles | ✅ **CLOSED** (`151314f`) | ✅ | ⬜ never run | ✅ **Approved** | ⬜ | C1–C8 ✅; **C9–C13 ✅ closed** — audited against the tree 2026-09-04 |
+| 2 Mail + notifications | ✅ **CLOSED — approved w/ conditions** (`fe261fc`) | ✅ | ✅ PASS r3 | ✅ **Approved w/ conditions** | ⬜ | **all ✅ closed** — C22–C25 (`5f4120f`, `af596b0`); C19–C21 audited against the tree; C26, C27 closed in the C58 audit |
+| 3 Users + finance | ✅ **CLOSED — approved w/ conditions** (`e926e14`) | ✅ | ✅ PASS r4 | ✅ **Approved** (C28–C39) | ✅ Aligned | **all ✅ closed** — C31–C35, C37, C39 closed in the C58 audit (`035a23a`) |
 | 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ | pulled forward by **C24** |
 | 4 Loans | ✅ **CLOSED — approved w/ conditions, both rounds** (`806ca6e`) | ✅ | ✅ PASS + ✅ **delta PASS** (`17114a0`) | ✅ **Approved** (C40–C49) + ✅ **delta approved** (C50–C58) | ✅ C29/C30/C42 | C40–C43, C50, C51 ✅; **C44–C49, C52–C58 🟡 open → P5 gate** |
-| 5 Activities | 🟡 **NEXT** | — | — | — | — | opens under **C58** (see below) |
+| 5 Activities | 🟡 **NEXT** — no blockers | — | — | — | — | **C58 ✅ discharged**; C44–C49, C52–C57 🟡 → P5 gate |
 | 6 Saving accounts (CAPs) | ⬜ **Ready** — Q19–Q24 all answered; **D12** is a new build, not a port | — | — | — | — | — |
 | 7b Scheduler *runner* | ⬜ **Ready** — P4 closed, so no longer blocked | — | — | — | — | — |
 | 8 Files + admin | ⬜ **Ready** — P2 closed; inherits rules 12b/12c | — | — | — | — | — |
@@ -1269,17 +1299,18 @@ forward into Phase 3 (condition C24) and 7b waits on Phase 4.
 **Legend.** ✅ done · 🟡 next / open-but-tracked · 🔴 overdue · ⬜ not started · ⚠️ unverified.
 "Ready" means no unmet dependency, not scheduled next.
 
-> 🔴 **C58 is a hard stop on Phase 5's gate.** C31–C35, C37 and C39 have survived **two** gates.
-> They close or are formally struck as withdrawn rows before Phase 5 closes. A third roll is not
-> available — that was the reviewer's own warning, taken as a condition.
+> ✅ **C58 is discharged (2026-09-04, `035a23a`).** All fifteen tracked conditions were audited
+> **against the tree, not against their status lines**: C9–C13, C19–C21, C31, C33 were already
+> satisfied and are now recorded as such; C26, C27, C32, C34, C35, C37, C39 were genuinely open
+> and were closed. **C34 was a real precision bug** — `normalise` compared BigInt money columns
+> through `Number()`, so a change past 2^53 read as a no-op. **C35's docblock asserted a security
+> property the code did not have.** Nothing rolled a third time.
 
-> ⚠️ **Three condition sets have no recorded closure**, found while rebuilding this board:
-> **C9–C13** (added at the Phase 1 review as a Phase 3 gate), **C19–C21** (Phase 2's "before
-> Phase 3's first controller" set) and **C26–C27**. C19–C21 are *almost certainly* satisfied —
-> `django-allowed-hosts.ts`, `django-url-resolver.middleware.ts` and `django-middleware-depth.ts`
-> all exist and C19's port is what produced false-green #8 — but "almost certainly" is exactly
-> the state C58 exists to forbid. **Audit them with C58's batch**: close each against evidence,
-> or strike it. Do not mark them closed from this note.
+> ⚠️ **Two of my own audit verdicts were wrong, both in the "closed" direction** — see false-green
+> **#20**. I matched strings instead of reading behaviour: C32's `orderBy` was computed and then
+> discarded, and two C37 cells I called present did not exist. The ten I cleared were re-checked
+> by reading the behaviour before the batch shipped. **An audit that clears a condition must
+> exercise it or read the whole function.**
 
 ---|---|---|---|---|---|
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |

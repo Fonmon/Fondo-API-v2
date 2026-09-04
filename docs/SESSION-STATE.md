@@ -146,11 +146,11 @@ the developer and restarts the sequence. `business-analyst` is gate 4 and on-dem
   psql -tAc "SELECT md5(string_agg(t, E'\n' ORDER BY t)) FROM (SELECT id||'|'||user_id||'|'
              ||subscription::text AS t FROM fondo_api_notificationsubscriptions) s"
   # -> 7a6afbccd2f133c147bd096062655750
-  psql -tAc "SELECT DISTINCT xmin FROM fondo_api_notificationsubscriptions"       # -> 905
+  psql -tAc "SELECT count(distinct xmin::text) FROM fondo_api_notificationsubscriptions"  # -> 1
   ```
 
   The `xmin` check is the strongest of the three: all 94 rows are still the single tuple
-  version written by txn **905**, so no row has been updated since the load, whatever the dump
+  **single** transaction, so no row has been updated since the load, whatever the dump
   order says.
 
 ---
