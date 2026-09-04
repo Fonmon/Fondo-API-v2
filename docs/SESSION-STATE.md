@@ -1,9 +1,44 @@
 # Session state — resume here
 
-**Updated:** 2026-08-31, on request before hitting a session limit.
+**Updated:** 2026-09-03, after the D4 reversal, with Phase 4 at the manual-tester stage.
 **Purpose:** everything needed to pick this up cold. `MIGRATION_PLAN.md` is the plan of record
-(now rev **v1.2**); this file carries what the plan does not — in-flight work, environment
+(now rev **v3.2**); this file carries what the plan does not — in-flight work, environment
 gotchas, and the next actions.
+
+## 0. Right now, in one paragraph
+
+**Phase 4 (Loans) is implemented and with `manual-tester`.** Branch `feat/phase-4-loans` at
+**`5aa8b1a`**, tree clean, nothing pushed. Gate verified by me, not taken from a report: lint
+clean, `tsc --noEmit` clean, **1830 unit / 58 suites**, **818 e2e + 1 skipped / 16 suites**,
+`fondodev` at baseline with **1 distinct `xmin`** on both loan tables. When the tester reports,
+it goes to `nestjs-reviewer` — that is the standing three-stage pipeline from Phase 2 onward.
+
+**Pipeline state:** developer ✅ → manual-tester 🔨 **running** → reviewer ⬜.
+
+### If you are resuming cold, the next action is
+
+1. Wait for / read `docs/parity-phase-4.md` from `manual-tester`.
+2. Verify its load-bearing claims yourself before propagating them — every agent report so far
+   has contained at least one claim that did not survive checking.
+3. Then dispatch `nestjs-reviewer` with the parity report and the phase.
+
+### Still open, tracked to Phase 4's gate (not its start)
+
+**C31, C33, C34, C35, C37, C39** — small doc, register and test conditions from the Phase 3
+review, held back so they do not race the Phase 4 branch on the same files. Also open:
+**M5/C32** (the D15 + P3-D2 unresettable-account path), **B1–B4** from Phase 3 round 1, and
+`PowerService.parseDateField` rejecting `2026-1-5` where Django accepts it (Phase 3 behaviour,
+found during Phase 4, recorded not changed).
+
+### The D4 lesson, because it will recur
+
+Phase 4's developer implemented v1's silent `timelimit > 36` clamp because **§3 describes it,
+v1's `test_post_loan_5` asserts it, and my dispatch brief paraphrased §3** — three sources that
+all describe v1, agreeing with each other against operator **Q9**, which decided a 400. **§5
+decides; §3 only describes.** A precedence note now sits at the head of §5. Expect §3 and §5 to
+disagree again in Phases 5–8 **by construction** — that is what a deviation register *is*.
+
+---
 
 ---
 
@@ -13,10 +48,12 @@ gotchas, and the next actions.
 |---|---|
 | **0 Foundations & Prisma baseline** | ✅ **CLOSED — APPROVED** (`b3effab` + conditions C1–C4). |
 | **1 Auth + roles** | ✅ **CLOSED — APPROVED** (`151314f` + C1–C8). |
-| **2 Mail + notifications** | 🔨 **Developer done** (`c72cc7c`). **With `manual-tester` now.** Reviewer after. |
-| 3–9 | ⬜ Not started. Phase 3 is next. |
+| **2 Mail + notifications** | ✅ **CLOSED — APPROVED** (`fe261fc`), parity PASS round 3. |
+| **3 Users + finance** | ✅ **CLOSED — APPROVED w/ conditions C28–C39.** Parity PASS round 4. |
+| **4 Loans** | 🔨 **Developer done** (`5aa8b1a`). **With `manual-tester` now.** Reviewer after. |
+| 5–9 | ⬜ Not started. |
 
-**Branch:** `feat/phase-2-notifications` at `d59119f`. Tree clean. **Nothing pushed** — `main` is
+**Branch:** `feat/phase-4-loans` at `5aa8b1a`. Tree clean. **Nothing pushed** — `main` is
 still at `f1660d3`. Older branches `feat/phase-1-auth` (`cf23eae`) and `feat/phase-0-foundations`
 are ancestors; keep or delete.
 
