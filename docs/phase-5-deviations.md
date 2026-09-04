@@ -308,7 +308,9 @@ distinguishes them. Recorded because it is a *shape* difference a reviewer will 
 
 Each control was applied to the working tree, the suite was run, the tree was restored, and
 the restore was verified. Every one produced failures **in the cells written for it** and
-nowhere else.
+nowhere else. Controls 1–11 were run before the commit; control 12 after it,
+against the committed tree, with `git checkout --` as the restore and `git status` as the
+proof.
 
 | # | control | result |
 |---|---|---|
@@ -323,6 +325,7 @@ nowhere else.
 | 9 | order nested users by `id` instead of `user_id` | **1 failed** — the ordering cell |
 | 10 | drop the `/?` from `^api/activity/[0-9]+/?$` in the URL conf | **1 failed** — the trailing-slash cell |
 | 11 | `todayInBogota().year` → `new Date().getFullYear()` | **1 failed** (unit) — `expected 2025n, received 2026n` |
+| 12 | remove the `@All()` fallback from `ActivityYearController` | **3 failed** — `OPTIONS`, `PUT` and `DELETE` 404 where v1 403s (rule 12) |
 
 ---
 
