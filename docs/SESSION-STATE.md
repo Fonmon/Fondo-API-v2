@@ -2,7 +2,7 @@
 
 **Updated:** 2026-09-04, after the delta review's C50 and C51 were closed.
 **Purpose:** everything needed to pick this up cold. `MIGRATION_PLAN.md` is the plan of record
-(now rev **v3.2**); this file carries what the plan does not — in-flight work, environment
+(now rev **v3.6**); this file carries what the plan does not — in-flight work, environment
 gotchas, and the next actions.
 
 ## 0. Right now, in one paragraph
