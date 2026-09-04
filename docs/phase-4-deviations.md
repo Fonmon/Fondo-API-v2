@@ -224,6 +224,48 @@ because "we used `todayInBogota` everywhere" would have been false.
 
 ---
 
+### 2.10 PAID_OUT is terminal, and the recovery is a database repair — deliberately
+
+Two places forward-reference this section; here is what it says.
+
+**D6 and D9 are each correct and they interact.** D6 makes re-approval *safe* (upsert, not a
+second `LoanDetail`). D9 makes it *unreachable*: `LEGAL_LOAN_TRANSITIONS` has no entry for
+`LOAN_PAID_OUT`, so `3 → 1` is a **409**. So D6 makes the repair safe **when it happens**; it
+does not make it happen through the API. After a mass auto-close there is no API-level recovery.
+
+**That is now the operator's decision, not an oversight (2026-09-04).** `business-analyst`
+recommended allowing `3 → 1`, ADMIN-only. The operator declined, and also declined a
+notification on mass close. Both are registered as **withdrawn** rows — `MIGRATION_PLAN.md` §5
+**D31** and **D32** — so the reasoning is findable rather than re-litigated.
+
+**The fund's recovery procedure for a wrongly auto-closed loan is a direct database repair.**
+Written down as a procedure. Whoever performs it needs three facts:
+
+1. **D6's upsert means `LoanDetail` survives the close** — `capital_balance`, `payday_limit` and
+   `from_date` are intact. A repair sets `fondo_api_loan.state` back to `1`. It must **not**
+   re-run the approval: that upserts `capital_balance = loan.value` and `from_date =
+   disbursement_date`, discarding every month of TSV state and re-mailing the borrower.
+2. **The close deleted the payment reminders and nothing restores them.** `scheduleNotification`
+   is reached only from the per-TSV-row path, never from approval, so the T−5d / T−1d rows for
+   the current cycle are gone until the next upload. The repair must reconcile
+   `fondo_api_schedulertask` itself.
+3. **The loan may have partially self-healed, and that is worse than either end state** — see
+   **D33**. `updateLoanDetail` resolves by `loan_id` with **no state filter**, so a wrongly
+   closed loan left in next month's file gets its detail updated and its reminders **re-created
+   while it stays PAID_OUT**: the member is pushed reminders for a loan the fund records as
+   paid. So reminders may be present, absent, or duplicated depending on how many uploads have
+   passed. Check, do not assume.
+
+**`3 → 0` is rejected and must not be revisited** — it is `3 → 1` plus all of failure mode 1.
+
+**Why "it has never happened" did not settle it.** The operator confirms no TSV has ever been
+incomplete. The BA went looking for a forensic signature of a past wrong close and there is
+none to find: `fondo_api_loan` has no `closed_at` and no state audit, and **336 of 345**
+PAID_OUT loans carry a positive `capital_balance`, because omission from the next file *is* the
+normal payoff path. A closed loan still showing money outstanding is the norm, not a red flag.
+The question is unfalsifiable from the data; it was decided on risk appetite, and the operator
+chose the smaller API surface.
+
 ## 3. How the money maths was validated
 
 ### 3.1 The amortisation table is checked **differentially against v1**, not against itself
