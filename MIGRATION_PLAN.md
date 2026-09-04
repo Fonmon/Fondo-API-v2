@@ -1238,8 +1238,40 @@ set, as defence in depth rather than as the primary control.
 
 **Phase status board**
 
-| Phase | Status | Dev | Tester | Reviewer | Analyst |
-|---|---|---|---|---|---|
+Updated 2026-09-04, plan rev v3.6. Ordered by execution sequence, not by number — 7a was pulled
+forward into Phase 3 (condition C24) and 7b waits on Phase 4.
+
+| Phase | Status | Dev | Tester | Reviewer | Analyst | Conditions |
+|---|---|---|---|---|---|---|
+| — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — | — |
+| 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab`) | ✅ | n/a | ✅ **Approved** | n/a | C1–C8 ✅ closed (v0.14 / v1.0) |
+| 1 Auth + roles | ✅ **CLOSED** (`151314f`) | ✅ | ⬜ never run | ✅ **Approved** | ⬜ | C1–C8 ✅; **C9–C13 ⚠️ no closure record** |
+| 2 Mail + notifications | ✅ **CLOSED — approved w/ conditions** (`fe261fc`) | ✅ | ✅ PASS r3 | ✅ **Approved w/ conditions** | ⬜ | C22–C25 ✅ closed (`5f4120f`, `af596b0`); **C19–C21, C26–C27 ⚠️ no closure record** |
+| 3 Users + finance | ✅ **CLOSED — approved w/ conditions** (`e926e14`) | ✅ | ✅ PASS r4 | ✅ **Approved** (C28–C39) | ✅ Aligned | C28–C30, C36, C38*(BA half)* ✅; **C31–C35, C37, C39 🔴 open — two gates survived** |
+| 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ | pulled forward by **C24** |
+| 4 Loans | ✅ **CLOSED — approved w/ conditions, both rounds** (`806ca6e`) | ✅ | ✅ PASS + ✅ **delta PASS** (`17114a0`) | ✅ **Approved** (C40–C49) + ✅ **delta approved** (C50–C58) | ✅ C29/C30/C42 | C40–C43, C50, C51 ✅; **C44–C49, C52–C58 🟡 open → P5 gate** |
+| 5 Activities | 🟡 **NEXT** | — | — | — | — | opens under **C58** (see below) |
+| 6 Saving accounts (CAPs) | ⬜ **Ready** — Q19–Q24 all answered; **D12** is a new build, not a port | — | — | — | — | — |
+| 7b Scheduler *runner* | ⬜ **Ready** — P4 closed, so no longer blocked | — | — | — | — | — |
+| 8 Files + admin | ⬜ **Ready** — P2 closed; inherits rules 12b/12c | — | — | — | — | — |
+| 9 Cutover, hstore→jsonb | ⬜ Blocked on P8 | — | — | — | — | **C39** lands here |
+
+**Legend.** ✅ done · 🟡 next / open-but-tracked · 🔴 overdue · ⬜ not started · ⚠️ unverified.
+"Ready" means no unmet dependency, not scheduled next.
+
+> 🔴 **C58 is a hard stop on Phase 5's gate.** C31–C35, C37 and C39 have survived **two** gates.
+> They close or are formally struck as withdrawn rows before Phase 5 closes. A third roll is not
+> available — that was the reviewer's own warning, taken as a condition.
+
+> ⚠️ **Three condition sets have no recorded closure**, found while rebuilding this board:
+> **C9–C13** (added at the Phase 1 review as a Phase 3 gate), **C19–C21** (Phase 2's "before
+> Phase 3's first controller" set) and **C26–C27**. C19–C21 are *almost certainly* satisfied —
+> `django-allowed-hosts.ts`, `django-url-resolver.middleware.ts` and `django-middleware-depth.ts`
+> all exist and C19's port is what produced false-green #8 — but "almost certainly" is exactly
+> the state C58 exists to forbid. **Audit them with C58's batch**: close each against evidence,
+> or strike it. Do not mark them closed from this note.
+
+---|---|---|---|---|---|
 | — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
 | 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab` + C1–C4) | ✅ | n/a | ✅ **APPROVED** | n/a |
 | 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
