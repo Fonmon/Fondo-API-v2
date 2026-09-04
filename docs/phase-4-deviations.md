@@ -88,22 +88,31 @@ actor to check against, deliberately.
 
 ## 2. Judgment calls
 
-### 2.1 D4 keeps the `> 36` clamp, and only adds the lower bound
+### 2.1 D4 removes the `> 36` clamp — **both** bounds are a 400
 
-`MIGRATION_PLAN.md` §5's D4 row says "Enforce `1 ≤ timelimit ≤ 36`; **no silent clamp**", and
-§3's Phase 4 scope says "`timelimit > 36` **clamped to 36** silently … ⚠️ `timelimit` has no
-lower bound … Add validation (§5 D4)". **The plan contradicts itself.**
+⚠️ **This section originally said the opposite, and was wrong.** Kept rather than deleted,
+because the reasoning error is the reusable part.
 
-Resolved in favour of §3 and of the phase brief, which is explicit on both halves ("port …
-the silent `timelimit > 36` clamp before the rate lookup" / "`timelimit` has no lower bound in
-v1; `0` is accepted at create then crashes with DivisionByZero at approval. Add validation").
+`MIGRATION_PLAN.md` §5's D4 row says "Enforce `1 ≤ timelimit ≤ 36`; **no silent clamp**", while
+§3's Phase 4 scope describes the clamp. That is not the plan contradicting itself — **§3
+describes v1 and §5 decides what v2 does**, so a deviation *must* read as a disagreement
+between them. Operator **Q9** ("Term outside 1–36" → "Reject 400"), recorded in §9, is the
+decision; D4 implements it. **The clamp is gone.**
 
-The deciding evidence is v1's own suite: **`test_post_loan_5` posts `timelimit: 37` and
-asserts a `201` with `timelimit == 36`.** Removing the clamp would move a ported test and
-break a working client path for no defect. Removing the *lower* bound leaves a real crash.
+The original resolution cited v1's `test_post_loan_5`, which posts `timelimit: 37` and asserts
+`201` with `timelimit == 36`. That test proves what v1 does — which is precisely what Q9
+decided to change. Under a registered deviation a v1 test becomes a **moved expectation**, not
+a requirement; it now asserts `400` in both suites, with a boundary control at `36 → 201` so
+the edge is pinned from both sides.
 
-⚠️ **For the plan maintainer:** §5's D4 row should be corrected to "reject below 1; keep the
-silent clamp above 36".
+**Why it went wrong, since it will recur:** §3's description, v1's test, and the dispatch
+brief's paraphrase of §3 all agreed with each other against the register. Three sources that
+all describe v1 will always agree, and that agreement carries no information about what v2
+should do. **Check §5 and §9 before implementing anything §3 describes.** A precedence note now
+sits at the head of `MIGRATION_PLAN.md` §5.
+
+Corrected in `5aa8b1a`. §4.2 was not corrected at the same time and misled the first parity
+round — see §4.2 and §5.2.
 
 ### 2.2 D4's status is 400, not 406
 
@@ -292,7 +301,7 @@ All restored, and the full suites re-run green afterwards.
 | `PATCH /api/loan` (the TSV) | `200`, **no body** | `200 {"closed_loans":[…]}` | **D8** |
 | `POST /api/loan` with `timelimit: 0` | **201** (then a 500 at approval) | **400** `{"message":"Timelimit must be between 1 and 36"}` | **D4** |
 | `POST /api/loan` with `timelimit: 37` | **201**, silently booked as `36` at rate `0.025` | **400** `{"message":"Timelimit must be between 1 and 36"}`, no row written | **D4** |
-| `POST /api/loan/<id>/refinance` with `timelimit: 0` or `> 36` | **201** / clamped | **400**, same message | **D4** |
+| `POST /api/loan/<id>/refinance` with `timelimit: 0` or `> 36` | **200** / clamped, row written (`LoanAppsView.post` returns `HTTP_200_OK`, not 201 — measured; parity finding **P4-F3**) | **400**, same message | **D4** |
 | `GET /api/loan/<id>` as a MEMBER who does not own it | 200 | **403** `{"detail":"You do not have permission to perform this action."}` | **D10** |
 | `POST /api/loan/<id>/paymentProjection` as a MEMBER who does not own it | 200 | **403**, same body | **D10** |
 | `GET /api/user/<id>` as a MEMBER, another member's id | 200 with their `finance` | **403**, same body | **D25** |
@@ -303,7 +312,10 @@ All restored, and the full suites re-run green afterwards.
 
 ### 4.2 Explicitly **unchanged** — if these differ, that IS a failure
 
-* `timelimit: 37` → **201** with `timelimit == 36` and rate `0.025`. The clamp is silent.
+* ⚠️ **`timelimit: 37` is NOT in this list — it MOVED.** v1 answers `201` with
+  `timelimit == 36`; **v2 answers `400`** and writes no row (D4, operator Q9). It sat here
+  by mistake until 2026-09-04, telling the tester to file the *correct* D4 behaviour as a
+  failure. See §4.1 and §5.2.
 * The rate table: `≤6 → 0.015`, `7–12 → 0.020`, `13–24 → 0.022`, `25–36 → 0.025`, frozen at
   request time.
 * Quota refusal → **406** `{"message":"User does not have available quota"}`; the check is
@@ -350,10 +362,21 @@ migrations against a database v1 shares, and Django owns the schema until cutove
 a second row. Checked on `fondodev`: **0 loans currently have more than one `LoanDetail`**, so
 the constraint will apply cleanly when Phase 9 adds it.
 
-### 5.2 §5's D4 row contradicts §3's Phase 4 scope
+### 5.2 §5's D4 row and §3's Phase 4 scope — **resolved, §5 was right**
 
-See §2.1. §5 says "no silent clamp"; §3 and the phase brief say to keep it, and
-`test_post_loan_5` requires it. Implemented per §3; §5's row should be corrected.
+Originally filed the other way round, and that was wrong. §3 *describes v1*; §5 *decides what
+v2 does*. Operator **Q9** ("Term outside 1–36" → "Reject 400") is recorded in `MIGRATION_PLAN.md`
+§9 and D4 is its implementation, so **the clamp is gone** and `test_post_loan_5` is a **moved
+expectation**, not a requirement.
+
+The trap is worth naming, because §3 and §5 will disagree again in every remaining phase **by
+construction** — that is what a deviation register *is*. Here, §3's description, v1's own test,
+and the dispatch brief's paraphrase of §3 all agreed with each other **against** the register.
+Three sources that all describe v1 will always agree; that agreement carries no information
+about what v2 should do. A precedence note now sits at the head of `MIGRATION_PLAN.md` §5.
+
+Corrected in `5aa8b1a`. This section's §4.2 entry was **not** corrected with it and misled the
+first parity round — see §4.2.
 
 ### 5.3 D8 was not in the brief's "deviations that land in this phase" list
 
