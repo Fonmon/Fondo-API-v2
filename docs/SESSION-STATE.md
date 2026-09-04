@@ -7,36 +7,58 @@ gotchas, and the next actions.
 
 ## 0. Right now, in one paragraph
 
-**Phase 4 (Loans) is implemented and with `manual-tester`.** Branch `feat/phase-4-loans` at
-**`5aa8b1a`**, tree clean, nothing pushed. Gate verified by me, not taken from a report: lint
-clean, `tsc --noEmit` clean, **1830 unit / 58 suites**, **818 e2e + 1 skipped / 16 suites**,
-`fondodev` at baseline with **1 distinct `xmin`** on both loan tables. When the tester reports,
-it goes to `nestjs-reviewer` — that is the standing three-stage pipeline from Phase 2 onward.
+**Phase 4 (Loans) is NOT closed. A delta parity round is running.** Branch `feat/phase-4-loans`
+at **`a0f7e59`**. Both sign-offs are real but **stale**: `manual-tester` PASSed at `6b32687` and
+`nestjs-reviewer` returned **Approved with conditions C40–C49** at `6fdbc3a` — and **613 lines
+across 5 source files landed afterwards**, precisely to satisfy those conditions. The operator
+was told and chose to close the gap before closing the phase.
 
-**Pipeline state:** developer ✅ → manual-tester 🔨 **running** → reviewer ⬜.
+**What is unreviewed and unmeasured:** D29 (quota boundary — compare raw, then coerce), D30
+(`value` floored at 1, binding the refinance path too), M3 (compare-and-set in `updateLoanIn`).
+Four observable HTTP behaviours changed. `git diff 6b32687..a0f7e59 -- src/ test/` is the delta.
+
+**Pipeline:** developer ✅ → manual-tester (full) ✅ PASS → reviewer ✅ approved w/ conditions →
+conditions closed ✅ → **manual-tester (delta) 🔨 running** → reviewer (delta) ⬜ → close.
 
 ### If you are resuming cold, the next action is
 
-1. Wait for / read `docs/parity-phase-4.md` from `manual-tester`.
-2. Verify its load-bearing claims yourself before propagating them — every agent report so far
-   has contained at least one claim that did not survive checking.
-3. Then dispatch `nestjs-reviewer` with the parity report and the phase.
+1. Read `docs/parity-phase-4-delta.md` when the tester reports.
+2. Verify its load-bearing claims yourself — every agent report so far has contained at least
+   one claim that did not survive checking, including two of mine.
+3. Dispatch `nestjs-reviewer` on the delta `6fdbc3a..a0f7e59` **plus** the delta parity report.
+4. Then mark Phase 4 CLOSED and scope Phase 5 (Activities).
 
-### Still open, tracked to Phase 4's gate (not its start)
+### Gate at `a0f7e59`, verified by me
 
-**C31, C33, C34, C35, C37, C39** — small doc, register and test conditions from the Phase 3
-review, held back so they do not race the Phase 4 branch on the same files. Also open:
-**M5/C32** (the D15 + P3-D2 unresettable-account path), **B1–B4** from Phase 3 round 1, and
-`PowerService.parseDateField` rejecting `2026-1-5` where Django accepts it (Phase 3 behaviour,
-found during Phase 4, recorded not changed).
+lint clean, `tsc --noEmit` clean, **1863 unit / 58 suites**, **827 e2e + 1 skipped / 16 suites**,
+`fondodev` at baseline with `count(distinct xmin::text) = 1` on both loan tables.
 
-### The D4 lesson, because it will recur
+### Operator decisions taken this phase
 
-Phase 4's developer implemented v1's silent `timelimit > 36` clamp because **§3 describes it,
-v1's `test_post_loan_5` asserts it, and my dispatch brief paraphrased §3** — three sources that
-all describe v1, agreeing with each other against operator **Q9**, which decided a 400. **§5
-decides; §3 only describes.** A precedence note now sits at the head of §5. Expect §3 and §5 to
-disagree again in Phases 5–8 **by construction** — that is what a deviation register *is*.
+Q9 → D4 rejects a term outside 1–36 (the clamp is gone). Q29a/Q30a/Q31 → D25, D26, D27 proceed,
+**D28 withdrawn** (a treasurer approving their own loan is normal practice). No minimum loan
+amount → **D30 floors at 1**. Exact parity chosen on the quota boundary → **D29**. Re-open
+refused → **D31 withdrawn, PAID_OUT is terminal**, recovery is a documented database repair.
+Notification refused → **D32 withdrawn**, mass close stays silent. **D33** registers the
+resulting partial self-heal.
+
+### Still open, tracked to Phase 5's gate
+
+**C44–C47, C49**, and **C48** — the Phase 3 rollovers **C31–C35, C37, C39**, which have now
+survived two gates. The reviewer's warning stands: a third silent roll makes the tracking
+decorative, so they go in the Phase 5 batch.
+
+### The two lessons this phase actually taught
+
+1. **§5 decides; §3 only describes.** Three sources that all describe v1 will always agree, and
+   that agreement carries no information about what v2 should do. Precedence note now at the
+   head of §5; C40 gives every phase block a mechanical "§5 rows this phase owns" line.
+2. **Every convention carried successfully had a carrier — a table, a type error, an assertion.
+   Every one that slipped was a paragraph.** Three slipped in Phase 4 alone, all prose.
+
+**False-green register is at nineteen**, five of them mine. #19's lesson: a verifying `grep` that
+is line-wrapped fails in *both* directions — it gave two false alarms and one false clearance in
+this phase. Match a fragment that cannot wrap, or normalise whitespace first.
 
 ---
 
