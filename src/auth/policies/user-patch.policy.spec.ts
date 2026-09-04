@@ -573,6 +573,79 @@ describe('§5 D1 — PATCH /api/user/<id> authorisation policy', () => {
         ]);
       });
 
+      /**
+       * C34 — `normalise` must compare decimal-integer strings as `BigInt`, never through
+       * `Number`. `identification` is a Django `BigIntegerField`; `toDjangoInt`
+       * (`src/users/python-obj.ts`) writes it exactly via `BigInt`, so a comparator that
+       * loses precision above 2^53 disagrees with the writer and D16's ADMIN-only gate is
+       * decided on a value that never reaches the column.
+       *
+       * Control: both cells fail against the pre-C34 `Number(value)` implementation.
+       */
+      describe('C34 — decimal-integer strings compare as BigInt, not through Number', () => {
+        it('reports a change above 2^53 that `Number` would collapse into a no-op', () => {
+          // Number("9007199254740993") === 9007199254740992, so the pre-C34 comparator
+          // reported this pair as unchanged and let the write through the section gate.
+          expect(
+            changedFields(
+              { identification: '9007199254740993' },
+              { identification: 9007199254740992n },
+            ),
+          ).toEqual(['identification']);
+        });
+
+        it('403s the member whose body carries that above-2^53 identification', () => {
+          // The bypass D16 exists to prevent: the field is genuinely changing, so the
+          // ADMIN-only gate must fire rather than treating the save as a no-op.
+          expect(() =>
+            assertUserPatchAllowed({
+              actor: actor(Role.MEMBER),
+              targetUserId: ME,
+              section: 'personal',
+              fields: changedFields(
+                { first_name: 'Ana', identification: '9007199254740993' },
+                { first_name: 'Ana', identification: 9007199254740992n },
+              ),
+            }),
+          ).toThrow(DrfException);
+        });
+
+        it('reports no change when an above-2^53 identification is echoed back verbatim', () => {
+          // The mirror failure: `Number` turned an untouched 9007199254740993 into a
+          // *phantom* change, which under D16 403s a member for saving what they were sent.
+          expect(
+            changedFields(
+              { identification: '9007199254740993' },
+              { identification: 9007199254740993n },
+            ),
+          ).toEqual([]);
+          expect(() =>
+            assertUserPatchAllowed({
+              actor: actor(Role.MEMBER),
+              targetUserId: ME,
+              section: 'personal',
+              fields: changedFields(
+                { first_name: 'Ana', identification: '9007199254740993' },
+                { first_name: 'Ana', identification: 9007199254740993n },
+              ),
+            }),
+          ).not.toThrow();
+        });
+
+        /**
+         * Preservation control, not a C34 cell: green both before and after the fix. It
+         * pins the paths C34 deliberately left on `Number` so a later tightening of
+         * DECIMAL_INTEGER cannot silently drop them.
+         */
+        it('leaves fractional and exponential strings on the `Number` path', () => {
+          expect(changedFields({ role: '1e0' }, { role: 1 })).toEqual([]);
+          expect(changedFields({ role: '3.0' }, { role: 3 })).toEqual([]);
+          expect(changedFields({ first_name: 'not-a-number' }, { first_name: 'other' })).toEqual([
+            'first_name',
+          ]);
+        });
+      });
+
       it('does not 403 a member whose client echoes a bigint identification as a number', () => {
         // Without normalisation this is a phantom change on every single save, and under
         // D16 it would become a 403 the moment Q26 is answered.

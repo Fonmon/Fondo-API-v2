@@ -331,6 +331,13 @@ function valuesMatch(submitted: unknown, stored: unknown): boolean {
   return normalise(submitted) === normalise(stored);
 }
 
+/**
+ * A decimal integer, optionally signed — the exact set of strings that {@link normalise}
+ * compares as `BigInt` rather than through `Number` (C34). Deliberately excludes `0x`, `1e3`
+ * and anything fractional, all of which keep their pre-C34 `Number` handling.
+ */
+const DECIMAL_INTEGER = /^[+-]?\d+$/;
+
 /** A comparable string form: BigInt/number/numeric-string collapse, `Date` becomes a date. */
 function normalise(value: unknown): string {
   if (value instanceof Date) {
@@ -344,8 +351,24 @@ function normalise(value: unknown): string {
     // A numeric string compares equal to the number it denotes ("3" vs 3), which is what a
     // form-encoded or loosely-typed client sends. A date string is left alone and matches
     // the `Date` branch above.
-    const asNumber = Number(value);
-    return value.trim() !== '' && Number.isFinite(asNumber) ? asNumber.toString() : value;
+    const trimmed = value.trim();
+    if (trimmed === '') {
+      return value;
+    }
+    // C34: a decimal-integer string is compared as a `BigInt`, never through `Number`.
+    // The fields this comparator guards include `identification`, a Django `BigIntegerField`
+    // that `toDjangoInt` (`src/users/python-obj.ts`) writes exactly via `BigInt`. Routing it
+    // through `Number` loses precision above 2^53 — stored `9007199254740992n` and submitted
+    // `"9007199254740993"` both collapse to `"9007199254740992"`, `changedFields` reports the
+    // field unchanged, D16's ADMIN-only gate never fires, and the *different* value is
+    // written. `BigInt` makes the comparison exact for every integer the column can hold.
+    if (DECIMAL_INTEGER.test(trimmed)) {
+      return BigInt(trimmed).toString();
+    }
+    // Genuinely fractional (and exponential/hex) forms keep the pre-C34 `Number` path: they
+    // are not what the BigInt columns carry, and `Number` is what makes "1e3" match 1000.
+    const asNumber = Number(trimmed);
+    return Number.isFinite(asNumber) ? asNumber.toString() : value;
   }
   if (typeof value === 'boolean') {
     return value ? 'true' : 'false';

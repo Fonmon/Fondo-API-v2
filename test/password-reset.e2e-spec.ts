@@ -367,10 +367,29 @@ describe('Phase 3 — password reset', () => {
       expect(params.username).toBe(shared);
     });
 
-    it('sends nothing when no account has the shared address as its username', async () => {
+    /**
+     * **C32 — the M5 state, and the finding of Phase 3.**
+     *
+     * Two rows share an address and **neither** is D17's tie-break candidate. This is not a
+     * contrived shape: it is what a member's ordinary self-service edit now produces, because
+     * **D15** stopped writing `username = email` on a personal update and **P3-D2** turned
+     * v1's 409 for a duplicate email into a 200. Member A changes their email to B's, both
+     * keep their original usernames, and D17's rule has nothing to match.
+     *
+     * Before C32 this answered `null` and the member was shown the success page with no mail
+     * sent — the exact live failure D17 was written to fix, re-created by v2's own
+     * deviations. It must resolve, deterministically, to the **lowest id**.
+     *
+     * The `update` before the request is deliberate: it rewrites the lower-id tuple so the
+     * heap returns it **last**, which makes the cell fail if anyone removes
+     * `orderBy: { id: 'asc' }` from `getUserByEmail` instead of passing on insertion order by
+     * luck.
+     */
+    it('C32: resolves to the lowest id when no account has the shared address as its username', async () => {
       const shared = 'orphan.shared@mail.com';
+      const ids: number[] = [];
       for (const [index, username] of ['first.child', 'second.child'].entries()) {
-        await prisma.authUser.create({
+        const row = await prisma.authUser.create({
           data: {
             password: 'x',
             username,
@@ -383,8 +402,14 @@ describe('Phase 3 — password reset', () => {
             date_joined: new Date(),
             profile: { create: { identification: BigInt(700020 + index), role: Role.MEMBER } },
           },
+          select: { id: true },
         });
+        ids.push(row.id);
       }
+      const [lowest, highest] = [Math.min(...ids), Math.max(...ids)];
+      // Move the lowest-id tuple to the end of the heap, so an unordered scan returns the
+      // *highest* id first and a missing `orderBy` cannot pass by accident.
+      await prisma.authUser.update({ where: { id: lowest }, data: { first_name: 'Moved' } });
 
       const { cookie, field } = csrfPair();
       await request(app.getHttpServer())
@@ -394,7 +419,15 @@ describe('Phase 3 — password reset', () => {
         .send({ email: shared, csrfmiddlewaretoken: field })
         .expect(302);
 
-      expect(sendMail).not.toHaveBeenCalled();
+      // A row, not a null: the member is not silently unresettable.
+      expect(sendMail).toHaveBeenCalledTimes(1);
+      const [, , params] = sendMail.mock.calls[0] as [
+        EmailTemplate,
+        string[],
+        Record<string, string>,
+      ];
+      expect(params.uid).toBe(uidOf(lowest));
+      expect(params.uid).not.toBe(uidOf(highest));
     });
   });
 

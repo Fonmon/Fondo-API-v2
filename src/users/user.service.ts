@@ -421,7 +421,19 @@ export class UserService {
    * |---|---|---|
    * | 0 | `None`, redirect to the success page | same |
    * | 1 | that user | that user — **even if `username != email`**, which D15 now makes possible |
-   * | >1 | `None` (silently) | the one whose `username === email`; `None` if there is no such row, logged |
+   * | >1 | `None` (silently) | the one whose `username === email`; else the **lowest id**, logged |
+   *
+   * ⚠️ **C32 — the last row's fallback is not cosmetic.** D15 stopped writing
+   * `username = email` on a personal update and P3-D2 turned a duplicate-email PATCH from
+   * v1's 409 into a 200, so v2 — and only v2 — can reach a state where two rows share an
+   * address and **neither** has it as its `username`: member A edits their email to B's, and
+   * both keep their original usernames. D17's tie-break has no candidate there, and returning
+   * `None` would re-create the exact live failure D17 was written to fix (silent
+   * non-delivery behind an unconditional success redirect) out of a member's ordinary
+   * self-service edit. The four live members (7/10/13/14) are safe because their usernames
+   * happen to match; the new path has no such luck, which is why the answer must be a row and
+   * not a `null`. The lowest id is the oldest account and is stable across planner whims —
+   * that is what `orderBy: { id: 'asc' }` is for, and removing it silently breaks this.
    *
    * ⚠️ No `is_active` filter, as in v1: a deactivated member still receives a link, and then
    * cannot log in with the new password. Two of the fifteen are inactive. Left alone because
@@ -458,11 +470,15 @@ export class UserService {
     }
     const canonical = matches.find((candidate) => candidate.username === email);
     if (canonical === undefined) {
+      // C32 — the deterministic fallback. `matches` is ordered by `id` above, so `[0]` is the
+      // lowest id: the oldest account holding the address, and a *stable* answer rather than
+      // whatever order the planner happened to return.
+      const fallback = matches[0];
       this.logger.warn(
         `Password reset for "${email}" is ambiguous: ${matches.length} accounts share it and ` +
-          'none has it as its username. No email sent (D17).',
+          `none has it as its username. Falling back to the lowest id, ${fallback.id} (D17/C32).`,
       );
-      return null;
+      return fallback;
     }
     return canonical;
   }

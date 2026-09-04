@@ -1,6 +1,4 @@
 import type { Server } from 'node:http';
-import { connect } from 'node:net';
-import type { AddressInfo } from 'node:net';
 import type { INestApplication } from '@nestjs/common';
 import { Test, type TestingModule } from '@nestjs/testing';
 import request from 'supertest';
@@ -19,6 +17,7 @@ import {
   type SeededUser,
 } from './support/abstract-test';
 import { V1_TEST_SUBSCRIPTION } from './support/push-subscription.fixture';
+import { rawRequestFor } from './support/raw-request';
 
 /**
  * Regressions for the three HTTP-edge findings of the Phase 2 parity report
@@ -46,74 +45,13 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
   const server = (): App => app.getHttpServer();
 
   /**
-   * `app.init()` wires the app up but never binds a socket, so the server has no address until
-   * something listens; supertest hides this by calling `listen(0)` per request. The raw probe
-   * needs a real port, so it binds one ephemeral listener and reuses it — supertest then reuses
-   * the same address, and `app.close()` tears it down.
+   * The raw-socket transport, now shared: {@link rawRequestFor} in `test/support/raw-request.ts`
+   * (**C27** / review S8). It is the required transport for every cell whose subject is the
+   * request target, because supertest re-serialises the URL and its rewrites are precisely the
+   * transformations those cells assert. `test/raw-request.harness.e2e-spec.ts` is the
+   * self-check that this transport transmits what the caller wrote.
    */
-  async function listeningPort(): Promise<number> {
-    // supertest types `App` as `Server | string`; the Nest adapter always hands back a Server.
-    const httpServer = server() as unknown as Server;
-    if (!httpServer.listening) {
-      await new Promise<void>((resolve) => {
-        httpServer.listen(0, '127.0.0.1', resolve);
-      });
-    }
-    return (httpServer.address() as AddressInfo).port;
-  }
-
-  /**
-   * A request written straight onto the socket, because **supertest cannot express a
-   * fragment**: superagent normalises the URL and strips everything from the `#` on before it
-   * writes the request line, so `POST /password_reset#frag` reaches the app as
-   * `POST /password_reset` and the N4 cells below would pass against the unfixed code. This
-   * sends the bytes verbatim, exactly as the raw-socket probe against v1 did.
-   *
-   * `headerLines` is a raw, already-CRLF-terminated header block, so a cell can forge a
-   * `Host:` (condition **C19**) — something supertest also cannot express, because Node
-   * derives the `Host` header from the connection.
-   */
-  async function rawRequest(
-    target: string,
-    method = 'POST',
-    headerLines = 'Host: localhost\r\n',
-  ): Promise<{
-    status: number;
-    location: string | undefined;
-    headers: Record<string, string>;
-    body: string;
-  }> {
-    const port = await listeningPort();
-    const raw = await new Promise<string>((resolve, reject) => {
-      const socket = connect(port, '127.0.0.1', () => {
-        socket.write(
-          `${method} ${target} HTTP/1.1\r\n${headerLines}Content-Length: 0\r\n` +
-            'Connection: close\r\n\r\n',
-        );
-      });
-      let buffer = '';
-      socket.setEncoding('latin1');
-      socket.on('data', (chunk: string) => {
-        buffer += chunk;
-      });
-      socket.on('end', () => {
-        resolve(buffer);
-      });
-      socket.on('error', reject);
-    });
-
-    const [rawHead, ...rest] = raw.split('\r\n\r\n');
-    const head = rawHead.split('\r\n');
-    const status = Number(head[0].split(' ')[1]);
-    const headers: Record<string, string> = {};
-    for (const line of head.slice(1)) {
-      const separator = line.indexOf(':');
-      if (separator > 0) {
-        headers[line.slice(0, separator).toLowerCase()] = line.slice(separator + 1).trim();
-      }
-    }
-    return { status, location: headers['location'], headers, body: rest.join('\r\n\r\n') };
-  }
+  const rawRequest = rawRequestFor(() => server() as unknown as Server);
 
   async function countSubscriptions(): Promise<number> {
     const rows = await prisma.$queryRawUnsafe<{ count: bigint }[]>(

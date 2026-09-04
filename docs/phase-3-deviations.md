@@ -33,7 +33,7 @@ Audience: `nestjs-reviewer` (§1–§3), `manual-tester` (§4 — everything it 
 | **D14** | Only `UserDetailView.get` substitutes `-1`; `.patch` and `.delete` pass it through and 404. | Split by verb: **GET** keeps it, **PATCH adopts** it, **DELETE refuses** it (passing `-1` through, which 404s exactly as v1 does — a refusal to *add*, not a change). | `user.service.ts::resolveDetailUserId` |
 | **D15** | `__update_user_personal` does `user.username = obj['email']`. `auth_user.username` is UNIQUE and two live members' emails are already another member's username, so **any personal edit to user 13 or 14 is a bare 409 today**; on the other branch it silently rotates a credential. | `username` is written once, at creation, and never again. | `user.service.ts::updateUserPersonal` |
 | **D16** | `identification` is writable by any caller. | ADMIN-only, gated on an actual change. It is the join key of the treasurer's monthly TSV and a miss is only *logged* (`services/user.py:144`), so a member editing their own cédula silently freezes their contributions and quota. | `auth/policies/user-patch.policy.ts::PRIVILEGED_FIELDS` |
-| **D17** | `get_user_by_email` does `.get()` inside a bare `except`, so a duplicated email raises `MultipleObjectsReturned` → `None` → **no email sent**, while the view still redirects to the success page. Live: ids 7, 10, 13, 14 — **4 of 15 members cannot reset their password and are told it worked**. | 0 matches → nothing (unchanged). 1 match → that account, **even if its `username` differs** (D15 makes that reachable). >1 → the account whose `username` *is* the email; none → nothing, **logged**. | `user.service.ts::getUserByEmail` |
+| **D17** | `get_user_by_email` does `.get()` inside a bare `except`, so a duplicated email raises `MultipleObjectsReturned` → `None` → **no email sent**, while the view still redirects to the success page. Live: ids 7, 10, 13, 14 — **4 of 15 members cannot reset their password and are told it worked**. | 0 matches → nothing (unchanged). 1 match → that account, **even if its `username` differs** (D15 makes that reachable). >1 → the account whose `username` *is* the email; if none, the **lowest id**, **logged** (**C32** — D15 + P3-D2 let a member's own edit create a shared address that no `username` matches, and `null` there would re-create exactly the silent non-delivery D17 fixes). | `user.service.ts::getUserByEmail` |
 | **D19** | `.replace(year=today_year)` on a 29 Feb birthdate raises `ValueError`; `UserDetailView.patch` has no handler, so it 500s and `transaction.atomic()` rolls the whole edit back. Latent — 0 of 15 today. | Clamped to **28 February**. See §2.1 for why 28 and not 1 March. | `user.service.ts::birthdayInYear` |
 | **D20** | `user_ids.remove(user.id)` on a list `get_users_attr("id")` filtered to `is_active=True` → `ValueError` for a soft-deleted member → 500 + rollback. **Live: `fondodev` has 2 inactive users.** | The removal is guarded. | `user.service.ts::createBirthdateNotification` |
 
@@ -303,7 +303,10 @@ Everything in §1. The ones that will show up first:
 4. **`POST /api/user/power` with `type: patch` is 403 unless the caller is the requestee**
    (D2), and the approval email has an **empty `To`** with everyone in `Bcc` (D5).
 5. **Password reset now works for the four members it silently failed for** (D17) — and the
-   two custodial accounts (13, 14) now deliberately receive nothing.
+   two custodial accounts (13, 14) now deliberately receive nothing. **C32:** if a shared
+   address matches *no* account's `username` — a state only reachable after a member changes
+   their own email under D15 + P3-D2, so **not reproducible against v1** — the link goes to
+   the **lowest id** rather than nowhere.
 6. **No `django_session` row and no `sessionid` cookie** on `GET /reset/<uid>/<token>/`
    (P3-D3); the redirect and its `Vary: Origin, Cookie` are unchanged.
 7. **Reset links are not interchangeable between the two systems** (P3-D4). Issue and consume a

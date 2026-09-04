@@ -240,8 +240,30 @@ export class PowerService {
    *
    * **D2:** the caller must be the **requestee** — the person being asked to hold the power.
    * Without that check any member could approve any request and fan the letter out to the
-   * whole fund. The refusal is DRF's generic 403, identical to a role denial, so it cannot be
-   * used to discover which power ids exist.
+   * whole fund. The refusal is DRF's generic 403, byte-identical to a role denial.
+   *
+   * ⚠️ **C35 — that 403 *is* an existence oracle, and this comment used to deny it.** The row
+   * is loaded below *before* {@link assertOwnership} runs, so any authenticated member can
+   * distinguish two cases by POSTing an id:
+   *
+   * * **id does not exist** → `PythonTypeError` → **500** (v1: `Power.objects.get` raises
+   *   `DoesNotExist` and the view's bare handler answers 500 — see the
+   *   `raises for an unknown power id` cell);
+   * * **id exists but the caller is not its requestee** → **403** (the
+   *   `D2: refuses a caller who is not the requestee` cell).
+   *
+   * So the pair (403, 500) enumerates the `power` table's ids. This is **not** a parity
+   * defect — v1 leaks the same fact through (200, 500) and leaks it harder, since its 200
+   * also *performs* the approval — and the leak is low value: ~20 sequential ids, no
+   * content disclosed either way.
+   *
+   * The claim was **deleted rather than satisfied**. Satisfying it means probing with
+   * `select: { requestee_id: true }` and answering 403 for the absent row too, which turns
+   * v1's 500 into a 403 on a path v1 actually reaches — a new observable status divergence
+   * needing its own §5 row and manual-tester cell, and one that would hide a genuinely
+   * missing row from the operator behind a permission error. Not worth buying an existence
+   * property that v1 does not have either. If the fund ever wants it, it is a product
+   * decision for `business-analyst`, not a comment.
    *
    * ⚠️ **`power.state == 1` compares the *submitted* value**, not the stored one: Django does
    * not refresh the instance after `save()`, so `{"state": "1"}` writes 1 to the column (the

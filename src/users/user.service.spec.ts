@@ -264,12 +264,37 @@ describe('UserService (unit)', () => {
       await expect(service.getUserByEmail('shared@mail.com')).resolves.toMatchObject({ id: 7 });
     });
 
-    it('returns null when several share it and none is canonical', async () => {
+    /**
+     * **C32** — the D15 + P3-D2 interaction. Neither row has the address as its `username`,
+     * which is a state only v2 can reach (D15 stopped writing `username = email`; P3-D2 lets
+     * the duplicate-email PATCH through with a 200). Returning `null` here would re-create
+     * the silent non-delivery D17 exists to fix, from an ordinary member self-service edit.
+     */
+    it('falls back to the lowest id when several share it and none is canonical', async () => {
       const service = build([
         { id: 13, username: 'a.child' },
         { id: 14, username: 'b.child' },
       ]);
-      await expect(service.getUserByEmail('shared@mail.com')).resolves.toBeNull();
+      await expect(service.getUserByEmail('shared@mail.com')).resolves.toMatchObject({ id: 13 });
+    });
+
+    it('asks the database for the ordering the fallback depends on', () => {
+      // The fallback is only *deterministic* because of `orderBy: { id: 'asc' }`; without it
+      // the answer is whatever the planner returns. Pinned here as well as in the e2e cell.
+      const prisma = {
+        authUser: { findMany: jest.fn().mockResolvedValue([]) },
+      };
+      const service = new UserService(
+        prisma as unknown as PrismaService,
+        {} as MailService,
+        {} as NotificationService,
+        new DjangoPasswordService(),
+        {} as AppConfigService,
+      );
+      void service.getUserByEmail('shared@mail.com');
+      expect(prisma.authUser.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ orderBy: { id: 'asc' } }),
+      );
     });
   });
 

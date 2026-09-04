@@ -812,12 +812,92 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
       expect(row.role).toBe(Role.MEMBER);
     });
 
-    it('D16/Q26: 403s a member who changes their own identification', async () => {
+    /**
+     * **C37 (m5)** — the status alone is not the assertion. A 403 that nevertheless wrote the
+     * column is exactly the failure D16 exists to prevent, and it would have been green here
+     * until the row check below was added. The `role` cell above is the model.
+     */
+    it('D16/Q26: 403s a member who changes their own identification, and does not write it', async () => {
       await request(app.getHttpServer())
         .patch(`/api/user/${member.id}`)
         .set(authHeader(memberToken))
         .send(personalBody({ identification: 500002 }))
         .expect(403);
+
+      const row = await prisma.userProfile.findUniqueOrThrow({ where: { user_ptr_id: member.id } });
+      expect(row.identification).toBe(500001n);
+    });
+
+    /**
+     * **C37 (m5)** — the positive control for D16. Without it, "identification is never
+     * writable by anyone" would be indistinguishable from a correct policy, and the cell above
+     * would still pass if the column had simply become read-only for everybody.
+     */
+    it('D16 positive control: an ADMIN changes another member’s identification and the row moves', async () => {
+      await request(app.getHttpServer())
+        .patch(`/api/user/${member.id}`)
+        .set(asAdmin())
+        .send(personalBody({ identification: 500002 }))
+        .expect(200);
+
+      const row = await prisma.userProfile.findUniqueOrThrow({ where: { user_ptr_id: member.id } });
+      expect(row.identification).toBe(500002n);
+    });
+
+    /**
+     * **C37 (m5)** — the control that keeps the pair honest: the *same* body, from the two
+     * roles, in one cell. If the D16 gate ever stopped distinguishing ADMIN from member — in
+     * either direction — one of these two halves fails.
+     */
+    it('D16: the identical body is a 403 from the member and a 200 from the ADMIN', async () => {
+      const body = personalBody({ identification: 500003 });
+
+      await request(app.getHttpServer())
+        .patch(`/api/user/${member.id}`)
+        .set(authHeader(memberToken))
+        .send(body)
+        .expect(403);
+      await expect(
+        prisma.userProfile
+          .findUniqueOrThrow({ where: { user_ptr_id: member.id } })
+          .then((row) => row.identification),
+      ).resolves.toBe(500001n);
+
+      await request(app.getHttpServer())
+        .patch(`/api/user/${member.id}`)
+        .set(asAdmin())
+        .send(body)
+        .expect(200);
+      await expect(
+        prisma.userProfile
+          .findUniqueOrThrow({ where: { user_ptr_id: member.id } })
+          .then((row) => row.identification),
+      ).resolves.toBe(500003n);
+    });
+
+    /**
+     * **C37 (§4 item 5)** — `email` is in the `personal` section's writable set and **D16
+     * deliberately does not guard it**: a member changing their own address is ordinary
+     * self-service. Unmeasured until now, and it is the write that makes M5 (and therefore
+     * C32) reachable — D15 no longer moves `username` with it, so this row's `username` and
+     * `email` diverge here, permanently.
+     */
+    it('C37: a member changes their own email, and D15 leaves the username behind', async () => {
+      await request(app.getHttpServer())
+        .patch(`/api/user/${member.id}`)
+        .set(authHeader(memberToken))
+        .send(personalBody({ email: 'moved.member@mail.com' }))
+        .expect(200);
+
+      const row = await prisma.userProfile.findUniqueOrThrow({
+        where: { user_ptr_id: member.id },
+        include: { auth_user: true },
+      });
+      expect(row.auth_user.email).toBe('moved.member@mail.com');
+      // D15: the login credential is *not* rotated silently. This is the divergence that
+      // gives D17 nothing to match, which is what C32's fallback answers.
+      expect(row.auth_user.username).toBe('plain.member@mail.com');
+      expect(row.identification).toBe(500001n);
     });
 
     it('403s a member editing somebody else’s personal section', async () => {
@@ -883,6 +963,46 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
       const finance = await prisma.userFinance.findFirstOrThrow({ where: { user_id: member.id } });
       expect(finance.total_quota).toBe(30n);
       expect(finance.available_quota).toBe(25n);
+    });
+
+    /**
+     * ⚠️ **The m6 cell, carried deliberately (C37 §4 item 3).** `canWriteSection` allows the
+     * `finance` section to `[ADMIN, TREASURER]` on **any** target, self included, which is
+     * exactly what the §5 **D1** table states. The tension the reviewer raised is with **Q12**
+     * ("quota comes exclusively from the treasurer's monthly file"): a treasurer may set their
+     * own `available_quota` between uploads and borrow against it.
+     *
+     * Operator **Q31/Q12** settled it — this is accepted fund practice, the treasurer is
+     * already trusted with everyone else's quota, and **D28 was withdrawn** on the identical
+     * question for loans. So this cell asserts the exposure so a future reader finds a
+     * decision rather than an oversight: **if it ever starts failing, that is a *policy*
+     * change and needs an operator, not a fix.** The loan twin is
+     * `test/loan.e2e-spec.ts` — "D28 (WITHDRAWN, Q31): a TREASURER may approve their own loan".
+     */
+    it('m6 (Q31/Q12): a TREASURER may write their OWN finance section — accepted, not a bug', async () => {
+      const treasurer = members[0];
+      const treasurerToken = await obtainToken(app, treasurer.email);
+
+      await request(app.getHttpServer())
+        .patch(`/api/user/${treasurer.id}`)
+        .set(authHeader(treasurerToken))
+        .send({
+          type: 'finance',
+          finance: {
+            contributions: 11,
+            balance_contributions: 22,
+            total_quota: 33,
+            utilized_quota: 3,
+          },
+        })
+        .expect(200);
+
+      const finance = await prisma.userFinance.findFirstOrThrow({
+        where: { user_id: treasurer.id },
+      });
+      expect(finance.total_quota).toBe(33n);
+      expect(finance.utilized_quota).toBe(3n);
+      expect(finance.available_quota).toBe(30n);
     });
 
     it('lets a TREASURER keep self-service on their own personal section', async () => {
@@ -1173,6 +1293,44 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
       include: { auth_user: true },
     });
     expect(row.auth_user.is_active).toBe(false);
+  });
+
+  /**
+   * **C37 (m7)** — implemented, documented in `docs/phase-3-deviations.md` §2.9, and never
+   * measured: `docs/parity-phase-3.md` §11 records that the round had no disposable user left.
+   *
+   * `set_password(None)` in Django stores an **unusable** password (`!` + 40 random chars),
+   * so `{"password": null}` on this **public, unauthenticated** endpoint activates the account
+   * and burns the `key_activation` while leaving nobody able to log in. Reproduced from v1
+   * deliberately — a client doing this in v1 gets the same silent outcome — but it is an
+   * account-taking-over route, so the outcome is pinned here rather than trusted.
+   */
+  it('C37: `"password": null` activates the account with an unusable password', async () => {
+    const { id, key } = await createAndFetch();
+
+    await request(app.getHttpServer())
+      .post(`/api/user/activate/${id}`)
+      .send({ password: null, identification: 123, key })
+      .expect(200);
+
+    const row = await prisma.userProfile.findFirstOrThrow({
+      where: { identification: 123n },
+      include: { auth_user: true },
+    });
+    expect(row.auth_user.is_active).toBe(true);
+    expect(row.key_activation).toBeNull();
+    // `UNUSABLE_PASSWORD_PREFIX` + 40 chars, and emphatically not a usable hash.
+    expect(row.auth_user.password.startsWith('!')).toBe(true);
+    expect(row.auth_user.password).not.toContain('pbkdf2_sha256');
+    expect(row.auth_user.password).toHaveLength(41);
+
+    // The account is active and unreachable: no password logs in, including the empty one.
+    for (const password of ['', 'newPassword123', row.auth_user.password]) {
+      await request(app.getHttpServer())
+        .post('/api-token-auth')
+        .send({ username: 'mail@mail.com', password })
+        .expect(400);
+    }
   });
 
   it('a missing password is a 500 — it is read outside v1’s try block', async () => {
