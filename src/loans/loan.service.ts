@@ -1045,6 +1045,16 @@ export class LoanService {
  * by hand; it does not make it *reachable*. See {@link LoanService.updateLoan}'s D6 section.
  * Whether that repair should exist as a route is fund policy, escalated to `business-analyst`
  * as review condition **C42** — do not add a `3→…` entry here to “fix” it.
+ *
+ * ⚠️ **And if that answer ever comes back “yes”, an entry in this table is not enough.**
+ * Verified in both stacks: the payment reminders are scheduled **only** on the monthly-TSV
+ * path — v1 calls `__create_scheduled_task` from `__update_loan_detail` (`services/loan.py:296`)
+ * and *never* from `__create_loan_detail`, and v2 mirrors it
+ * ({@link LoanService} calls `scheduleNotification` from `updateLoanDetail` only, never from
+ * `upsertLoanDetail`). Closing a loan **deletes** them (`removeSchNotifications` on state 3),
+ * so a re-opened loan comes back with **no T−5d and no T−1d reminder** until the next
+ * month's upload re-creates them. A re-open route must therefore *re-schedule* as well as
+ * re-transition, or it silently costs the member the reminders their payment depends on.
  */
 const LEGAL_LOAN_TRANSITIONS: ReadonlyMap<number, readonly number[]> = new Map([
   [LOAN_WAITING_APPROVAL, [LOAN_APPROVED, LOAN_DENIED]],

@@ -19,10 +19,16 @@ Audience: `nestjs-reviewer` (§1–§3), `manual-tester` (§4 — everything it 
 
 **Gate numbers**
 
-| | before | after |
-|---|---|---|
-| unit | 1628 / 55 suites | **1830 / 58 suites** |
-| e2e | 699 + 1 skipped / 15 suites | **818 + 1 skipped / 16 suites** |
+| | before | after (implementation) | after (review conditions) |
+|---|---|---|---|
+| unit | 1628 / 55 suites | 1830 / 58 suites | **1863 / 58 suites** |
+| e2e | 699 + 1 skipped / 15 suites | 818 + 1 skipped / 16 suites | **827 + 1 skipped / 16 suites** |
+
+The third column is the C40/C41/M3 + D29/D30 round: **+33 unit** (the `pythonGreaterThan`
+block, D29's ordering and string cells, D30's bounds, and three compare-and-set cells) and
+**+9 e2e** (D29's boundary and string cells, D30's bounds). No cell was removed or weakened;
+one existing cell — the auto-close's write assertion — was *strengthened* to read the
+compare-and-set predicate instead of an unconditional update.
 
 `fondodev` verified unchanged after the run: `schedulertask 626`,
 `notificationsubscriptions 94 / max(id) 1468 / 1 distinct xmin`, `auth_user 15`, `power 20`,
@@ -312,6 +318,15 @@ All restored, and the full suites re-run green afterwards.
 | `POST /api/user/power` `{"type":"post", requestee: <self>}` | 200, row written, self-addressed push | **406** `{"message":"Requester and requestee must be different users"}`, no row, no push | **D26** |
 | `POST /api/user/power` `{"type":"patch", state:1}` on an already-approved power | 200 **and the fund-wide letter again** | **409** `{"message":"Invalid state transition"}`, no mail | **D27** |
 | `PATCH /api/loan/<id>` `{"state":2}` or a legal `{"state":3}` | `200` body `""` | `200` body `""` | **P4-D3** — v2 was zero bytes before this phase; now identical. Worth one confirming cell. |
+| `POST /api/loan` with `value: 0` or `value: -1000` (plain JSON **numbers**) | **201**, row written | **400** `{"message":"Loan value must be greater than 0"}`, no row | **D30** ⚠️ **v1 accepts this and so did v2 — the refusal is a decision, not a repair.** The two stacks *agreed* before this row landed, which is exactly why it is listed: file the 400 as **expected**. |
+| `POST /api/loan` with `value: 0.5` | **201**, row written with `value = 0` | **400**, same message, no row | **D30** — the bound runs on the coerced value, and `int(0.5)` is `0`. |
+| `POST /api/loan` with `value: "-1000"` | **500** (`TypeError`, no row) | **400**, same message, no row | **D30** via **D29** — the string is coerced first, then refused by the same money bound. |
+| `POST /api/loan` with `value: 1` | 201 | 201 | **D30** — the floor is *inclusive*; the fund has three live loans at `value = 1`. Not a diff; listed so the boundary is probed from both sides. |
+| `POST /api/loan/<id>/refinance` whose projected `capital_balance` is `0` | 200, a zero-value loan is written | **400** `{"message":"Loan value must be greater than 0"}` | **D30** — `refinance_loan` overwrites `value` and calls the same `create_loan`, so the floor binds there too although the *quota* check is skipped. |
+| `POST /api/loan` with `value` = `available_quota + 0.5` (e.g. `500.5` against a 500 quota) | **406** `{"message":"User does not have available quota"}` | **406**, identical | **D29** ⚠️ **This one was a diff and is now fixed — measured, not assumed.** Before the fix v2 answered **201 and stored `500`**, a different number from the one submitted, because it truncated before comparing. The divergent window was exactly `quota < value < quota + 1`. If it ever answers 201 again, that IS a failure. |
+| `POST /api/loan` with an integer-shaped **string** `value` (`"100"`, `" 100 "`, `"+100"`) | **500** (`TypeError: '>' not supported between instances of 'str' and 'int'`), no row | **201**, row identical to a well-formed request | **D29** — v1's refusal is a crash, not a rule. Unchanged by the ordering fix. |
+| `POST /api/loan` with an over-quota string `value` (`"600"` against a 500 quota) | **500**, no row | **406** `{"message":"User does not have available quota"}` | **D29** — the member gets the fund's real answer. |
+| `POST /api/loan` with a non-integer string `value` (`"1e3"`, `"1000.7"`, `""`, `"0x10"`) | **500** | **500** | **D29** — unchanged on both. Not a diff; listed because the neighbouring cells are. |
 
 ### 4.2 Explicitly **unchanged** — if these differ, that IS a failure
 
@@ -361,9 +376,42 @@ phase is `~/.fondo-parity-dumps/p4-20260903-160323/`; take a fresh one before th
 
 Exactly as **D11** did, and for the same reason: §4 rule 6 forbids v2 running schema
 migrations against a database v1 shares, and Django owns the schema until cutover. The
-**application** half shipped here (upsert + deterministic reads), and nothing in v2 can create
-a second row. Checked on `fondodev`: **0 loans currently have more than one `LoanDetail`**, so
-the constraint will apply cleanly when Phase 9 adds it.
+**application** half shipped here (upsert + deterministic reads). Checked on `fondodev`:
+**0 loans currently have more than one `LoanDetail`**, so the constraint will apply cleanly
+when Phase 9 adds it.
+
+⚠️ **This section used to claim "nothing in v2 can create a second row". That was false, and
+the review (M3) was right to reject it.** `updateLoanIn` read the loan, checked the transition
+and then wrote with `where: { id }`; Prisma's interactive transaction runs at the database
+default, **READ COMMITTED**, so two concurrent `PATCH /api/loan/<id> {"state":1}` on the same
+WAITING loan both read state `0`, both passed the guard, both found no detail row and **both
+inserted one**. The window is a double-clicked approve button — the same shape of event that
+produced v1's duplicates.
+
+**The guarantee actually provided now**, stated so it can be checked rather than believed:
+
+> The state write is a **compare-and-set** — `updateMany({ where: { id, state: <the state
+> that was read> }, data: { state } })` — and a `count` of `0` is **D9's own 409**
+> (`{'message': 'Invalid state transition'}`), the same answer the caller would have received
+> had it lost the guard instead of the write. Because the predicate includes the state, the
+> second transaction blocks on the first's row lock and re-evaluates after it commits, so
+> **at most one transition per loan can proceed**, and therefore at most one
+> `upsertLoanDetail` runs. That is what makes "no second row" true, and it is true only for
+> transitions that go through `updateLoanIn` — which, in v2, is all of them, the
+> `bulkUpdateLoans` auto-close included.
+
+Two honest limits on that guarantee:
+
+* It is an **application-level** guarantee on `fondo_api_loan.state`, not a constraint on
+  `fondo_api_loandetail`. A writer that is not v2 — a DBA, or v1 itself while both stacks are
+  live — can still insert a duplicate. Only Phase 9's physical `UNIQUE (loan_id)` closes that,
+  which is why it must not slip again.
+* **No test races two real transactions.** A concurrency cell that depends on interleaving
+  passes or fails on timing, which is worse than no cell; the guarantee is pinned instead by
+  three unit cells asserting the *query shape* (`{ where: { id, state }, data: { state } }`,
+  the auto-close's predicate, and the 409 on `count === 0`). Stated plainly so nobody reads
+  the green suite as evidence that the race was reproduced and fixed — it was reasoned about
+  and designed out.
 
 ### 5.2 §5's D4 row and §3's Phase 4 scope — **resolved, §5 was right**
 
