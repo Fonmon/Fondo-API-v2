@@ -678,6 +678,41 @@ describe('LoanService (unit)', () => {
       });
     });
 
+    /**
+     * **C51 — the one race pair where the CAS's 409 is *not* the sequential answer.**
+     *
+     * `updateLoan`'s docblock claims the loser gets what it would have got a millisecond
+     * later. That holds for five of the six pairs D9 permits, and not for **winner `0→1`,
+     * loser `0→2`**: from state `1` a denial is *legal*, so sequentially this caller gets a
+     * **200**, the denial mail and the `prev_loan.refinanced_loan = null` unlink. Under the
+     * CAS it gets "Invalid state transition", which reads as "do not retry" — and the deny is
+     * the safety-side action.
+     *
+     * ⚠️ **This cell pins a known asymmetry, not a desired one.** Registered in §4.1 / §5.1
+     * of `docs/phase-4-deviations.md` and on `MIGRATION_PLAN.md` §5's D9 row. The fix (re-read
+     * and retry once from the new state) changes behaviour on the money path and was
+     * deliberately deferred out of this task. If it lands, this cell must flip to a 200 — it
+     * is the thing that will notice.
+     */
+    it('C51: a deny that loses to a concurrent approve gets a 409 where sequential execution gives a 200', async () => {
+      // state 0, the CAS matches no row: the approve committed first and the row is now 1.
+      const { service, prisma, mail } = buildUpdate(loanRow({ state: 0, prev_loan_id: 7 }), {
+        appliedRows: 0,
+      });
+      await expectAsyncRefusal(() => service.updateLoan(5, 2), HttpStatus.CONFLICT, {
+        message: 'Invalid state transition',
+      });
+      // The guard would have *allowed* 1 → 2, so this 409 comes from the write, not from D9's
+      // table: sequentially the denial succeeds.
+      expect(() => assertLegalLoanTransition(1, 2)).not.toThrow();
+      // Neither of the two things the sequential denial would have done happened.
+      expect(mail.sendMail).not.toHaveBeenCalled();
+      expect(callArgs(prisma.loan.update)).not.toContainEqual({
+        where: { id: 7 },
+        data: { refinanced_loan: null },
+      });
+    });
+
     it('D28 (withdrawn): update_loan never receives an actor — self-approval is not blocked', () => {
       // Operator Q31: a TREASURER approving their own loan is accepted fund practice. The
       // signature is the evidence — there is no actor to check against, deliberately.
@@ -869,13 +904,69 @@ describe('LoanService (unit)', () => {
       // 4 and 9 are approved and absent; 1/2/3 are present; 5 is in the file but not approved.
       expect(result.closed_loans).toEqual([4, 9]);
       // ⚠️ The auto-close goes through `updateLoanIn`, so it is a **compare-and-set**: the
-      // predicate carries the state that was read (`1`, APPROVED). A loan approved between
-      // the read and the write is therefore skipped with a 409 rather than silently closed.
+      // predicate carries the state that was read (`1`, APPROVED). A loan whose state changed
+      // between the read and the write matches no row and is **skipped** — the upload still
+      // commits and the id is left out of `closed_loans` (C50; see the cell below).
       const closes = callArgs(prisma.loan.updateMany);
       expect(closes).toEqual([
         { where: { id: 4, state: 1 }, data: { state: 3 } },
         { where: { id: 9, state: 1 }, data: { state: 3 } },
       ]);
+    });
+
+    /**
+     * **C50 — a CAS miss in the auto-close skips one loan; it does not abort the file.**
+     *
+     * The delta that made the auto-close a compare-and-set created a failure mode v1 does not
+     * have: a concurrent `PATCH /api/loan/<id> {"state":2}` committing between
+     * `getLoans(state=1)` and the auto-close write makes `count === 0`, and an uncaught D9 409
+     * escapes the `$transaction` callback and **rolls back the whole monthly upload** — every
+     * `LoanDetail` upsert and every other auto-close — with a 409 naming neither the file nor
+     * the loan. v1 cannot fail here at all: `update_loan(id, 3)` writes unconditionally.
+     *
+     * ⚠️ This cell fails against the pre-C50 code with a 409 out of `bulkUpdateLoans`. The
+     * `{count: 0}` for loan 4 is exactly the concurrent-denial interleaving.
+     */
+    it('C50: a loan whose state changed under the auto-close is skipped, and the upload still commits', async () => {
+      const { service, prisma } = buildBulk({
+        existingDetailFor: [1, 2, 3],
+        approved: [1, 2, 3, 4, 9],
+      });
+      // Loan 4 was denied by another admin between the read and the write: the CAS matches
+      // no row. Loan 9 is untouched and must still close.
+      prisma.loan.updateMany.mockImplementation(({ where }: { where: { id: number } }) =>
+        Promise.resolve({ count: where.id === 4 ? 0 : 1 }),
+      );
+
+      const result = await service.bulkUpdateLoans(V1_FILE);
+
+      // The file lands…
+      expect(result.closed_loans).toEqual([9]);
+      // …the skipped loan is absent from the response, and the other auto-close still ran…
+      expect(result.closed_loans).not.toContain(4);
+      expect(callArgs(prisma.loan.updateMany)).toEqual([
+        { where: { id: 4, state: 1 }, data: { state: 3 } },
+        { where: { id: 9, state: 1 }, data: { state: 3 } },
+      ]);
+      // …and none of the 3 `LoanDetail` upserts were rolled back by the miss.
+      expect(prisma.loanDetail.update).toHaveBeenCalledTimes(3);
+    });
+
+    /**
+     * ⚠️ **The catch is narrow.** Only D9's 409 is swallowed — a 404, or anything else out of
+     * `updateLoanIn`, still aborts the upload, because a partly applied monthly file is worse
+     * than none. Here the auto-close candidate has vanished from the table (`findUnique` →
+     * `null`), which is `updateLoanIn`'s 404 and not a lost race.
+     */
+    it('C50: the auto-close still aborts the file on anything other than D9’s 409', async () => {
+      const { service, prisma } = buildBulk({
+        existingDetailFor: [1, 2, 3],
+        approved: [1, 2, 3, 4],
+      });
+      prisma.loan.findUnique.mockResolvedValue(null);
+      await expectAsyncRefusal(() => service.bulkUpdateLoans(V1_FILE), HttpStatus.NOT_FOUND, {
+        message: 'Loan does not exist',
+      });
     });
 
     /**

@@ -1,37 +1,49 @@
 # Session state — resume here
 
-**Updated:** 2026-09-03, after the D4 reversal, with Phase 4 at the manual-tester stage.
+**Updated:** 2026-09-04, after the delta review's C50 and C51 were closed.
 **Purpose:** everything needed to pick this up cold. `MIGRATION_PLAN.md` is the plan of record
 (now rev **v3.2**); this file carries what the plan does not — in-flight work, environment
 gotchas, and the next actions.
 
 ## 0. Right now, in one paragraph
 
-**Phase 4 (Loans) is NOT closed. A delta parity round is running.** Branch `feat/phase-4-loans`
-at **`a0f7e59`**. Both sign-offs are real but **stale**: `manual-tester` PASSed at `6b32687` and
-`nestjs-reviewer` returned **Approved with conditions C40–C49** at `6fdbc3a` — and **613 lines
-across 5 source files landed afterwards**, precisely to satisfy those conditions. The operator
-was told and chose to close the gap before closing the phase.
+**Phase 4 (Loans) has completed its delta round and both blockers on Phase 5 are closed.**
+Branch `feat/phase-4-loans`. The delta that closed C40–C49 (D29 quota boundary, D30 the floor at
+1, M3 the compare-and-set) was measured by `manual-tester` (**PASS**, `docs/parity-phase-4-delta.md`)
+and reviewed at `17114a0` — **Approved with conditions C50–C58**, `docs/review-phase-4-delta.md`.
+Nothing there is a parity failure against v1.
 
-**What is unreviewed and unmeasured:** D29 (quota boundary — compare raw, then coerce), D30
-(`value` floored at 1, binding the refinance path too), M3 (compare-and-set in `updateLoanIn`).
-Four observable HTTP behaviours changed. `git diff 6b32687..a0f7e59 -- src/ test/` is the delta.
+**C50 and C51, the two that gated Phase 5's start, are closed** in the commit below: the bulk
+auto-close now **skips** a loan whose state changed under it instead of rolling the whole monthly
+upload back (a v2-only failure mode M3's compare-and-set introduced — see the control run under
+the gate), and the CAS's one dishonest race pair is documented and pinned rather than retried.
+**C52–C58 remain, tracked to Phase 5's gate.**
 
 **Pipeline:** developer ✅ → manual-tester (full) ✅ PASS → reviewer ✅ approved w/ conditions →
-conditions closed ✅ → **manual-tester (delta) 🔨 running** → reviewer (delta) ⬜ → close.
+conditions closed ✅ → manual-tester (delta) ✅ PASS (`17114a0`) → reviewer (delta) ✅
+**Approved with conditions C50–C58** (`docs/review-phase-4-delta.md`) → **C50 and C51 closed —
+the two that gated Phase 5's start** → scope Phase 5.
 
 ### If you are resuming cold, the next action is
 
-1. Read `docs/parity-phase-4-delta.md` when the tester reports.
-2. Verify its load-bearing claims yourself — every agent report so far has contained at least
-   one claim that did not survive checking, including two of mine.
-3. Dispatch `nestjs-reviewer` on the delta `6fdbc3a..a0f7e59` **plus** the delta parity report.
-4. Then mark Phase 4 CLOSED and scope Phase 5 (Activities).
+1. **C52–C58 are tracked to Phase 5's gate**, and **C58 is hard**: the Phase 3 rollovers
+   C31–C35, C37, C39 close or are formally struck. A third roll is not available.
+2. Scope Phase 5 (Activities). Phase 4's remaining conditions travel with it, they do not
+   re-open it — no C50–C58 finding is a parity failure against v1.
+3. Verify any agent report's load-bearing claims yourself — every report so far has contained
+   at least one claim that did not survive checking, including two of mine.
 
-### Gate at `a0f7e59`, verified by me
+### Gate after C50/C51, verified by me
 
-lint clean, `tsc --noEmit` clean, **1863 unit / 58 suites**, **827 e2e + 1 skipped / 16 suites**,
-`fondodev` at baseline with `count(distinct xmin::text) = 1` on both loan tables.
+lint clean, `tsc --noEmit` clean, **1866 unit / 58 suites** (1863 + the three new cells),
+**827 e2e + 1 skipped / 16 suites**, `fondodev` at baseline
+(`loan 425 / loandetail 374 / schedulertask 626 / auth_user 15 / power 20`) with
+`count(distinct xmin::text) = 1` on both loan tables.
+
+**C50 was a real regression, control-run before the fix:** the new cell fails against `17114a0`
+with an `ApiException: Invalid state transition` thrown out of `bulkUpdateLoans`' `$transaction`
+at `loan.service.ts:843` — i.e. the whole monthly upload rolled back because one auto-close
+candidate's state changed under it. It now skips that loan and commits.
 
 ### Operator decisions taken this phase
 
@@ -44,9 +56,10 @@ resulting partial self-heal.
 
 ### Still open, tracked to Phase 5's gate
 
-**C44–C47, C49**, and **C48** — the Phase 3 rollovers **C31–C35, C37, C39**, which have now
-survived two gates. The reviewer's warning stands: a third silent roll makes the tracking
-decorative, so they go in the Phase 5 batch.
+**C44–C47, C49**, **C52–C58** from the delta review, and **C48** — the Phase 3 rollovers
+**C31–C35, C37, C39**, which have now survived two gates. The reviewer's warning stands: a
+third silent roll makes the tracking decorative, so they go in the Phase 5 batch. **C58 makes
+that a hard deadline: close them or formally strike them.**
 
 ### The two lessons this phase actually taught
 

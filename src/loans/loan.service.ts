@@ -549,7 +549,9 @@ export class LoanService {
    *   v1's `Response('', status=200)`, which `JSONRenderer` writes as the two bytes `""`.
    * @throws ApiException 404 `{'message': 'Loan does not exist'}`
    * @throws ApiException 409 `{'message': 'Invalid state transition'}` (D9) — also the answer
-   *   to the loser of a concurrent transition, whose compare-and-set matches no row.
+   *   to the loser of a concurrent transition, whose compare-and-set matches no row. ⚠️ For
+   *   one race pair (approve wins, deny loses on a WAITING loan) sequential execution would
+   *   have given a **200**; see the compare-and-set comment below and C51.
    */
   async updateLoan(id: number, state: number): Promise<LoanDetailDto | ''> {
     return this.prisma.$transaction(async (tx) => this.updateLoanIn(tx, id, state), {
@@ -585,9 +587,24 @@ export class LoanService {
     // Adding `state: loan.state` to the predicate makes the write itself the serialisation
     // point: the second transaction blocks on the first's row lock, re-evaluates the
     // predicate after it commits, matches nothing and gets `count === 0`. The loser is
-    // answered with **D9's own 409** — the same status and body it would have received had
-    // it arrived a millisecond later and lost the guard instead of the write, which is the
-    // honest answer for a caller that lost the race.
+    // answered with **D9's own 409**.
+    //
+    // ⚠️ **That is the answer sequential execution would have given for five of the six race
+    // pairs D9 permits — and not for the sixth** (C51). Enumerated: `0→1` vs `0→1`, `0→2` vs
+    // `0→2`, `0→2` vs `0→1`, `1→2` vs `1→3` and `1→3` vs `1→2` all leave the loser facing a
+    // state the table has no legal move from, so it is a 409 either way and the CAS is
+    // honest. The exception is **winner `0→1`, loser `0→2`** — an approve and a deny racing
+    // on a WAITING loan, approve first. From state `1`, `1→2` is *legal*, so had the denial
+    // arrived a millisecond later it would have got a **200**, the denial mail and the
+    // `prev_loan.refinanced_loan = null` unlink. Under the CAS it gets "Invalid state
+    // transition", which reads as "not allowed, do not retry" — and the deny is the
+    // safety-side action, so the asymmetry runs the wrong way.
+    //
+    // **Registered, not fixed** (§4.1 and §5.1 of `docs/phase-4-deviations.md`, `§5 D9` of
+    // `MIGRATION_PLAN.md`) and pinned by a unit cell so it stays measured. The alternative —
+    // on `count === 0`, re-read the row and re-run the guard once — reproduces sequential
+    // semantics exactly but changes behaviour on the money path and needs its own review
+    // cycle; the window is milliseconds and no caller has hit it.
     //
     // No migration and no schema change: this is a `WHERE` clause on a column Django owns.
     const applied = await tx.loan.updateMany({ where: { id, state: loan.state }, data: { state } });
@@ -793,6 +810,11 @@ export class LoanService {
    * closed. Operator Q1/Q2 accept both. The close is silent: `update_loan(id, 3)` sends no
    * mail and only removes the scheduled reminders.
    *
+   * ⚠️ **A loan whose state changed between the read and the auto-close write is skipped,
+   * not force-closed, and the upload still commits** (C50) — the one place v2's
+   * compare-and-set is deliberately *not* allowed to refuse the caller. See the `catch` in
+   * the auto-close loop below; the id is left out of `closed_loans`.
+   *
    * ⚠️ **Everything is one transaction**, `schedule_notification` and the auto-closes
    * included, so a malformed line on row 400 discards rows 1-399 as well. Ported: a partly
    * applied monthly file is worse than none.
@@ -840,7 +862,34 @@ export class LoanService {
         for (const loan of approved.list) {
           if (!loanIds.includes(loan.id)) {
             this.logger.log(`Auto closing loan with id ${loan.id}`);
-            await this.updateLoanIn(tx, loan.id, LOAN_PAID_OUT);
+            try {
+              await this.updateLoanIn(tx, loan.id, LOAN_PAID_OUT);
+            } catch (error) {
+              // ⚠️ **C50.** The auto-close goes through the same compare-and-set as
+              // `PATCH /api/loan/<id>`, so a concurrent denial or payout committing between
+              // the `getLoans(state=1)` read above and this write makes the CAS match no row
+              // (or the re-read see the new state) and throw **D9's 409**. Uncaught, that
+              // escapes the `$transaction` callback and rolls back the **entire file** — all
+              // 374 `LoanDetail` upserts, every scheduler row and every other auto-close —
+              // answered with a 409 that names neither the file nor the loan. v1 cannot fail
+              // here at all (`update_loan(id, 3)` writes unconditionally and silently wins a
+              // lost update), so this is a **v2-only failure mode the CAS created**, and the
+              // narrowing is the right answer: a loan someone *just denied* must not be
+              // force-closed by a file generated before the denial. Directly mirrors v1's
+              // `except LoanDetail.DoesNotExist: logger.error(...); continue` in the loop
+              // above — log, skip, keep the upload.
+              //
+              // ⚠️ **Narrow on purpose.** Only D9's 409 is swallowed; a 404, a Prisma error
+              // or anything else still aborts the upload, because a partly applied monthly
+              // file is worse than none.
+              if (!isInvalidStateTransition(error)) {
+                throw error;
+              }
+              this.logger.warn(
+                `Loan with id: ${loan.id}, state changed concurrently, not auto closed`,
+              );
+              continue;
+            }
             closed.push(loan.id);
           }
         }
@@ -1068,6 +1117,27 @@ export function assertLegalLoanTransition(current: number, next: number): void {
     throw ApiException.withMessage(HttpStatus.CONFLICT, 'Invalid state transition');
   }
 }
+
+/**
+ * Is this **D9's own 409** — the single answer both {@link assertLegalLoanTransition} and the
+ * compare-and-set in {@link LoanService.updateLoan} give when the row's state is not the one
+ * the caller is transitioning from?
+ *
+ * Exists so {@link LoanService.bulkUpdateLoans}' auto-close can skip **exactly** the loan
+ * whose state changed under it (C50) and keep aborting the upload on everything else. Match
+ * on both the status and the body, not on `instanceof` alone: a 404 `'Loan does not exist'`
+ * from the same call is not a race and must not be swallowed.
+ */
+function isInvalidStateTransition(error: unknown): boolean {
+  return (
+    error instanceof ApiException &&
+    error.getStatus() === CONFLICT &&
+    error.body?.message === 'Invalid state transition'
+  );
+}
+
+/** `HttpStatus.CONFLICT` as a plain number, so the comparison is not an enum mismatch. */
+const CONFLICT: number = HttpStatus.CONFLICT;
 
 /**
  * `datetime.strptime(value, '%Y-%m-%d').date()`.

@@ -349,6 +349,7 @@ All restored, and the full suites re-run green afterwards.
 | `PATCH /api/loan/<id>` `{"state":3}` on a **WAITING_APPROVAL** loan | 200, loan → PAID_OUT | **409** `{"message":"Invalid state transition"}`, loan unchanged | **D9** |
 | `PATCH /api/loan/<id>` `{"state":1}` on an **APPROVED** loan | 200, second `LoanDetail`, second email | **409**, no mail, no write | **D9** / **D6** |
 | `PATCH /api/loan/<id>` `{"state":-1}` | 200, `state = -1` stored | **409** | **D9** |
+| Two **concurrent** `PATCH /api/loan/<id>` on the same WAITING loan, one `{"state":1}` and one `{"state":2}`, approve committing first | both 200 (v1 has no serialisation at all: the second overwrites the first, and on `1→1` writes a second `LoanDetail` and re-mails) | winner 200; **loser 409** `{"message":"Invalid state transition"}`, no denial mail, no `refinanced_loan` unlink | **D9** / **M3** ⚠️ **C51 — a known asymmetry, not a bug to file.** Sequentially the denial would be a **200** (`1→2` is legal). The compare-and-set answers 409 instead. Every other race pair gets the same status either way. Needs two simultaneous requests to observe; if you see it, it is expected. |
 | `PATCH /api/loan` (the TSV) | `200`, **no body** | `200 {"closed_loans":[…]}` | **D8** |
 | `POST /api/loan` with `timelimit: 0` | **201** (then a 500 at approval) | **400** `{"message":"Timelimit must be between 1 and 36"}` | **D4** |
 | `POST /api/loan` with `timelimit: 37` | **201**, silently booked as `36` at rate `0.025` | **400** `{"message":"Timelimit must be between 1 and 36"}`, no row written | **D4** |
@@ -441,6 +442,36 @@ produced v1's duplicates.
 > `upsertLoanDetail` runs. That is what makes "no second row" true, and it is true only for
 > transitions that go through `updateLoanIn` — which, in v2, is all of them, the
 > `bulkUpdateLoans` auto-close included.
+
+⚠️ **What the auto-close does with a CAS miss — corrected 2026-09-04 (review condition C50).**
+The paragraph above used to read as if the bulk path degraded gracefully. It did not: the
+auto-close called `updateLoanIn` with **no `try`/`catch`** inside the 120 s `$transaction`, so
+a concurrent `PATCH /api/loan/<id> {"state":2}` committing between `getLoans(state=1)` and the
+auto-close write threw D9's 409 **out of the transaction callback and rolled back the entire
+monthly upload** — all 374 `LoanDetail` upserts and every other auto-close — answered with a
+409 that named neither the file nor the loan. v1 cannot fail here at all (`update_loan(id, 3)`
+writes unconditionally and silently wins the lost update), so it was a **v2-only failure mode
+the compare-and-set created**. It is now caught: the loan is logged at `warn`, **skipped**,
+left out of `closed_loans`, and the upload commits — mirroring v1's
+`except LoanDetail.DoesNotExist: continue` in the same method's first loop, and semantically
+right, since a loan someone *just denied* must not be force-closed by a file generated before
+the denial. The catch is **narrow** — only D9's 409; a 404 or any other error still aborts the
+upload. Pinned by two unit cells (`loan.service.spec.ts`, `C50: …`).
+
+⚠️ **A known asymmetry in the 409 — review condition C51.** The loser of a race gets the same
+answer sequential execution would have given for **five of the six** race pairs D9 permits
+(`0→1` vs `0→1`, `0→2` vs `0→2`, `0→2` vs `0→1`, `1→2` vs `1→3`, `1→3` vs `1→2` — in each the
+loser faces a state with no legal move). The sixth is **winner `0→1`, loser `0→2`**: an approve
+and a deny racing on a WAITING loan, approve first. From state `1`, `1→2` is legal, so
+sequentially the denier gets a **200**, the denial mail and the `prev_loan.refinanced_loan =
+null` unlink; under the CAS they get `"Invalid state transition"`, which reads as "do not
+retry" — and the deny is the safety-side action. **Registered rather than fixed:** the
+resolution (on `count === 0`, re-read the row and re-run the guard once, retrying if the
+transition is legal from the new state) reproduces sequential semantics exactly but changes
+behaviour on the money path and needs its own review cycle; the window is milliseconds and no
+caller has reported it. Pinned by `C51: a deny that loses to a concurrent approve gets a 409
+where sequential execution gives a 200` so it stays measured rather than becoming folklore —
+if the retry ever lands, that cell must flip to a 200.
 
 Two honest limits on that guarantee:
 
