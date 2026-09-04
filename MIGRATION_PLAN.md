@@ -533,14 +533,25 @@ emit on write paths.
 
 **Scope**
 - `POST /api/activity/year` (role ≤ 1): create the **current-year** `ActivityYear` and
-  **disable the previous one**.
+  disable the highest **other** year — ⚠️ **one row, and not necessarily "the previous
+  one"**. `filter(~Q(year = year)).order_by('-year')[0]` is the highest year that is not the
+  one being created, so across a gap it disables whatever the highest other year happens to
+  be. Corrected 2026-09-04 by `nestjs-developer` from the source; the earlier wording said
+  "the previous one" and the live table has both a gap in its ids and an anomaly in its
+  flags (`docs/phase-5-prework.md` §1).
 - `POST /api/activity/year/<id_year>` (role ≤ 1): create an activity and attach **all active
   users** via `ActivityUser` (state `0 NOT_PAID`).
 - `PATCH /api/activity/<id>?patch=activity|user` — two distinct update paths.
 - `DELETE` (role ≤ 1).
 
-**Risks:** low. The active-user set must match v1's definition (`is_active = true`) exactly,
-and the year-rollover disable is a once-a-year path that's easy to break and hard to notice.
+**Risks:** low, **except one**. The active-user set must match v1's definition
+(`is_active = true`) exactly, and the year-rollover disable is a once-a-year path that's easy
+to break and hard to notice. ⚠️ **The risk that actually bit is the `DELETE` cascade** (§4 rule
+10): `ActivityUser.activity` is `on_delete=CASCADE` in Django and `NO ACTION` in the database
+(measured), so without an explicit child delete `DELETE /api/activity/<id>` is a **500** on
+every activity that has members — i.e. all of them. **v1's own `test_delete_activity` cannot
+see it**, because it attaches no members; a faithful port of v1's suite therefore passes
+against the broken implementation. Verified by control run.
 
 **Parity criteria:** identical `activityyear` / `activity` / `activityuser` row sets;
 identical previous-year `enable` flip; both `patch=` modes identical.
@@ -966,7 +977,12 @@ implemented — live in that phase's `docs/phase-<n>-deviations.md`, not here. P
 seven (**P3-D1**–**P3-D7**), of which three change an observable response: **P3-D2** (a
 duplicate email on a personal update is now a 200, not a 409 — the 409 came from the `username`
 write D15 removed), **P3-D3** (no `django_session` row and no `sessionid` on the reset hop) and
-**P3-D6** (a zero-byte 500 where Django renders its HTML error page — D13's species, extended).
+**P3-D6** (a zero-byte 500 where Django renders its HTML error page — D13's species,
+extended). Phase 5 registered four (**P5-D1**–**P5-D4**), **none of which changes an
+observable response** — they are v1 behaviours discovered while porting, carried as found:
+`create_year`'s missing transaction, the `int()` asymmetry between `create_activity` and
+`__update_activity`, `toDjangoText`'s `None` fold (a **Phase 3/4** defect found in Phase 5 and
+deliberately not fixed there), and the explicit `ActivityUser` cascade §4 rule 10 requires.
 
 ### D1 — the authorization rule for `PATCH /api/user/<id>`
 

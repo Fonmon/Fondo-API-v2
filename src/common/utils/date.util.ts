@@ -127,3 +127,37 @@ export function days360(startDate: DateLike, endDate: DateLike, europeanMethod =
 
   return (end.year - start.year) * 360 + (end.month - start.month) * 30 + (endDay - startDay);
 }
+
+/**
+ * DRF's `DateField.to_representation` — **ISO `YYYY-MM-DD`**, and nothing else.
+ *
+ * ```python
+ * def to_representation(self, value):
+ *     if not value: return None
+ *     output_format = getattr(self, 'format', api_settings.DATE_FORMAT)   # ISO_8601
+ *     if output_format is None or isinstance(value, str): return value
+ *     if output_format.lower() == ISO_8601: return value.isoformat()
+ *     return value.strftime(output_format)
+ * ```
+ *
+ * ⚠️ **This is not the Spanish `format_date` spelling, and the difference is deliberate in
+ * v1.** Only the fields v1 declares as a `SerializerMethodField` calling
+ * `babel.dates.format_date` come out Spanish — `UserFinanceSerializer.last_modified`,
+ * `LoanSerializer.created_at`, `LoanDetailSerializer.payday_limit` / `from_date`. Every
+ * *plain* `ModelSerializer` date field is ISO: `UserProfileSerializer.birthdate`,
+ * `PowerSerializer.meeting_date` and — Phase 5 — `ActivityDetailSerializer.date`
+ * (`serializers.py:129-133`). Plan rule **5c** is about `@db.Date` vs `timestamptz`; it does
+ * *not* say the spelling is uniform, and "fixing" one of these into Spanish is a divergence.
+ * v1's own suite pins it: `test_activity_views.py:148` asserts `'2020-11-07'`.
+ *
+ * The value comes from a Prisma `@db.Date`, which is a `Date` at **UTC midnight**, so
+ * {@link fromDateColumn} is the identity and reading the local components would shift the day
+ * west of Greenwich.
+ */
+export function formatDrfDateField(value: Date | null): string | null {
+  if (value === null) {
+    return null;
+  }
+  const { year, month, day } = fromDateColumn(value);
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}

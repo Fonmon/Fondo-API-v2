@@ -54,6 +54,7 @@ import {
   toDjangoText,
   PythonTypeError,
 } from '../common/utils/python-obj';
+import { isUniqueViolation } from '../common/utils/prisma-error';
 
 /** The two halves of `UserProfile(User)`, as every read here loads them. */
 const WITH_AUTH_USER = { auth_user: true } as const;
@@ -1169,11 +1170,6 @@ export function birthdayInYear(birthdate: PlainDate, year: number): PlainDate {
 
 function isLeapYear(year: number): boolean {
   return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-}
-
-/** A PostgreSQL `23505` surfaced by Prisma. v1 sees `django.db.IntegrityError`. */
-function isUniqueViolation(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
 }
 
 /**

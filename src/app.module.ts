@@ -1,6 +1,7 @@
 import { Module, type MiddlewareConsumer, type NestModule } from '@nestjs/common';
 import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ActivityModule } from './activities/activity.module';
 import { AppConfigModule } from './config/config.module';
 import { AuthModule } from './auth/auth.module';
 import { ApiExceptionFilter } from './common/filters/api-exception.filter';
@@ -44,7 +45,10 @@ import { UserModule } from './users/user.module';
  * Phase 4 adds {@link LoanModule} — `GET|POST|PATCH /api/loan`, `GET|PATCH /api/loan/<id>`
  * and `POST /api/loan/<id>/<paymentProjection|refinance>`.
  *
- * Activities, saving accounts, files and the scheduler runner arrive in Phases 5-8.
+ * Phase 5 adds {@link ActivityModule} — `GET|POST /api/activity/year`,
+ * `GET|POST /api/activity/year/<id_year>` and `GET|PATCH|DELETE /api/activity/<id>`.
+ *
+ * Saving accounts, files and the scheduler runner arrive in Phases 6-8.
  */
 @Module({
   imports: [
@@ -55,6 +59,7 @@ import { UserModule } from './users/user.module';
     NotificationModule,
     UserModule,
     LoanModule,
+    ActivityModule,
     PasswordResetModule,
     // Registered now so Phase 7 only has to add the cron provider. Declares no jobs yet.
     ScheduleModule.forRoot(),

@@ -141,8 +141,27 @@ export function toDjangoBool(value: unknown, field: string): boolean {
 }
 
 /**
- * Django's `CharField.get_prep_value` → `str(value)`. A JSON `null` becomes the four
- * characters `None`, which is what v1 would store in a `varchar` column.
+ * Django's `CharField` / `TextField` `get_prep_value` → `to_python(value)` → `str(value)`,
+ * **with `None` folded to the four characters `None`**.
+ *
+ * ⚠️ **The `None` fold is not Django.** Measured on the pinned stack in the v1 container:
+ *
+ * ```
+ * >>> TextField().get_prep_value(None)   -> None
+ * >>> CharField().get_prep_value(None)   -> None
+ * >>> TextField().get_prep_value(5)      -> '5'
+ * >>> TextField().get_prep_value(True)   -> 'True'
+ * ```
+ *
+ * because both fields share
+ * `to_python: if isinstance(value, str) or value is None: return value; return str(value)`.
+ * So in v1 a JSON `null` reaches the column as SQL `NULL` and a `NOT NULL` column raises
+ * `IntegrityError` — it never stores the string. {@link toDjangoTextOrNull} is that
+ * behaviour; this function is kept for the Phase 3/4 call sites that were written against
+ * the fold, and correcting them is a separate, cross-phase change (see
+ * `docs/phase-5-deviations.md` §3, finding **P5-F1**).
+ *
+ * New call sites should use {@link toDjangoTextOrNull}.
  */
 export function toDjangoText(value: unknown): string {
   if (typeof value === 'string') {
@@ -155,6 +174,30 @@ export function toDjangoText(value: unknown): string {
     return value ? 'True' : 'False';
   }
   return describeValue(value);
+}
+
+/**
+ * Django's `CharField` / `TextField` `get_prep_value`, **verbatim** — `None` stays `None`.
+ *
+ * ```python
+ * def to_python(self, value):
+ *     if isinstance(value, str) or value is None:
+ *         return value
+ *     return str(value)
+ * ```
+ *
+ * The `null` return is not a convenience: on a `NOT NULL` column it is what makes v1 raise
+ * `IntegrityError`, and the two v1 call sites in Phase 5 answer that failure *differently* —
+ * `create_activity` lets it escape (**500**), `__update_activity` sits inside
+ * `patch_activity`'s bare `except:` (**404**). Folding it to `'None'` would turn both into a
+ * successful write of a four-character name. See {@link toDjangoText} for the Phase 3/4
+ * variant that does fold, and why.
+ */
+export function toDjangoTextOrNull(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return toDjangoText(value);
 }
 
 /**

@@ -28,15 +28,28 @@ describe('Phase 0 application boot', () => {
     expect(response.body).toEqual({ status: 'ok', database: 'up' });
   });
 
-  it('ships no Phase 5-8 business endpoints yet', async () => {
-    // Activities, saving accounts, files and admin are Phases 5-8.
-    // ⚠️ `/api/loan` moved to the *guarded* list below when Phase 4 landed. A route that does
-    // not exist 404s at `DjangoUrlResolverMiddleware`; one that exists but is unauthenticated
-    // 401s at the guard. Keeping the two lists apart is what makes this assertion mean
-    // something — an empty list would pass for either reason.
-    for (const path of ['/api/activity/year', '/api/saving-account', '/api/file', '/api/admin']) {
+  it('ships no Phase 6-8 business endpoints yet', async () => {
+    // Saving accounts, files and admin are Phases 6-8.
+    // ⚠️ `/api/loan` moved to the *guarded* list below when Phase 4 landed, and the three
+    // `/api/activity` routes when Phase 5 did. A route that does not exist 404s at
+    // `DjangoUrlResolverMiddleware`; one that exists but is unauthenticated 401s at the
+    // guard. Keeping the two lists apart is what makes this assertion mean something — an
+    // empty list would pass for either reason.
+    for (const path of ['/api/saving-account', '/api/file', '/api/admin']) {
       await request(app.getHttpServer()).get(path).expect(404);
     }
+  });
+
+  it('exposes the Phase 5 activity routes, guarded', async () => {
+    await request(app.getHttpServer()).get('/api/activity/year').expect(401);
+    await request(app.getHttpServer()).get('/api/activity/year/1').expect(401);
+    await request(app.getHttpServer()).get('/api/activity/1').expect(401);
+    // ⚠️ `^api/activity/(?P<id>[0-9]+)/?$` is the **one** detail pattern in v1 that accepts a
+    // trailing slash, so this reaches the guard...
+    await request(app.getHttpServer()).get('/api/activity/1/').expect(401);
+    // ...while its sibling `^api/activity/year/(?P<id_year>[0-9]+)$` does not, and 404s at
+    // the resolver (finding S7, `docs/adding-a-route.md` §1).
+    await request(app.getHttpServer()).get('/api/activity/year/1/').expect(404);
   });
 
   it('exposes the Phase 4 loan routes, guarded', async () => {

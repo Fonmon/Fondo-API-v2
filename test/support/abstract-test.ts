@@ -46,7 +46,10 @@ const passwords = new DjangoPasswordService();
  *
  * Phase 3 added `fondo_api_power`, `fondo_api_schedulertask` (the birthday task) and
  * `fondo_api_savingaccount` (read by `UserFinanceSerializer.get_total_savingaccounts`).
- * Phase 4 adds `fondo_api_loan` and `fondo_api_loandetail`.
+ * Phase 4 adds `fondo_api_loan` and `fondo_api_loandetail`. Phase 5 adds the three activity
+ * tables — and they must be listed **child first** even though `CASCADE` would cover it,
+ * because `fondo_api_activityuser`'s FKs are `NO ACTION`/`DEFERRABLE` in the database (plan
+ * §4 rule 10) and the explicit order is the same one `removeActivity` has to use.
  *
  * ⚠️ `fondo_api_loan` has a **self-referential** FK (`prev_loan_id`) as well as the FK from
  * `fondo_api_loandetail`, so the two must be truncated together — `CASCADE` covers it, and
@@ -66,6 +69,7 @@ export async function resetDatabase(prisma: PrismaService): Promise<void> {
     'TRUNCATE TABLE authtoken_token, fondo_api_notificationsubscriptions, ' +
       'fondo_api_schedulertask, fondo_api_power, fondo_api_savingaccount, ' +
       'fondo_api_loandetail, fondo_api_loan, ' +
+      'fondo_api_activityuser, fondo_api_activity, fondo_api_activityyear, ' +
       'fondo_api_userfinance, fondo_api_userpreference, fondo_api_userprofile, auth_user ' +
       'RESTART IDENTITY CASCADE',
   );
@@ -153,6 +157,61 @@ export async function seedLoanDetail(
     select: { id: true },
   });
   return detail.id;
+}
+
+/**
+ * `ActivityYear.objects.create(year=…)` — Phase 5.
+ *
+ * `enable` is `BooleanField(default=True)`, a **Python-side** default with no DB default
+ * (plan §4 rule 5), so it is spelled out. It is settable because production holds two enabled
+ * rows and a fixture that could not reproduce that would be the wrong shape to test against
+ * (`docs/phase-5-prework.md` §1).
+ */
+export async function seedActivityYear(
+  prisma: PrismaService,
+  options: { year: bigint | number; enable?: boolean },
+): Promise<{ id: number; year: bigint }> {
+  return prisma.activityYear.create({
+    data: { year: BigInt(options.year), enable: options.enable ?? true },
+    select: { id: true, year: true },
+  });
+}
+
+/**
+ * `Activity.objects.create(...)` — Phase 5. Creates **no** `ActivityUser` rows, exactly like
+ * v1's own `test_get_activities` / `test_delete_activity` / `test_update_activity` fixtures,
+ * which is why `test_update_activity` can assert `users == []`.
+ */
+export async function seedActivity(
+  prisma: PrismaService,
+  options: { yearId: number; name: string; value: bigint | number; date: string },
+): Promise<number> {
+  const activity = await prisma.activity.create({
+    data: {
+      name: options.name,
+      value: BigInt(options.value),
+      date: new Date(`${options.date}T00:00:00.000Z`),
+      year_id: options.yearId,
+    },
+    select: { id: true },
+  });
+  return activity.id;
+}
+
+/** `ActivityUser.objects.create(...)` — `state` defaults to `0 NOT_PAID`, Python-side. */
+export async function seedActivityUser(
+  prisma: PrismaService,
+  options: { activityId: number; userId: number; state?: number },
+): Promise<number> {
+  const row = await prisma.activityUser.create({
+    data: {
+      state: options.state ?? 0,
+      activity_id: options.activityId,
+      user_id: options.userId,
+    },
+    select: { id: true },
+  });
+  return row.id;
 }
 
 /** `AbstractTest.create_user` — the ADMIN every v1 view test authenticates as. */

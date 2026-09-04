@@ -1,5 +1,5 @@
 import { formatDateEs } from '../../common/i18n/spanish-format';
-import { fromDateColumn } from '../../common/utils/date.util';
+import { formatDrfDateField, fromDateColumn } from '../../common/utils/date.util';
 
 /**
  * `fondo_api/serializers.py` — the six serializers `views/user.py` renders through, ported
@@ -93,7 +93,7 @@ export function serializeUserProfile(user: UserProfileRow): UserProfileDto {
     first_name: user.auth_user.first_name,
     last_name: user.auth_user.last_name,
     role: user.role,
-    birthdate: serializeDateField(user.birthdate),
+    birthdate: formatDrfDateField(user.birthdate),
   };
 }
 
@@ -186,7 +186,7 @@ export interface UserBirthdateDto {
 /** `UserBirthdateSerializer` — `fields = ('birthdate', 'full_name')`, in that order. */
 export function serializeUserBirthdate(user: UserProfileRow): UserBirthdateDto {
   return {
-    birthdate: serializeDateField(user.birthdate),
+    birthdate: formatDrfDateField(user.birthdate),
     full_name: `${user.auth_user.first_name} ${user.auth_user.last_name}`,
   };
 }
@@ -220,23 +220,8 @@ export function serializePower(power: PowerRow): PowerDto {
   return {
     id: power.id,
     state: power.state,
-    meeting_date: serializeDateField(power.meeting_date) as string,
+    meeting_date: formatDrfDateField(power.meeting_date) as string,
     requestee: `${power.requestee.auth_user.first_name} ${power.requestee.auth_user.last_name}`,
     requester: `${power.requester.auth_user.first_name} ${power.requester.auth_user.last_name}`,
   };
-}
-
-/**
- * DRF's `DateField.to_representation`: `value.isoformat()`, or `None` for a null column.
- *
- * The value comes from a Prisma `@db.Date`, which is a `Date` at **UTC midnight**; reading
- * the UTC components is therefore the identity, and reading the local ones would shift the
- * day west of Greenwich. {@link fromDateColumn} is the named form of that rule.
- */
-function serializeDateField(value: Date | null): string | null {
-  if (value === null) {
-    return null;
-  }
-  const { year, month, day } = fromDateColumn(value);
-  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
