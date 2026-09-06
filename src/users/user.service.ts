@@ -1,3 +1,4 @@
+import { pythonStrip } from '../common/utils/python-str';
 import { randomBytes } from 'node:crypto';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { DjangoPasswordService } from '../auth/password/django-password.service';
@@ -1205,11 +1206,28 @@ function generateActivationKey(): string {
  * address with no `@` (or more than one) alone.
  */
 export function normalizeEmail(email: string): string {
-  const at = email.lastIndexOf('@');
+  // ```python
+  // email = email or ''
+  // try:
+  //     email_name, domain_part = email.strip().rsplit('@', 1)
+  // except ValueError:
+  //     pass
+  // else:
+  //     email = email_name + '@' + domain_part.lower()
+  // return email
+  // ```
+  //
+  // ⚠️ **The strip is conditional** (parity finding DELTA3-F1). `rsplit('@', 1)` on a string
+  // with no `@` returns one element, the two-target unpack raises `ValueError`, and the
+  // `except` branch returns the **original** value — unstripped. So `'  a@b.com  '` becomes
+  // `'a@b.com'` while `'  nodomain  '` keeps its spaces. Stripping unconditionally is as wrong
+  // as not stripping at all; both were measured against the container.
+  const stripped = pythonStrip(email);
+  const at = stripped.lastIndexOf('@');
   if (at === -1) {
     return email;
   }
-  return `${email.slice(0, at)}@${email.slice(at + 1).toLowerCase()}`;
+  return `${stripped.slice(0, at)}@${stripped.slice(at + 1).toLowerCase()}`;
 }
 
 /** `AbstractBaseUser.normalize_username` — `unicodedata.normalize('NFKC', username)`. */

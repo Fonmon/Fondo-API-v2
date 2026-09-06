@@ -161,6 +161,30 @@ export function pythonRepr(value: unknown): string {
  * question as "what does Django store": a `None` is the four characters `None` here and SQL
  * `NULL` there. `toDjangoText` is the storage answer.
  */
+/**
+ * CPython's `str.strip()` with no argument - the character set is **not** JS `trim()`'s.
+ *
+ * `str.strip()` removes characters for which `str.isspace()` is true: Unicode category `Zs`
+ * plus bidirectional class `WS`/`B`/`S`, which pulls in the C0 separators U+001C-U+001F and
+ * U+0085 (NEL). `String.prototype.trim()` removes Unicode `White_Space` **plus U+FEFF**.
+ *
+ * Measured against the pinned container, they disagree in both directions:
+ *
+ * | codepoint | CPython `strip()` | JS `trim()` |
+ * |---|---|---|
+ * | U+001C-U+001F, U+0085 | strips | keeps |
+ * | U+FEFF (BOM / ZWNBSP) | keeps | strips |
+ *
+ * So `trim()` is not a faithful port - it would trade one divergence for two smaller ones.
+ * U+200B (ZERO WIDTH SPACE) is whitespace to neither and is stripped by neither.
+ */
+const PYTHON_SPACE =
+  '\\t\\n\\v\\f\\r\\u001c-\\u001f \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000';
+const PYTHON_STRIP_RE = new RegExp(`^[${PYTHON_SPACE}]+|[${PYTHON_SPACE}]+$`, 'gu');
+
+export function pythonStrip(value: string): string {
+  return value.replace(PYTHON_STRIP_RE, '');
+}
 export function pythonStr(value: unknown): string {
   return typeof value === 'string' ? value : pythonRepr(value);
 }
