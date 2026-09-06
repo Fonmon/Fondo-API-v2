@@ -2305,6 +2305,51 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
       },
     );
 
+    /**
+     * **DELTA-F1** — `normalize_email` has three branches, and v2 had two.
+     *
+     * ```python
+     * email = email or ''   # falsy -> '', but `_create_user`'s ValueError fired first
+     * email.strip()         # truthy str -> fine;  truthy non-str -> AttributeError
+     * ```
+     *
+     * Measured in the container: `['a']`, `{'a': 1}`, `True` and `5` each raise
+     * `AttributeError: '<type>' object has no attribute 'strip'`, so v1 answers **500** and
+     * writes nothing. v2 answered **201** and created an account whose username was the four
+     * characters of a rendered list — with an activation email sent — because the value was
+     * coerced to text before it was inspected.
+     */
+    it.each([[['a']], [[1, 2]], [true], [5], [5.5], [{ a: 1 }], [{ a: ['b'] }]])(
+      'POST /api/user with a truthy non-string `email` (%p) is 500 and writes nothing',
+      async (email) => {
+        await request(app.getHttpServer())
+          .post('/api/user')
+          .set(asAdmin())
+          .send({ ...objectJson, email })
+          .expect(500);
+
+        await expect(countUsers()).resolves.toBe(11);
+        await expect(prisma.authUser.count()).resolves.toBe(11);
+        expect(sendMail).not.toHaveBeenCalled();
+      },
+    );
+
+    /**
+     * The discriminator between branch two and branch three: a *string* that merely looks
+     * non-stringy still has `.strip`, so it creates. Without this cell, refusing every email
+     * would pass the block above.
+     */
+    it.each([['"0"', '0'], ['"false"', 'false'], ['"[a]"', '[a]']])(
+      'POST /api/user with the string %s still creates — it has `.strip`',
+      async (_label, email) => {
+        await request(app.getHttpServer())
+          .post('/api/user')
+          .set(asAdmin())
+          .send({ ...objectJson, email, identification: 555_000 + email.length })
+          .expect(201);
+      },
+    );
+
     /** The positive control: the same body with every field present still creates. */
     it('POST /api/user with the unmodified fixture still creates (positive control)', async () => {
       await request(app.getHttpServer())

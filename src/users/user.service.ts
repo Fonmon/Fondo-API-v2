@@ -54,6 +54,8 @@ import {
   toDjangoText,
   PythonTypeError,
   PythonValueError,
+  PythonAttributeError,
+  describeTypeForErrorMessage,
   isPythonFalsy,
 } from '../common/utils/python-obj';
 import { isIntegrityError } from '../common/utils/prisma-error';
@@ -157,7 +159,6 @@ export class UserService {
    */
   async createUser(body: unknown): Promise<void> {
     const obj = asPythonDict(body);
-    const rawEmail = toDjangoText(pyGet(obj, 'email'));
     const identification = toDjangoInt(pyGet(obj, 'identification'), 'identification');
     const role = toDjangoSmallInt(pyGet(obj, 'role'), 'role');
     const firstName = toDjangoText(pyGet(obj, 'first_name'));
@@ -174,6 +175,22 @@ export class UserService {
     // would let `0` through as the string `'0'`.
     if (isPythonFalsy(pyGet(obj, 'email'))) {
       throw new PythonValueError('The given username must be set');
+    }
+
+    // DELTA-F1 — `normalize_email` has **three** branches, not two:
+    //
+    // ```python
+    // email = email or ''      # falsy -> '', but `_create_user` already raised above
+    // email.strip()            # truthy str -> fine;  truthy non-str -> AttributeError
+    // ```
+    //
+    // So a truthy non-string email is a **500 with nothing written** in v1. v2 answered 201 and
+    // created an account named `"['a']"` — with an activation email sent — because this code
+    // coerced the value to text *before* looking at it, collapsing the second and third
+    // branches. The raw value has to be inspected here, before any coercion.
+    const rawEmailValue = pyGet(obj, 'email');
+    if (typeof rawEmailValue !== 'string') {
+      throw new PythonAttributeError(describeTypeForErrorMessage(rawEmailValue), 'strip');
     }
 
     // D35 — reproducing the `NOT NULL` columns, and why this is a check rather than a write.
@@ -194,8 +211,8 @@ export class UserService {
           const created = await tx.authUser.create({
             data: {
               password: this.passwords.unusablePassword(),
-              username: normalizeUsername(rawEmail as string),
-              email: normalizeEmail(rawEmail as string),
+              username: normalizeUsername(rawEmailValue),
+              email: normalizeEmail(rawEmailValue),
               // D35: `null` is passed **through** to the column, exactly as v1 does — the
               // `NOT NULL` constraint is the validator, and its violation is the 409 above.
               // The cast is deliberate: Prisma's type models the column, not v1's behaviour.

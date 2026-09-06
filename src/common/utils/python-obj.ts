@@ -62,6 +62,23 @@ export class PythonTypeError extends Error {
  * `'0'` and `'False'`. v1 applies this to **raw body values**, so a coerced-to-text check is
  * not the same test — `str(0)` is `'0'`, which is truthy.
  */
+/**
+ * `AttributeError` — reaching for a method the value does not have.
+ *
+ * The one that matters here is `UserManager.normalize_email`: `email = email or ''` then
+ * `email.strip()`. A **truthy non-string** — `['a']`, `{'a': 1}`, `True`, `5` — survives the
+ * `or` and then has no `.strip`, so v1 answers **500** with nothing written. Falsy values never
+ * reach it (`_create_user`'s `if not username` raises `ValueError` first), and strings pass
+ * through. Three branches, and coercing the value to text before the check collapses two of
+ * them — which is exactly how parity finding **DELTA-F1** was introduced.
+ */
+export class PythonAttributeError extends Error {
+  constructor(typeName: string, attribute: string) {
+    super(`AttributeError: '${typeName}' object has no attribute '${attribute}'`);
+    this.name = 'PythonAttributeError';
+  }
+}
+
 export function isPythonFalsy(value: unknown): boolean {
   if (value === null || value === undefined || value === false || value === '') {
     return true;
@@ -406,7 +423,7 @@ function pythonTypeName(value: unknown): string {
  * would change no observable byte, because every message it appears in is discarded by the
  * 500 renderer; {@link pythonRepr} is the function to reach for when a value must survive.
  */
-function describeTypeForErrorMessage(value: unknown): string {
+export function describeTypeForErrorMessage(value: unknown): string {
   if (value === null) {
     return 'NoneType';
   }
