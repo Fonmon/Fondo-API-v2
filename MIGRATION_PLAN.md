@@ -11,6 +11,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 | Date | Rev | Change |
 |---|---|---|
 | 2026-09-03 | v2.6 | **Round 2's F6 and F8 fixed; both were bigger than filed, and both were implemented rather than registered.** **F6** — `APIView.initial()` negotiates a renderer *before* `perform_authentication`, so an unacceptable `Accept` is a **406 before the guards, the handler and any write**: `DELETE /api/user/<id>` under `Accept: application/xml` was **v1 refusing and v2 soft-deleting the row** (measured, restored). `DefaultContentNegotiation.select_renderer` ported into a middleware between the URL resolver and the body parser. A second failure mode the round-2 report did not reach: `?format=` naming no renderer's `format` is `Http404` — `GET /api/user?format=xml` is a **404 before authentication** in v1 and was a 200 in v2. **P3-D8 rewritten** to claim only the rendering (browsable HTML, `?format=api`, `text/*`, and a newly measured `Accept: application/json;indent=8` → 152 bytes vs 79). **F8** — the three rows had one cause: v2 parsed multipart with **busboy**, a strict parser, and v1 uses **Django's**, which raises in three places and salvages the rest. `MultiPartParser`/`BoundaryIter`/`parse_boundary_stream`/`cgi.valid_boundary`/`parse_header` ported; multer out of the request path. 16/16 cells identical, four of them the report never reached. The report's model of the missing-`boundary` case was wrong: `None.decode()` is an **AttributeError**, which `Request.data`'s property/`__getattr__` re-entry **swallows**, so the view sees an empty `QueryDict` — hence a serializer 400 on `/api-token-auth` and a `KeyError` 500 on `PATCH /api/user`. Also closed in the fail-closed direction: `RequestDataTooBig` / `TooManyFieldsSent`, which v2 was accepting. **R2.11.5** cell added with positive controls. Gate: lint + typecheck clean, **1602 unit / 53 suites**, **699 e2e + 1 skipped / 15 suites**. Live re-verification: 125 negotiation cells + 16 multipart cells + a 23-cell regression sweep, **status distributions identical on both stacks**; the only diffs are the registered Django HTML 404/500 pages. `pg_dump` of **every table** taken before the first write and diffed after: all 20 tables **byte-identical** — `schedulertask` 626, `notificationsubscriptions` 94/1468, `auth_user` 15 (1 active ADMIN, 2 inactive), `power` 20, `loan` 425. |
+| 2026-09-06 | v4.1 | ✅ **PHASE 5 CLOSED — Approved with conditions C59–C67.** The reviewer re-measured the gate to the same numbers and ran **four independent verifications instead of reading the reports** — three measured clean and were recorded as such (the `//`-target divergence does not exist; gunicorn 19.9.0's dot-prefix workaround preserves both slashes, read out of the running container). The fourth found that **`parse_request_line` does not stop at the port**: `GET http://[/api/activity/year` is v1 **400** / v2 **404 via Express's `finalhandler`**, so O1's shape fires on a plain `GET`, not only authority-form targets — a request reaching a response without passing the URL resolver at all. **N1's model confirmed sound**, `WeakSet` guard and `restoreCatchAllRoutes` included. ⚠️ **`python-str.ts`'s declared limits are incomplete** — verified independently: `0.00001` → v1 `1e-05` / v2 `0.00001`; `1e16` → v1 `1e+16` / v2 `10000000000000000`. Neither is an integral float, so limit 1 is false as written; it is a CPython/JS exponentiation-threshold mismatch the 41-row fixture cannot sample. **`pythonInt`/`toDjangoInt` still use JS `trim()`** — the exact class `pythonStrip` was built to close, in the same directory. **Phase 4's ledger audited: of eleven conditions, one is half-closed and that as a side effect of D29** — C48's two-gate warning reached, now **C59**. |
 | 2026-09-06 | v4.0 | **Phase 5 delta round 3: everything briefed verified FIXED** — DELTA-F1 (21/21, discriminator holds), **N1 confirmed at the boundaries** the developer derived (73 raw request lines; 2-char → 400, 3-char → 403, **21/24/40/200-char methods all pass** the prefix match, `GETx` → 403 while `get` → 400; `FROB` byte-identical to `PUT` on 27/27), D36 64/64, D37 as registered with **no id collision**, D38's four v1 outcomes including the corrected `KeyError` sub-case. The tester **under-counted the developer's claim in v2's favour**: its 73 lines found 4 diffs where the developer's 31 found 1, the extra 3 being pre-existing edge items. ⚠️ **One failure, `DELTA3-F1`, pre-existing and proven so against a `d7b95f8` build**: `normalizeEmail` omitted Django's `.strip()`, so v2 **stored and mailed `"  a@b.com  "`** — it escaped the database. Fixed conditionally, because Django strips only when an `@` is present and `str.strip()` is **not** `trim()` (CPython takes U+001C–U+001F and U+0085; JS takes U+FEFF). Spec generated from 16 container-measured inputs; controls: no-strip fails 8/18, naive `trim()` fails 5/18. ⚠️ **False-green #22, mine** — I certified the fixture at baseline on row counts alone; sequences and `xmin` were off from the rate-limited attempt. Gate: **2047 unit / 63**, **1031 e2e + 1 skipped / 18**. |
 | 2026-09-06 | v3.9 | **N1 fixed at the HTTP edge; P5-F2 decided as D37; D36 registered; two tester corrections taken.** **N1** — `llhttp` accepts a fixed method table and rejects everything else before Express, so `FROB` was a bare 400 and **`CONNECT` got no response at all, on every route**. gunicorn has no such table: it validates the request *line* and Django's permission map decides, which is why v1 answers 401/403/404. `gunicorn-request-line.ts` ports `METH_RE`, the three-bit split, `VERSION_RE` and `util.write_error`; `gunicorn-http-edge.ts` recovers the request from `err.rawPacket` (across TCP segments) and from the `connect` event and feeds it to the same Express instance. ⚠️ It also had to undo an Express quirk: `app.all` registers one layer **per known verb** rather than setting `Router#all`'s `_all`, so `@All()` — the fallback that makes `PUT`/`OPTIONS` a 403 — stopped at the edge of `http.METHODS`. Measured against the running v1 on a raw socket, 31 request lines: **30 identical, 1 differing and that one is D13**; status distributions equal at `{401: 22, 404: 1, 400: 8}`. Controls: **28 of 112** cells fail with the provider removed, **14 of 112** with only the route fix removed — two distinct sets, both compiling and linting clean. **D37** registers P5-F2 as *accepted, not matched*: matching means issuing raw-SQL INSERTs known to fail purely to burn `nextval`, and the cutover is a hard switch. **D36** registers the activity roster exposure as ported-and-accepted (operator Q32); **Q33**'s consequence — `EXEMPTED` unused in 8 years, so an excused member reads as owing money — goes to the Phase 9 backlog, not into a parity phase. **D38's entry gained its missing sub-case** (no `password` key is a v1 **500**, not a 200) and `createBirthdateNotification`'s `?? 'None'` is now documented as unreachable. Three documents corrected from 15 `ActivityUser` rows to **13**. Gate: **2029 unit / 62**, **1031 e2e + 1 skipped / 18**, `fondodev` at baseline. ⚠️ **`npm run lint` was NOT clean at the briefed head `a7c76a7`** — one prettier error in `test/user.e2e-spec.ts:2342`, from the DELTA-F1 commit, while the status board said lint ✅. Fixed here; the board's gate line was measured, not re-run. |
 | 2026-09-06 | v3.8 | **Phase 5 delta round 2: P5-F1 fixed, D35 and D38 confirmed, one new failure — `DELTA-F1`, mine.** `normalize_email` is `email or ''` then `.strip()` — **three** branches, and my D35 fix collapsed two of them by coercing before inspecting. `POST /api/user` with `email: ["a"]` was **201 + an account named `"['a']"` + an activation email** where v1 is a 500 that writes nothing. Fixed by reading the raw value first; **7-cell control** against the unfixed code, plus three *string* cells that must still create, so the fix cannot be "refuse everything". Two casts audited away in the same pass. **D38 confirmed live**: v1 takes over the ADMIN **and resurrects a soft-deleted account**; v2 refuses; all 15 hashes restored byte-identical. **P5-F1's three documented limits probed and behave as documented**, with two the docblock understates — `-0.0` loses its sign and 2⁵³+1 is **value-corrupted**, not merely re-rendered. The tester also found **two defects in its own harness**, one of which reported 7/7 false-red on `created_at` alone. Gate: **1977 unit / 60**, **1000 e2e + 1 skipped / 18**. |
@@ -1348,62 +1349,37 @@ pulled forward into Phase 3 (condition C24) and 7b waited on Phase 4.
 > happening at this moment. The table under it is the whole migration; the Conditions column is
 > the honest ledger of what each closed phase still owes.
 
-### ▶ Now — Phase 5 (Activities), in the parity loop
+### ▶ Now — Phase 5 CLOSED. Phase 6 (Saving accounts) is next.
 
 | | |
 |---|---|
-| **Branch / head** | `feat/phase-5-activities`. **Last behavioural commit: `47b58ae`** (N1 + the register work). Anything after it on this branch is documentation only — ⚠️ do not copy a hash from here without `git rev-parse feat/phase-5-activities`; a made-up hash in this row is what `a7c76a7` exists to correct. |
-| **Gate, re-measured by the coordinator at `28ad282`** | lint ✅ · `tsc` ✅ · **2047 unit / 63 suites** · **1031 e2e + 1 skipped / 18 suites** · `fondodev` at baseline on **counts, sequences and `xmin` cardinality** — see false-green #22. *(Asserted by exit code.)* |
-| **Pipeline** | dev ✅ → tester **FAIL r1** → dev ✅ → tester **FAIL r2** → dev ✅ → dev ✅ *(N1, D36, D37)* → tester ✅ **r3: everything briefed FIXED**, one pre-existing failure (`DELTA3-F1`) → dev ✅ *(fixed)* → **reviewer 🔨 running** |
-| **Blocking the phase** | nothing from the operator — **reviewer running**, last stage before Phase 5 closes |
+| **Branch / head** | `feat/phase-5-activities` @ `d89f801` |
+| **Gate** | lint ✅ · `tsc` ✅ · **2047 unit / 63 suites** · **1031 e2e + 1 skipped / 18 suites** · `fondodev` at baseline on counts, sequences and `xmin`. Asserted by exit code, and **re-measured independently by the reviewer to the same numbers**. |
+| **Pipeline** | dev ✅ → tester **FAIL r1** → dev ✅ → tester **FAIL r2** → dev ✅ → dev ✅ *(N1, D36, D37)* → tester ✅ **PASS r3** → dev ✅ *(DELTA3-F1)* → reviewer ✅ **Approved w/ conditions C59–C67** |
+| **Blocking Phase 6's start** | **C59, C60, C62, C67** — mine to close, nothing from the operator |
 
-**Delta round 2 result: P5-F1 ✅ fixed, D35 ✅ confirmed on every claim, D38 ✅ confirmed** (v1
-takes over the ADMIN and resurrects a soft-deleted account; v2 refuses all three, and all 15
-password hashes were restored byte-identical afterwards).
-
-⚠️ **It found one new failure, and it was mine — `DELTA-F1`.** `UserManager.normalize_email` is
-`email = email or ''` then `email.strip()`, which is **three** branches: falsy raises earlier, a
-truthy **string** strips, and a truthy **non-string** raises `AttributeError` → v1 **500**, nothing
-written. My D35 fix coerced the value to text *before* inspecting it, collapsing the last two — so
-`POST /api/user` with `email: ["a"]` answered **201**, created an account named `"['a']"`, burned
-three sequences and **sent an activation email**. Fixed: the raw value is inspected first. Control:
-**7 failures** against the unfixed code, with three string-cells (`"0"`, `"false"`, `"[a]"`) passing
-in both as the discriminator, so the fix is not "refuse everything".
-
-**Both round-2 leftovers are now closed, one by code and one by decision.**
-
-✅ **N1 fixed** (`47b58ae`). `llhttp` accepts a fixed method table; gunicorn has none — it
-validates the request *line*, and the method is then just a key in Django's permission map. The
-edge now ports `METH_RE`, `split(None, 2)`, `VERSION_RE` and `util.write_error`, recovers the
-request from `err.rawPacket` and from the `connect` event, and hands it to the same Express
-instance. ⚠️ **A second defect surfaced underneath it**: Express's `app.all` registers one layer
-per *known* verb instead of setting `Router#all`'s `_all`, and Nest's `@All()` goes through it —
-so the fallback that makes `PUT`/`OPTIONS` a **403** stopped at the edge of `http.METHODS` and a
-recovered `FROB` fell through to a 404. Measured on the wire against the running v1: **31 request
-lines, 30 identical, 1 differing and that one is D13**; status distributions equal at
-`{401: 22, 404: 1, 400: 8}`. Controls: **28/112** cells fail with the provider removed, **14/112**
-with only the route fix removed — two distinct sets, both compiling.
-
-✅ **P5-F2 decided, not fixed — registered as `D37`.** I re-checked the recommendation against the
-code before writing it and it holds: v2 raises before Prisma is called because Prisma validates a
-required field client-side, so matching v1 means hand-writing raw-SQL INSERTs *known to fail* — on
-`POST /api/user` and two other live paths — purely to consume a `nextval`. The cutover is a hard
-switch (§3 Phase 9 step 3), so no client can observe the divergence, and the Phase 5 criterion asks
-for identical **row sets**, which every measured cell has. Sequence-only diffs are now an expected
-diff; `manual-tester` must not re-file them.
-
-✅ **`D36` written up** from the BA note and operator **Q32**, changing no Phase 5 code. **Q33**'s
-consequence — `EXEMPTED` defined since 2018 and used **0 times in 338 rows**, so a genuinely excused
-member is displayed as owing the fund to every other member — is recorded in the **Phase 9
-post-migration backlog**. It is not a migration defect and must not be "fixed" in a parity phase.
-
-⚠️ **`npm run lint` was not clean at `a7c76a7`** — one prettier error in `test/user.e2e-spec.ts:2342`
-from the DELTA-F1 commit, while this block said lint ✅. Fixed in `47b58ae`. The gate line above was
-re-run, not carried over.
+**Phase 5 registered D35–D38 plus P5-D1–P5-D3.** Three of the four §5 rows are cross-cutting work
+found here but living in Phase 3/4 code, which is the phase's real character: the CRUD was
+straightforward and everything expensive was underneath it.
 
 🔴 **Operator decision on the record (2026-09-06):** **D38's v1 exposure is accepted until
-cutover.** See the risk record in §7 for the four things that should re-open it.
+cutover** — an unauthenticated account takeover, fixed in v2. The risk record in §7 lists the four
+things that should re-open it; the exposure ends at Phase 9 runbook step 3.
 
+**Gating Phase 6's start** — **C59** (Phase 4's eleven conditions: the reviewer audited C44–C49 and
+C52–C57 against the tree and found **one half-closed, and that as a side effect** of D29's
+implementation — C48's two-gate warning is now reached), **C60** (`python-str.ts`'s declared float
+residuals are incomplete — verified: `0.00001` is v1 `1e-05` / v2 `0.00001` and `1e16` is v1
+`1e+16` / v2 `10000000000000000`, a CPython/JS exponentiation-threshold mismatch that neither
+declared limit names), **C62** (stale in-source claims), **C67** (the generalising false-green
+rule — *a check that can only report "nothing found" is not a check*).
+
+**Rolls to Phase 6's gate:** C61, C63, C64, C65, C66.
+
+⚠️ **One business scenario escalated to `business-analyst`, no condition attached:** `ActivityUser`
+rows are written only by `create_activity`, so **a member who joins the fund after an activity
+exists can never be marked paid on it**, and the only API-level recovery discards every payment
+state. Faithful to v1, so no parity cell could have failed — which is exactly why none was written.
 
 | Phase | Status | Dev | Tester | Reviewer | Analyst | Conditions |
 |---|---|---|---|---|---|---|
@@ -1415,7 +1391,7 @@ cutover.** See the risk record in §7 for the four things that should re-open it
 | 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ | pulled forward by **C24** |
 | 4 Loans | ✅ **CLOSED — approved w/ conditions, both rounds** (`806ca6e`) | ✅ | ✅ PASS + ✅ **delta PASS** (`17114a0`) | ✅ **Approved** (C40–C49) + ✅ **delta approved** (C50–C58) | ✅ C29/C30/C42 | C40–C43, C50, C51 ✅; **C44–C49, C52–C58 🟡 open → P5 gate** |
 | 5 Activities | 🔨 **IN PROGRESS** — implemented; r1 + delta r2 findings all closed or registered | ✅ | 🔨 delta r3 | ⬜ | ✅ Q32/Q33 | **C58 ✅ discharged**; C44–C49, C52–C57 🟡 → P5 gate; **D36 ✅ written up**, **D37 ✅ registered**, **N1 ✅ fixed** |
-| 6 Saving accounts (CAPs) | ⬜ **Ready** — Q19–Q24 all answered; **D12** is a new build, not a port | — | — | — | — | — |
+| 6 Saving accounts (CAPs) | 🟡 **NEXT** — Q19–Q24 answered; **D12** is a new build, not a port | — | — | — | — | opens under **C59/C60/C62/C67** |
 | 7b Scheduler *runner* | ⬜ **Ready** — P4 closed, so no longer blocked | — | — | — | — | — |
 | 8 Files + admin | ⬜ **Ready** — P2 closed; inherits rules 12b/12c | — | — | — | — | — |
 | 9 Cutover, hstore→jsonb | ⬜ Blocked on P8 | — | — | — | — | **C39** lands here |
