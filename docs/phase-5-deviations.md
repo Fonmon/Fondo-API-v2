@@ -238,12 +238,21 @@ false green, because the fixture would be the thing that was wrong. Pinned by
 `GET 3`, so **any authenticated member reads it**. That is the same exposure D10 (loans) and
 D25 (`GET /api/user/<id>`) were introduced to close on their routes.
 
-It is **not** closed here. Phase 5 owns no §5 rows, the plan pre-declares none for it, and
-adding an unregistered ownership control would be exactly the kind of quiet divergence §5
-exists to prevent. Flagged for `business-analyst`: the fund may want the same
-owner-plus-`[0,1,2]` predicate here, in which case it is a new §5 row with a new operator
-question, not a Phase 5 implementation detail. The e2e suite pins the **current** behaviour
-(all four roles get 200), so a later decision has a cell to change.
+It is **not** closed here. Phase 5 pre-declared no §5 rows and adding an unregistered ownership
+control would be exactly the kind of quiet divergence §5 exists to prevent. Flagged for
+`business-analyst`, whose answer is now on the record.
+
+✅ **Decided — `D36`: port unchanged, accepted** (`docs/ba-phase-5-activity-exposure.md`,
+operator **Q32**). The fields are **already fund-open** by `GET /api/user`, which is also
+`GET 3` and serialises the *same* `UserProfileSerializer` for every active member, so an
+ownership check here would close nothing; and the operator confirmed the members' activity
+screen is meant to show the whole paid/unpaid list. **No code changed** — the four e2e role
+cells that already return 200 with the full roster are D36's pin. The two residuals D36 records
+rather than fixes are (a) soft-deleted members staying attached to older activities and (b)
+payment `state` being fund-visible, which operator **Q33** makes sharper: `NOT_PAID` means
+*owes the fund*, and `EXEMPTED` has never been used, so an excused member reads as a debtor.
+That last one is v1's behaviour, is **not** a migration defect, and is in the Phase 9
+post-migration backlog.
 
 ### 3.3 `create_year` reads Bogotá — the first real use of the C28 helper
 

@@ -1433,19 +1433,7 @@ cutover.** See the risk record in §7 for the four things that should re-open it
 > by reading the behaviour before the batch shipped. **An audit that clears a condition must
 > exercise it or read the whole function.**
 
----|---|---|---|---|---|
-| — Prereq: dev DB at 0019 | ✅ **Cleared** | — | — | — | — |
-| 0 Foundations & Prisma baseline | ✅ **CLOSED** (`b3effab` + C1–C4) | ✅ | n/a | ✅ **APPROVED** | n/a |
-| 1 Auth + roles | ✅ **CLOSED** (`151314f` + C1–C8) | ✅ | ⬜ | ✅ **APPROVED** | ⬜ |
-| 2 Mail + notifications | ✅ **CLOSED — APPROVED** (`fe261fc`) | ✅ | ✅ PASS r3 | ✅ **Approved w/ conditions** | ⬜ |
-| 3 Users + finance | ✅ **CLOSED — APPROVED w/ conditions** | ✅ | ✅ PASS r4 | ✅ **Approved** (C28–C39) | ✅ Aligned |
-| 4 Loans | ✅ **CLOSED — APPROVED w/ conditions** (`806ca6e`) | ✅ | ✅ PASS + ✅ **delta PASS** | ✅ **Approved** (C40–C49) + ✅ **delta approved** (C50–C58) | ✅ C29/C30/C42 |
-| 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ |
-| 7b Scheduler *runner* | ⬜ Blocked on P4 | — | — | — | — |
-| 5 Activities | 🟡 **Next** — no §5 rows of its own; opens with **C58** (C31–C35, C37, C39 close or are struck) | — | — | — | — |
-| 6 Saving accounts | 🔴 **Blocked on Q19–Q24** — no spec to port | — | — | — | — |
-| 8 Files + admin | ⬜ Blocked on P2 | — | — | — | — |
-| 9 Cutover | ⬜ Blocked on P8 | — | — | — | — |
+> ⚠️ **A second, header-less copy of this table used to sit here** and has been removed. It was stale in three rows at once — Phase 5 "🟡 Next — no §5 rows of its own", Phase 6 "🔴 Blocked on Q19–Q24", Phase 7b "Blocked on P4" — all of which the board above contradicts, and it rendered as broken markdown because its header row was missing. **The board above is the only one.**
 
 ---
 
