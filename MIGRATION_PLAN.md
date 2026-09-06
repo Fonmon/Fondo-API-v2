@@ -1340,7 +1340,7 @@ pulled forward into Phase 3 (condition C24) and 7b waited on Phase 4.
 
 | | |
 |---|---|
-| **Branch / head** | `feat/phase-5-activities` @ `86eb0d0` |
+| **Branch / head** | `feat/phase-5-activities` @ `a3d06a4` |
 | **Gate, last measured by the coordinator** | lint ✅ · `tsc` ✅ · **1977 unit / 60 suites** · **1000 e2e + 1 skipped / 18 suites** · `fondodev` at baseline |
 | **Pipeline** | dev ✅ → tester **FAIL r1** → dev ✅ → tester **FAIL r2 (delta)** → dev ✅ *(DELTA-F1 fixed)* → **tester ⬜ delta r3** → reviewer ⬜ |
 | **Blocking the phase** | nothing from the operator — the loop has to finish |
