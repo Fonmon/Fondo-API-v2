@@ -14,6 +14,7 @@ import { DjangoUrlResolverMiddleware } from './common/http/django-url-resolver.m
 import { DrfContentNegotiationMiddleware } from './common/http/drf-content-negotiation.middleware';
 import { DrfParserInterceptor } from './common/http/drf-parser.interceptor';
 import { DrfRequestParsingMiddleware } from './common/http/drf-request-parsing.middleware';
+import { GunicornHttpEdge } from './common/http/gunicorn-http-edge';
 import { JsonBigIntSetup } from './common/http/json-bigint';
 import { HealthModule } from './health/health.module';
 import { LoanModule } from './loans/loan.module';
@@ -79,6 +80,12 @@ import { UserModule } from './users/user.module';
     // Money is `BigInt` in Prisma and `JSON.stringify(1n)` throws. Registered here rather
     // than in `main.ts` so every e2e suite exercises the production wiring (rule 5b).
     JsonBigIntSetup,
+    // Restores the two request shapes Node answers without ever calling Express: a method
+    // token `llhttp` does not know (a bare 400) and `CONNECT` (no reply at all). v1 has no
+    // method table — gunicorn validates the request line and Django's permission map decides
+    // — so both are ordinary 401/403/404s there. Parity finding **N1**. A provider rather
+    // than a line in `main.ts`, for the reason the middleware list gives.
+    GunicornHttpEdge,
     // Raises the 415 / JSON-parse 400 that `DrfRequestParsingMiddleware` deferred, at DRF's
     // point in the pipeline: after authentication and permissions, before the handler (D18).
     {

@@ -13,7 +13,7 @@ Audience: `nestjs-reviewer` (§1–§3), `manual-tester` (§4 — everything it 
 | Activity years | `GET\|POST /api/activity/year` |
 | Activities of a year | `GET\|POST /api/activity/year/<id_year>` |
 | Activity detail | `GET\|PATCH\|DELETE /api/activity/<id>` |
-| §5 register implemented | **none** — see §1 |
+| §5 register implemented | **none at implementation time**; **D36** and **D37** were registered afterwards and neither changed a line of Phase 5 code — see §1 |
 
 **Gate numbers**
 
@@ -21,6 +21,11 @@ Audience: `nestjs-reviewer` (§1–§3), `manual-tester` (§4 — everything it 
 |---|---|---|
 | unit | 1871 / 58 suites | **1935 / 60 suites** |
 | e2e | 854 + 1 skipped / 17 suites | **957 + 1 skipped / 18 suites** |
+
+⚠️ **Those are the numbers at the Phase 5 *implementation* commit and are deliberately not
+updated.** Three parity-fix commits have landed on the branch since (P5-F1, D35+D38, DELTA-F1)
+and a fourth for **N1**; the branch reads **2029 unit / 62 suites** and **1031 e2e + 1 skipped
+/ 18 suites** today. The row above is the delta this phase's own work produced.
 
 `+64` unit (`activity.service.spec.ts` 53, `dto/activity.serializers.spec.ts` 11) and `+103`
 e2e (`activity.e2e-spec.ts` 102, plus one new cell in `health.e2e-spec.ts`). No cell was
@@ -41,12 +46,22 @@ plain-SQL file per table, on **btrfs** — persistent, not tmpfs), pointer in
 
 ---
 
-## 1. Registered deviations from v1: **none**
+## 1. Registered deviations from v1: **none at implementation time; two added since**
 
-Determined mechanically, not assumed. `MIGRATION_PLAN.md` §5's `Phase` column contains no
-`P5` entry (`grep -c '| P5 |'` → 0), and §3's Phase 5 section says so explicitly. The four
-cross-cutting rows **D21–D24** apply here as they do everywhere, and nothing in this phase
-adds to them.
+At implementation this was determined mechanically, not assumed: `MIGRATION_PLAN.md` §5's
+`Phase` column contained no `P5` entry, and §3's Phase 5 section said so explicitly. Nothing
+was invented, which is the point.
+
+⚠️ **Two rows have been registered since, by other roles, and neither changed a line of Phase
+5 code.** They are here so a tester reads them as *expected* rather than as findings:
+
+| row | what it decides | code change |
+|---|---|---|
+| **D36** | `GET /api/activity/<id>` returning every attached member's full profile to any member is **ported and accepted** (`business-analyst`, operator **Q32**: the members' activity screen is meant to show the whole paid/unpaid list). Supersedes §3.2's open finding. | **none** — its pin is the four e2e role cells that were already green |
+| **D37** | a sequence value burned by a doomed INSERT in v1 and not in v2 is **accepted, not matched**. Supersedes parity finding **P5-F2**. | **none** — v2's behaviour is unchanged; the row records the decision |
+
+The four cross-cutting rows **D21–D24** apply here as they do everywhere, and so do **D13**,
+**P3-D6** and **P3-D8** — see §4.3, which two parity rounds have now had to correct.
 
 So **every** observable behaviour below is v1's, including the ones that look like defects:
 
@@ -62,8 +77,9 @@ So **every** observable behaviour below is v1's, including the ones that look li
 
 Two v2-only *controls* were considered and **not** added, deliberately: an ownership check on
 `GET /api/activity/<id>` (the analogue of D10/D25) and a "exactly one enabled year" invariant.
-Both are recorded as findings in §3 rather than implemented, because Phase 5 owns no §5 rows
-and neither is a parity repair.
+Both are recorded as findings in §3 rather than implemented, because neither is a parity repair.
+✅ The first has since been **decided**: `D36` says port it, and the operator confirmed the
+exposure is the intent of the screen. The second remains an unexamined anomaly (§3.1).
 
 ---
 
@@ -331,10 +347,58 @@ proof.
 
 ## 4. For `manual-tester`
 
-### 4.1 Expected diffs against v1 — **none**
+### 4.1 Expected diffs against v1
 
-This phase introduces no intentional divergence. Any observable difference between the two
-stacks on these three routes is a **parity failure**, not an expected diff.
+⚠️ **This section said "none" for two rounds and that wording was wrong** — not because the
+phase diverged, but because it read as *absolute* while **D13**, **P3-D6** and **P3-D8**
+accounted for **126 of the 131** differing cells in round 1. A tester who took it literally
+would have filed 126 false failures. Corrected here, and §4.3 now names them.
+
+**On the three activity routes, this phase still introduces no intentional divergence of its
+own.** What follows is the complete list of differences that are nevertheless **expected**:
+
+| # | shape | why |
+|---|---|---|
+| 1 | Django's HTML 404 page vs v2's `{"message":"Not Found"}` | **D13** |
+| 2 | Django's 27-byte `<h1>Server Error (500)</h1>` vs v2's zero-byte 500 | **P3-D6** |
+| 3 | v1's browsable API under `Accept: text/html`/`text/*`/`?format=api`, and `JSONRenderer`'s `indent` media-type parameter | **P3-D8** |
+| 4 | gunicorn writing an entity body on a `HEAD` response where Node suppresses it (`Content-Length` and status identical) | **D21** |
+| 5 | `Connection: close` (v1) vs `Connection: keep-alive` + `Keep-Alive: timeout=5` (v2) on every response | **N2**, transport-level, excluded from the compared header set |
+| 6 | **a sequence value that advanced on v1 and not on v2** after a refusal that wrote nothing — `fondo_api_activity_id_seq`, `auth_user_id_seq`, `fondo_api_schedulertask_id_seq` | **D37**. Status, body, bytes, headers and **every row** are identical; only `last_value` differs. **Do not re-file this** — it was P5-F2 in rounds 1 and 2 and is now a decided, accepted row. |
+| 7 | `POST /api/user/activate/<id>` with `{"key": null}`: v1 **200** (and takes over the account, including a soft-deleted one and the ADMIN) or **500** when the body carries no `password` key; v2 **404** in all four sub-cases | **D38**. The 500/404 sub-case is inside the row — the register entry now says so explicitly. |
+
+**Anything else on these routes is a parity failure.**
+
+⚠️ **`D36` is not in that table on purpose.** It changes nothing on the wire: both stacks
+return the full member roster from `GET /api/activity/<id>` to any role. It is registered so
+the exposure is a decision rather than an oversight, and a **difference** there would still be
+a failure.
+
+### 4.1a ⚠️ New since round 2 — the HTTP edge changed (**N1**)
+
+`src/common/http/gunicorn-http-edge.ts` and `gunicorn-request-line.ts` port **gunicorn 19.9's
+request-line validation**, which v2 previously had no equivalent of. This is a **fix, not a
+deviation**, and it is cross-cutting — it applies to every route in every phase, so a
+re-measurement of N1 belongs in the next round's sweep.
+
+| request | v1 | v2 before | v2 now |
+|---|---|---|---|
+| `FROB`, `BREW`, `ABC`, `A-C`, `A_C`, `A.C`, `A$C`, a 24-character token | 401 / 403 / 404 per the matrix | **400**, `Connection: close`, no body | **identical to v1** |
+| **`CONNECT`** | 401 / 403 / 404 per the matrix | ⚠️ **no response at all — the socket was closed** | **identical to v1** |
+| `X`, `AB`, `get`, `Get`, `FR OB` | gunicorn's own **400** HTML page, 182–184 body bytes, no `Server`, no `Date` | a bare `400 Bad Request` with one header | **byte-identical to v1** |
+| a two-bit request line, `HTTP/9`, `http/1.1` | 400 `Invalid Request Line` / `Invalid HTTP Version` | bare 400 | **byte-identical to v1** |
+| a parser error that is **not** an unknown method (`Ho st:`, a header block over `maxHeaderSize`) | — | Node's 400 / 431 | **unchanged**, deliberately |
+
+Measured against the running v1 on a raw socket, 31 request lines, headers compared as a set:
+**30 identical, 1 differing — and that one is D13** (`FROB /nope`, Django's HTML 404). Status
+distributions equal on both stacks: `{401: 22, 404: 1, 400: 8}`.
+
+⚠️ **Known residuals, stated rather than hidden.** (a) gunicorn's `limit_request_line` (4094)
+and `limit_request_field_size` (8190) are **not** ported — pre-existing, method-independent,
+and unchanged by this work. (b) An unknown-method request whose header block exceeds Node's
+`maxHeaderSize` gets Node's **431** where v1 would answer its own 400. (c) Python's `\d`
+matches Unicode digits and JavaScript's does not, so `HTTP/١.١` is a 400 here and a parsed
+version in v1.
 
 ### 4.2 Explicitly **unchanged** — if these differ, that IS a failure
 
@@ -348,7 +412,7 @@ stacks on these three routes is a **parity failure**, not an expected diff.
 | 6 | `GET /api/activity/year/<unknown id>` → **200 `[]`**, never 404 |
 | 7 | `POST /api/activity/year/<unknown id>` → **500** (deferred FK violation at COMMIT), nothing written |
 | 8 | `POST /api/activity/year/<id>` missing `name`/`value`/`date` → **500**, nothing written |
-| 9 | `POST /api/activity/year/<id>` attaches one `ActivityUser` per **active** member at `state = 0` — **15 rows** on `fondodev` |
+| 9 | `POST /api/activity/year/<id>` attaches one `ActivityUser` per **active** member at `state = 0` — **13 rows** on `fondodev` (15 members, 2 of them `is_active = false`; this row said 15 until the parity round measured it on both stacks) |
 | 10 | `GET /api/activity/<id>` renders `date` as **ISO `YYYY-MM-DD`**, not the Spanish `7 nov. 2020` |
 | 11 | `year`, `value` and the nested `identification` render as **bare JSON numbers**, not strings |
 | 12 | `ActivityDetailSerializer` key order is `id, name, date, value, users`; `ActivityUserSerializer` is `id, state, user` |
@@ -370,6 +434,13 @@ stacks on these three routes is a **parity failure**, not an expected diff.
 (v1's swallowed errors) is the family `patch_activity`'s bare `except:` belongs to; it is not
 a new finding.
 
+⚠️ **So are D13, P3-D6 and P3-D8**, and between them they dominate the diff count on these
+routes — 126 of round 1's 131 differing cells, and every non-finding diff in round 2. This
+section listed only D21–D24 for two rounds; the omission is what made §4.1's absolute wording
+dangerous. **D22/D23/D24 are not reachable here** (no Phase 5 handler reads `request.FILES`,
+and none wraps a `request.data` read in a bare `except` at the *view* layer) — `patch_activity`
+wraps it in the *service*, which is D24's family but not its literal call site.
+
 ### 4.4 ⚠️ Data safety when probing this phase
 
 Phase 5 writes `fondo_api_activityyear`, `fondo_api_activity`, `fondo_api_activityuser`.
@@ -378,7 +449,7 @@ Phase 5 writes `fondo_api_activityyear`, `fondo_api_activity`, `fondo_api_activi
   before the first write cell, and restore only via `pg_restore` from that dump.
   `~/.fondo-parity-harness/p4/dump.sh` and `restore.sh` are the working pair; change the
   `p4r-` label.
-* ⚠️ **`POST /api/activity/year/<id>` writes 15 rows, not one**, and `DELETE` removes them
+* ⚠️ **`POST /api/activity/year/<id>` writes 13 rows, not one**, and `DELETE` removes them
   again. A probe loop over the create path grows `activityuser` fast.
 * ⚠️ **`POST /api/activity/year` mutates `enable` on a real row even when it answers 304**
   (P5-D1). The fixture's two enabled years — 2026 and 2020 — are *evidence*

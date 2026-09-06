@@ -17,7 +17,7 @@ import {
   type SeededUser,
 } from './support/abstract-test';
 import { V1_TEST_SUBSCRIPTION } from './support/push-subscription.fixture';
-import { rawRequestFor } from './support/raw-request';
+import { rawExchange, rawRequestFor } from './support/raw-request';
 
 /**
  * Regressions for the three HTTP-edge findings of the Phase 2 parity report
@@ -752,6 +752,205 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
       const response = await request(server()).post('/api/notification/subscribe');
 
       expect(response.status).toBe(401);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // N1 (Phase 5 parity report §6.1) — method tokens llhttp does not know, and CONNECT
+  // ---------------------------------------------------------------------------
+
+  describe('N1 — gunicorn validates the request line; llhttp has a method table', () => {
+    const NOT_AUTHENTICATED = '{"detail":"Authentication credentials were not provided."}';
+
+    /** One write, one connection, request line under the cell's control. */
+    const exchange = (
+      requestLine: string,
+      headerLines = 'Host: localhost\r\n',
+    ): ReturnType<typeof rawExchange> =>
+      rawExchange(server() as unknown as Server, [
+        `${requestLine}\r\n${headerLines}Content-Length: 0\r\nConnection: close\r\n\r\n`,
+      ]);
+
+    /**
+     * Every expectation in this block is a byte the running v1 produced on 2026-09-06
+     * (`fondo-v1-p4`, gunicorn 19.9.0, `127.0.0.1:8451`) for the same raw request. curl
+     * cannot send `FROB`, so all of it was measured over a socket, on both stacks.
+     */
+    it.each([
+      ['FROB', '/api/activity/year'],
+      ['BREW', '/api/activity/year'],
+      ['CONNECT', '/api/activity/year'],
+      // `[A-Z0-9$-_.]` — `$-_` is a range, so these four are methods to gunicorn.
+      ['ABC', '/api/activity/year'],
+      ['A-C', '/api/activity/year'],
+      ['A_C', '/api/activity/year'],
+      ['A$C', '/api/activity/year'],
+      // `{3,20}` under `re.match` is a prefix, so there is no upper bound.
+      ['FROBNICATORFROBNICATOR12', '/api/activity/year'],
+      // The finding was reproduced on three routes; it is the HTTP edge, not a route.
+      ['FROB', '/api/loan'],
+      ['FROB', '/api/user'],
+      ['CONNECT', '/api/loan'],
+      ['CONNECT', '/api/user'],
+    ])(
+      '401s %p on %p, as v1 does — v2 before: a bare 400, and nothing at all for CONNECT',
+      async (method, target) => {
+        const response = await exchange(`${method} ${target} HTTP/1.1`);
+
+        expect(response.status).toBe(401);
+        expect(response.body).toBe(NOT_AUTHENTICATED);
+        expect(response.headers['www-authenticate']).toBe('Token');
+      },
+    );
+
+    it('403s an unknown method for an authenticated ADMIN, with the view’s Allow — v1: 403', async () => {
+      const response = await exchange(
+        'FROB /api/activity/year HTTP/1.1',
+        `Host: localhost\r\nAuthorization: Token ${adminToken}\r\n`,
+      );
+
+      expect(response.status).toBe(403);
+      expect(response.body).toBe('{"detail":"You do not have permission to perform this action."}');
+      expect(response.headers['allow']).toBe('GET, POST, HEAD, OPTIONS');
+    });
+
+    it('403s CONNECT for an authenticated ADMIN too — the guard decides, not the parser', async () => {
+      const response = await exchange(
+        'CONNECT /api/activity/year HTTP/1.1',
+        `Host: localhost\r\nAuthorization: Token ${adminToken}\r\n`,
+      );
+
+      expect(response.status).toBe(403);
+      expect(response.headers['allow']).toBe('GET, POST, HEAD, OPTIONS');
+    });
+
+    it('404s an unknown method on an unresolvable URL, before authentication — v1: 404', async () => {
+      const response = await exchange('FROB /nope HTTP/1.1');
+
+      expect(response.status).toBe(404);
+      expect(response.body).toBe('{"message":"Not Found"}');
+    });
+
+    it('never tunnels a CONNECT: an authority-form target is just an unresolvable path', async () => {
+      const response = await exchange('CONNECT example.test:443 HTTP/1.1');
+
+      expect(response.status).toBe(404);
+    });
+
+    it.each([
+      ['tabs for spaces', 'FROB\t/api/activity/year\tHTTP/1.1'],
+      ['runs of spaces', 'FROB   /api/activity/year   HTTP/1.1'],
+      ['a leading space', ' FROB /api/activity/year HTTP/1.1'],
+    ])('splits the request line on %s, as `split(None, 2)` does — v1: 401', async (_l, line) => {
+      const response = await exchange(line);
+
+      expect(response.status).toBe(401);
+      expect(response.body).toBe(NOT_AUTHENTICATED);
+    });
+
+    it.each([
+      ['X', 182],
+      ['AB', 183],
+      ['get', 184],
+      ['Get', 184],
+    ])(
+      'answers gunicorn’s own 400 page for the method %p, byte for byte',
+      async (method, length) => {
+        const response = await exchange(`${method} /api/activity/year HTTP/1.1`);
+
+        expect(response.raw).toBe(
+          'HTTP/1.1 400 Bad Request\r\n' +
+            'Connection: close\r\n' +
+            'Content-Type: text/html\r\n' +
+            `Content-Length: ${length}\r\n` +
+            '\r\n' +
+            '<html>\n' +
+            '  <head>\n' +
+            '    <title>Bad Request</title>\n' +
+            '  </head>\n' +
+            '  <body>\n' +
+            '    <h1><p>Bad Request</p></h1>\n' +
+            `    Invalid Method &#x27;Invalid HTTP method: &#x27;${method}&#x27;&#x27;\n` +
+            '  </body>\n' +
+            '</html>\n',
+        );
+      },
+    );
+
+    it('reports `FR` when a space splits the method, exactly as v1 does', async () => {
+      const response = await exchange('FR OB /api/activity/year HTTP/1.1');
+
+      expect(response.status).toBe(400);
+      expect(response.body).toContain(
+        'Invalid Method &#x27;Invalid HTTP method: &#x27;FR&#x27;&#x27;',
+      );
+    });
+
+    it('400s a two-bit request line with `Invalid Request Line` — 309 bytes on the wire', async () => {
+      const response = await rawExchange(server() as unknown as Server, [
+        'FROB /api/activity/year\r\nHost: localhost\r\nContent-Length: 0\r\n' +
+          'Connection: close\r\n\r\n',
+      ]);
+
+      expect(response.status).toBe(400);
+      expect(response.raw.length).toBe(309);
+      expect(response.body).toContain(
+        'Invalid Request Line &#x27;Invalid HTTP request line: ' +
+          '&#x27;FROB /api/activity/year&#x27;&#x27;',
+      );
+    });
+
+    it.each([
+      ['HTTP/9', 194],
+      ['http/1.1', 196],
+    ])('400s the version %p with `Invalid HTTP Version`', async (version, length) => {
+      const response = await exchange(`FROB /api/activity/year ${version}`);
+
+      expect(response.status).toBe(400);
+      expect(response.headers['content-length']).toBe(String(length));
+    });
+
+    it('recovers a request split across two TCP writes — llhttp fails on the first byte', async () => {
+      const response = await rawExchange(server() as unknown as Server, [
+        'FROB /api/activity/y',
+        'ear HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n',
+      ]);
+
+      expect(response.status).toBe(401);
+      expect(response.body).toBe(NOT_AUTHENTICATED);
+    });
+
+    it('answers exactly once when the request arrives in two writes', async () => {
+      const response = await rawExchange(server() as unknown as Server, [
+        'FROB /api/activity/y',
+        'ear HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n',
+      ]);
+
+      expect(response.raw.split('HTTP/1.1 ')).toHaveLength(2);
+    });
+
+    it('leaves a well-formed request untouched — the listeners are the control’s control', async () => {
+      // `GET /api/user`, not `/api/activity/year`: this suite seeds no activity years, and
+      // an empty list is v1's **204** (P5 §4.2 row 1). A control must be a 200 that could
+      // have gone wrong, not a status the route would return either way.
+      const response = await exchange(
+        'GET /api/user HTTP/1.1',
+        `Host: localhost\r\nAuthorization: Token ${adminToken}\r\n`,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers['content-type']).toBe('application/json');
+      expect(response.body).toContain('mail_for_tests@mail.com');
+    });
+
+    it('still answers Node’s 400 for a parser error that is not an unknown method', async () => {
+      // `Ho st:` is `HPE_INVALID_HEADER_TOKEN`. Registering a `clientError` listener silences
+      // Node's default for every code, so this pins that the others were reproduced.
+      const response = await rawExchange(server() as unknown as Server, [
+        'GET /api/activity/year HTTP/1.1\r\nHost: localhost\r\nHo st: 1\r\n\r\n',
+      ]);
+
+      expect(response.raw).toBe('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
     });
   });
 });

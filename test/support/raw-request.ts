@@ -31,7 +31,9 @@ import { connect, type AddressInfo } from 'node:net';
  * something proves this one does not (C27's self-check).
  */
 export interface RawResponse {
-  /** The numeric status from the status line. */
+  /** Everything the server wrote, as `latin1`, before any parsing. Empty if it wrote nothing. */
+  raw: string;
+  /** The numeric status from the status line. `NaN` when the server answered nothing at all. */
   status: number;
   /** The status line verbatim, e.g. `HTTP/1.1 301 Moved Permanently`. */
   statusLine: string;
@@ -93,6 +95,14 @@ export async function rawRequest(
     socket.on('error', reject);
   });
 
+  return parseRawResponse(raw);
+}
+
+/**
+ * Splits a raw response into {@link RawResponse}. Shared by {@link rawRequest} and
+ * {@link rawExchange} so the two transports cannot disagree about what a status is.
+ */
+export function parseRawResponse(raw: string): RawResponse {
   const [rawHead, ...rest] = raw.split('\r\n\r\n');
   const head = rawHead.split('\r\n');
   const statusLine = head[0];
@@ -105,12 +115,61 @@ export async function rawRequest(
     }
   }
   return {
+    raw,
     status,
     statusLine,
     location: headers['location'],
     headers,
     body: rest.join('\r\n\r\n'),
   };
+}
+
+/**
+ * {@link rawRequest} with the **request line** itself under the caller's control, and with
+ * the request optionally split across several TCP writes.
+ *
+ * `rawRequest` still composes `${method} ${target} HTTP/1.1`, which is right for the cells
+ * whose subject is the target. It cannot express a request line that is malformed *as a
+ * line* — two bits instead of three, tabs for spaces, `http/1.1` in lower case — and those
+ * are exactly the inputs gunicorn's parser sorts into 400s and 401s (parity finding **N1**).
+ *
+ * ⚠️ **It resolves on close, with whatever arrived — including nothing.** A server that
+ * drops the connection without replying yields `raw === ''` and `status === NaN`, which is
+ * the pre-fix behaviour N1 is about; a cell must assert the status it expects rather than
+ * `expect(status).not.toBe(200)`, or a dropped connection reads as a pass.
+ *
+ * @param writes one write per element, in order, `delayMs` apart — a single-element array is
+ *   one `write()` call, which is how a request normally arrives on loopback
+ * @param delayMs the pause between writes; enough for the peer to have processed the first
+ */
+export async function rawExchange(
+  server: Server,
+  writes: readonly string[],
+  delayMs = 100,
+): Promise<RawResponse> {
+  const port = await listeningPort(server);
+  const raw = await new Promise<string>((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1', () => {
+      void (async () => {
+        for (const [index, chunk] of writes.entries()) {
+          if (index > 0) {
+            await new Promise((tick) => setTimeout(tick, delayMs));
+          }
+          socket.write(chunk, 'latin1');
+        }
+      })();
+    });
+    let buffer = '';
+    socket.setEncoding('latin1');
+    socket.on('data', (chunk: string) => {
+      buffer += chunk;
+    });
+    socket.on('close', () => {
+      resolve(buffer);
+    });
+    socket.on('error', reject);
+  });
+  return parseRawResponse(raw);
 }
 
 /**

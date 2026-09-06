@@ -69,6 +69,9 @@ Contrast `create_activity` immediately below it, which **is** `@transaction.atom
 `loan 425 / loandetail 374 / schedulertask 626 / notificationsubscriptions 94, max(id) 1468 /
 auth_user 15 / power 20`.
 
-⚠️ `__add_users` writes **one `ActivityUser` per active user** — 15 rows per activity created.
+⚠️ `__add_users` writes **one `ActivityUser` per active user** — **13** rows per activity on `fondodev`, not 15.
+(`auth_user` has 15 rows; users **3** and **15** are `is_active = false`. Measured on both stacks by
+the Phase 5 parity round — three documents said 15, and a probe asserting 15 would have failed
+against v1 as well and read as a v2 defect.)
 `DELETE` cascades those children **in Python**, not in the database: every FK here is
 `NO ACTION`/`DEFERRABLE`, so Prisma will not cascade for you.

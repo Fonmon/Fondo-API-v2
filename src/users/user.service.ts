@@ -797,9 +797,17 @@ export class UserService {
       user_ids: userIds,
       target: '/',
       // ⚠️ D35: v1 builds this with `'{} {}'.format(user.first_name, user.last_name)`, and
-      // CPython renders a `None` as the four characters `None` — JS would render `null`. The
-      // member reaches this state through a null name that the column accepted, so the string
-      // is absurd either way; it must be absurd in v1's exact words.
+      // CPython renders a `None` as the four characters `None` — JS would render `null`.
+      //
+      // ⚠️ **`?? 'None'` is defensive, not reachable, and the parity round confirmed it.**
+      // `auth_user.first_name` and `last_name` are `NOT NULL`, and v1 calls
+      // `__create_birthdate_notification(user)` *inside* `transaction.atomic()` **before**
+      // `user.save()` — so a null name renders `Hoy está cumpliendo años None None`, then
+      // `save()` raises `IntegrityError` and the whole block, scheduler rows included, rolls
+      // back. Measured on both stacks: a null name on this path is a **409** with
+      // `fondo_api_schedulertask` unchanged and no `None None` message anywhere. It is kept
+      // because it is the *correct* rendering if the columns are ever relaxed, and because
+      // removing it would put a `null` here the day they are; it is not kept because it fires.
       message: `Hoy está cumpliendo años ${user.firstName ?? 'None'} ${user.lastName ?? 'None'}`,
     };
 

@@ -2339,7 +2339,11 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
      * non-stringy still has `.strip`, so it creates. Without this cell, refusing every email
      * would pass the block above.
      */
-    it.each([['"0"', '0'], ['"false"', 'false'], ['"[a]"', '[a]']])(
+    it.each([
+      ['"0"', '0'],
+      ['"false"', 'false'],
+      ['"[a]"', '[a]'],
+    ])(
       'POST /api/user with the string %s still creates — it has `.strip`',
       async (_label, email) => {
         await request(app.getHttpServer())
