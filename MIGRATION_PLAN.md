@@ -1349,9 +1349,9 @@ pulled forward into Phase 3 (condition C24) and 7b waited on Phase 4.
 
 | | |
 |---|---|
-| **Branch / head** | `feat/phase-5-activities` @ `a3d06a4` |
-| **Gate, last measured by the coordinator** | lint ✅ · `tsc` ✅ · **1977 unit / 60 suites** · **1000 e2e + 1 skipped / 18 suites** · `fondodev` at baseline |
-| **Pipeline** | dev ✅ → tester **FAIL r1** → dev ✅ → tester **FAIL r2 (delta)** → dev ✅ *(DELTA-F1 fixed)* → **tester ⬜ delta r3** → reviewer ⬜ |
+| **Branch / head** | `feat/phase-5-activities`. **Last behavioural commit: `47b58ae`** (N1 + the register work). Anything after it on this branch is documentation only — ⚠️ do not copy a hash from here without `git rev-parse feat/phase-5-activities`; a made-up hash in this row is what `a7c76a7` exists to correct. |
+| **Gate, measured at `47b58ae`** | lint ✅ · `tsc` ✅ · **2029 unit / 62 suites** · **1031 e2e + 1 skipped / 18 suites** · `fondodev` at baseline (`activityyear 9 / activity 25 / activityuser 338 / loan 425 / loandetail 374 / schedulertask 626 / auth_user 15 / power 20`, 15/15 `key_activation` NULL, `count(distinct xmin) = 1`) |
+| **Pipeline** | dev ✅ → tester **FAIL r1** → dev ✅ → tester **FAIL r2 (delta)** → dev ✅ *(DELTA-F1)* → dev ✅ *(N1 fixed; P5-F2 → D37; D36 written up)* → **tester ⬜ delta r3** → reviewer ⬜ |
 | **Blocking the phase** | nothing from the operator — the loop has to finish |
 
 **Delta round 2 result: P5-F1 ✅ fixed, D35 ✅ confirmed on every claim, D38 ✅ confirmed** (v1
@@ -1367,9 +1367,36 @@ three sequences and **sent an activation email**. Fixed: the raw value is inspec
 **7 failures** against the unfixed code, with three string-cells (`"0"`, `"false"`, `"[a]"`) passing
 in both as the discriminator, so the fix is not "refuse everything".
 
-**Still open, carried into the next dispatch** — **P5-F2** (a sequence value burned after a 500;
-my recommendation is register-not-match, the reviewer rules) and **N1** (`CONNECT` makes v2 send
-**no response at all**, on every route — llhttp rejects before Express). Neither is fixed.
+**Both round-2 leftovers are now closed, one by code and one by decision.**
+
+✅ **N1 fixed** (`47b58ae`). `llhttp` accepts a fixed method table; gunicorn has none — it
+validates the request *line*, and the method is then just a key in Django's permission map. The
+edge now ports `METH_RE`, `split(None, 2)`, `VERSION_RE` and `util.write_error`, recovers the
+request from `err.rawPacket` and from the `connect` event, and hands it to the same Express
+instance. ⚠️ **A second defect surfaced underneath it**: Express's `app.all` registers one layer
+per *known* verb instead of setting `Router#all`'s `_all`, and Nest's `@All()` goes through it —
+so the fallback that makes `PUT`/`OPTIONS` a **403** stopped at the edge of `http.METHODS` and a
+recovered `FROB` fell through to a 404. Measured on the wire against the running v1: **31 request
+lines, 30 identical, 1 differing and that one is D13**; status distributions equal at
+`{401: 22, 404: 1, 400: 8}`. Controls: **28/112** cells fail with the provider removed, **14/112**
+with only the route fix removed — two distinct sets, both compiling.
+
+✅ **P5-F2 decided, not fixed — registered as `D37`.** I re-checked the recommendation against the
+code before writing it and it holds: v2 raises before Prisma is called because Prisma validates a
+required field client-side, so matching v1 means hand-writing raw-SQL INSERTs *known to fail* — on
+`POST /api/user` and two other live paths — purely to consume a `nextval`. The cutover is a hard
+switch (§3 Phase 9 step 3), so no client can observe the divergence, and the Phase 5 criterion asks
+for identical **row sets**, which every measured cell has. Sequence-only diffs are now an expected
+diff; `manual-tester` must not re-file them.
+
+✅ **`D36` written up** from the BA note and operator **Q32**, changing no Phase 5 code. **Q33**'s
+consequence — `EXEMPTED` defined since 2018 and used **0 times in 338 rows**, so a genuinely excused
+member is displayed as owing the fund to every other member — is recorded in the **Phase 9
+post-migration backlog**. It is not a migration defect and must not be "fixed" in a parity phase.
+
+⚠️ **`npm run lint` was not clean at `a7c76a7`** — one prettier error in `test/user.e2e-spec.ts:2342`
+from the DELTA-F1 commit, while this block said lint ✅. Fixed in `47b58ae`. The gate line above was
+re-run, not carried over.
 
 🔴 **Operator decision on the record (2026-09-06):** **D38's v1 exposure is accepted until
 cutover.** See the risk record in §7 for the four things that should re-open it.
