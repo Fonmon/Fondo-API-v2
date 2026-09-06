@@ -1522,6 +1522,48 @@ describe('Phase 4 — /api/loan (port of test_loan_views.py)', () => {
     expect(newLoan.prev_loan_id).toBe(id);
   });
 
+  /**
+   * **D35 / P5-F1 on the loan routes.** `refinance_loan` builds the new comment with
+   * `'{}. {}'.format(comment, new_loan['comments'])` — a **format** context, not a column
+   * write, so `str()` applies here and `None` really does become the four characters `None`
+   * (measured: `'{}. {}'.format('c', None)` -> `'c. None'`). The *same* value then reaches
+   * `Loan.comments`, which is `TextField(null=True)`, through `create_loan`.
+   *
+   * The two halves are pinned together because they are exactly the pair the corrected
+   * helper has to keep apart: `pythonStr` for the format, `toDjangoText` for the column.
+   */
+  it('D35: `comments: null` on a refinance renders the four characters None, as `format` does', async () => {
+    const id = await postLoan(loanWithQuotaFee10);
+    await request(server()).patch(`/api/loan/${id}`).set(asAdmin()).send({ state: 1 }).expect(200);
+
+    const response = await request(server())
+      .post(`/api/loan/${id}/refinance`)
+      .set(asAdmin())
+      .send({ ...refinanceBody(false), comments: null })
+      .expect(200);
+
+    const newLoan = await loanRow((response.body as { id: number }).id);
+    expect(newLoan.comments).toBe(
+      `Refinanciación del crédito #${id}, cuyo valor no incluye intereses. None`,
+    );
+  });
+
+  it('P5-F1: a non-scalar `comments` on a refinance renders CPython’s repr', async () => {
+    const id = await postLoan(loanWithQuotaFee10);
+    await request(server()).patch(`/api/loan/${id}`).set(asAdmin()).send({ state: 1 }).expect(200);
+
+    const response = await request(server())
+      .post(`/api/loan/${id}/refinance`)
+      .set(asAdmin())
+      .send({ ...refinanceBody(false), comments: ['a', { b: 2 }] })
+      .expect(200);
+
+    const newLoan = await loanRow((response.body as { id: number }).id);
+    expect(newLoan.comments).toBe(
+      `Refinanciación del crédito #${id}, cuyo valor no incluye intereses. ['a', {'b': 2}]`,
+    );
+  });
+
   /** `test_refinance_loan_update_approved` */
   it('test_refinance_loan_update_approved: approving the refinance closes the old loan', async () => {
     const id = await postLoan(loanWithQuotaFee10);

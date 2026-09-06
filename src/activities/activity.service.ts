@@ -9,7 +9,7 @@ import {
   toDjangoDate,
   toDjangoInt,
   toDjangoSmallInt,
-  toDjangoTextOrNull,
+  toDjangoText,
 } from '../common/utils/python-obj';
 import {
   serializeActivityDetail,
@@ -210,7 +210,7 @@ export class ActivityService {
   async createActivity(data: unknown, idYear: number): Promise<void> {
     const body = asPythonDict(data);
     // Evaluated in v1's order so the first missing key is the one that raises.
-    const name = toDjangoTextOrNull(pyGet(body, 'name'));
+    const name = toDjangoText(pyGet(body, 'name'));
     const value = toDjangoInt(pyGet(body, 'value'), 'value');
     const date = toDjangoDate(pyGet(body, 'date'), 'date');
     if (name === null) {
@@ -368,7 +368,7 @@ export class ActivityService {
    */
   private async updateActivity(id: number, data: unknown): Promise<void> {
     const body = asPythonDict(data);
-    const name = toDjangoTextOrNull(pyGet(body, 'name'));
+    const name = toDjangoText(pyGet(body, 'name'));
     const date = toDjangoDate(pyGet(body, 'date'), 'date');
     const value = toDjangoInt(pyGet(body, 'value'), 'value');
     if (name === null) {

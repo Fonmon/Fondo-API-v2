@@ -53,8 +53,10 @@ import {
   toDjangoSmallInt,
   toDjangoText,
   PythonTypeError,
+  PythonValueError,
+  isPythonFalsy,
 } from '../common/utils/python-obj';
-import { isUniqueViolation } from '../common/utils/prisma-error';
+import { isIntegrityError } from '../common/utils/prisma-error';
 
 /** The two halves of `UserProfile(User)`, as every read here loads them. */
 const WITH_AUTH_USER = { auth_user: true } as const;
@@ -162,14 +164,41 @@ export class UserService {
     const lastName = toDjangoText(pyGet(obj, 'last_name'));
     const keyActivation = generateActivationKey();
 
+    // v1 passes `username = obj['email']` **raw** into `UserProfile.objects.create_user`, and
+    // `UserManager._create_user` opens with `if not username: raise ValueError('The given
+    // username must be set')`. That is not an `IntegrityError`, so it escapes the handler's
+    // `except IntegrityError:` as a **500** with nothing written.
+    //
+    // ⚠️ The test is Python truthiness on the **unconverted** body value, so `0`, `false` and
+    // `[]` take this path as surely as `null` and `''` do. Checking the coerced text instead
+    // would let `0` through as the string `'0'`.
+    if (isPythonFalsy(pyGet(obj, 'email'))) {
+      throw new PythonValueError('The given username must be set');
+    }
+
+    // D35 — reproducing the `NOT NULL` columns, and why this is a check rather than a write.
+    //
+    // v1 lets the null reach PostgreSQL and answers 409 from `except IntegrityError:`. v2
+    // cannot: Prisma validates a required field **in the client**, so the null never becomes a
+    // statement and surfaces as a `PrismaClientValidationError` — a 500, not the 409 v1 gives.
+    // Bypassing that would mean hand-writing the insert as raw SQL purely to let the database
+    // refuse it. So the constraint is reproduced here instead, deliberately and in one place.
+    // ⚠️ If `auth_user.first_name`/`last_name` ever become nullable, this must go with them.
+    if (firstName === null || lastName === null) {
+      throw ApiException.withMessage(HttpStatus.CONFLICT, 'Identification/email already exists');
+    }
+
     try {
       await this.prisma.$transaction(
         async (tx) => {
           const created = await tx.authUser.create({
             data: {
               password: this.passwords.unusablePassword(),
-              username: normalizeUsername(rawEmail),
-              email: normalizeEmail(rawEmail),
+              username: normalizeUsername(rawEmail as string),
+              email: normalizeEmail(rawEmail as string),
+              // D35: `null` is passed **through** to the column, exactly as v1 does — the
+              // `NOT NULL` constraint is the validator, and its violation is the 409 above.
+              // The cast is deliberate: Prisma's type models the column, not v1's behaviour.
               first_name: firstName,
               last_name: lastName,
               is_superuser: false,
@@ -230,7 +259,9 @@ export class UserService {
         // v1: `transaction.set_rollback(True); return (False, 'Invalid email')`.
         throw ApiException.withMessage(HttpStatus.CONFLICT, 'Invalid email');
       }
-      if (isUniqueViolation(error)) {
+      // D35: v1 catches the whole `IntegrityError` class here, not just `UNIQUE`. A null
+      // `first_name`/`last_name` reaches a `NOT NULL` column and lands on this same 409.
+      if (isIntegrityError(error)) {
         throw ApiException.withMessage(HttpStatus.CONFLICT, 'Identification/email already exists');
       }
       throw error;
@@ -626,6 +657,18 @@ export class UserService {
     const hasBirthdate = pyHas(obj, 'birthdate');
     const birthdate = hasBirthdate ? parseBirthdate(obj.birthdate) : null;
 
+    // D35 — the `NOT NULL` reproduction, as in `createUser` and for the same reason (Prisma
+    // validates a required field client-side, so the database never sees the null).
+    //
+    // ⚠️ `email` is included here and **not** in `createUser`'s 409 branch. `__update_user_personal`
+    // assigns `user.username = obj['email']` as a plain attribute, so a null reaches the column
+    // and is an `IntegrityError` → 409; `create_user` routes the same value through
+    // `_create_user`, which rejects it in Python first → **500**. One field, two statuses,
+    // decided by which Django API the value passes through.
+    if (firstName === null || lastName === null || email === null) {
+      throw ApiException.empty(HttpStatus.CONFLICT);
+    }
+
     try {
       await this.prisma.$transaction(async (tx) => {
         await tx.authUser.update({
@@ -661,7 +704,11 @@ export class UserService {
         }
       });
     } catch (error) {
-      if (isUniqueViolation(error)) {
+      // D35: v1 catches the whole `IntegrityError` class. Here `username`/`first_name` are
+      // plain attribute assignments rather than `_create_user`, so a null in any of them is a
+      // `NOT NULL` violation and lands on this same 409 — where the *create* path answers 500
+      // for a null email, because `_create_user` validates it in Python first.
+      if (isIntegrityError(error)) {
         // v1: `except IntegrityError: return (False, 409)`. Still reachable through
         // `identification`, which is UNIQUE; no longer reachable through `username` (D15).
         throw ApiException.empty(HttpStatus.CONFLICT);
@@ -705,7 +752,7 @@ export class UserService {
    * (`"user_ids"=>"[2, 4, 3, 13, …]"` on live rows). Do not sort it.
    */
   private async createBirthdateNotification(
-    user: { id: number; firstName: string; lastName: string; birthdate: PlainDate },
+    user: { id: number; firstName: string | null; lastName: string | null; birthdate: PlainDate },
     tx: Prisma.TransactionClient,
   ): Promise<void> {
     // ⚠️ Bogota, never the host zone (plan §4 rule 5, review C28). `datetime.now()` in v1 is
@@ -732,7 +779,11 @@ export class UserService {
       owner_id: user.id,
       user_ids: userIds,
       target: '/',
-      message: `Hoy está cumpliendo años ${user.firstName} ${user.lastName}`,
+      // ⚠️ D35: v1 builds this with `'{} {}'.format(user.first_name, user.last_name)`, and
+      // CPython renders a `None` as the four characters `None` — JS would render `null`. The
+      // member reaches this state through a null name that the column accepted, so the string
+      // is absurd either way; it must be absurd in v1's exact words.
+      message: `Hoy está cumpliendo años ${user.firstName ?? 'None'} ${user.lastName ?? 'None'}`,
     };
 
     await this.notifications.removeSchNotifications('birthdate', user.id, tx);
@@ -867,8 +918,9 @@ export class UserService {
         where: { id: stored.id },
         data: {
           notifications,
-          primary_color: toDjangoText(pyGet(obj, 'primary_color')),
-          secondary_color: toDjangoText(pyGet(obj, 'secondary_color')),
+          // D35: null reaches the column, as in v1; the `NOT NULL` constraint decides.
+          primary_color: toDjangoText(pyGet(obj, 'primary_color')) as string,
+          secondary_color: toDjangoText(pyGet(obj, 'secondary_color')) as string,
         },
       });
     } catch (error) {
@@ -924,7 +976,23 @@ export class UserService {
    */
   async activateUser(id: number, body: unknown): Promise<void> {
     const obj = asPythonDict(body);
-    if (!pyHas(obj, 'key') || obj.key === '') {
+    // ⚠️ **D38 — v2 refuses a null `key`; v1 accepts it, and that is an account takeover.**
+    //
+    // v1's guard is `if 'key' not in obj or obj['key'] == '':`. In CPython `None == ''` is
+    // `False`, so a JSON `null` passes it. The lookup then runs `key_activation = None`, which
+    // Django compiles to `key_activation IS NULL` — and `key_activation` is NULL on every
+    // **already-activated** member. Measured against the live fixture: the filter matches
+    // **15 of 15** accounts, the single ADMIN included.
+    //
+    // `UserActivateView` sets `permission_classes = []`, so the route is unauthenticated. The
+    // only other input is `identification`, which `GET /api/user` returns to any member and
+    // which the power-of-attorney letter prints for all 15 (D5). So an unauthenticated
+    // `POST /api/user/activate/<id>` with `{"key": null, "identification": <cédula>,
+    // "password": "…"}` calls `set_password` on a live account and hands over the login.
+    //
+    // Fixed, not ported. There is no legitimate caller: a real activation link always carries
+    // a non-empty key, and a member whose key is NULL is already activated.
+    if (!pyHas(obj, 'key') || obj.key === '' || obj.key === null) {
       throw ApiException.empty(HttpStatus.NOT_FOUND);
     }
 
@@ -952,7 +1020,7 @@ export class UserService {
     const password =
       rawPassword === null || rawPassword === undefined
         ? this.passwords.unusablePassword()
-        : await this.passwords.hash(toDjangoText(rawPassword));
+        : await this.passwords.hash(toDjangoText(rawPassword) as string);
 
     await this.prisma.$transaction([
       this.prisma.authUser.update({

@@ -2242,4 +2242,249 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
       expect(sendMail).not.toHaveBeenCalled();
     });
   });
+
+  // ==========================================================================
+  // D35 + P5-F1 — `null` and non-scalar values on every `CharField`/`TextField` site
+  //
+  // v1's `TextField.get_prep_value` is `to_python`, measured on the pinned stack:
+  //
+  //   TextField().get_prep_value(None)      -> None        (SQL NULL, not 'None')
+  //   TextField().get_prep_value(['a'])     -> "['a']"     (CPython repr, not a type name)
+  //   TextField().get_prep_value({'a': 1})  -> "{'a': 1}"
+  //
+  // Every cell below states which v1 line decides the status, because the four sites answer
+  // a `null` **differently**: `create_user` 409 (its `except IntegrityError`), the email half
+  // 500 (`UserManager._create_user`'s `ValueError`, raised before any SQL),
+  // `__update_user_personal` 409, `__update_user_preferences` 404 (its bare `except`).
+  // ==========================================================================
+  describe('D35 — a JSON `null` on a NOT NULL text column', () => {
+    /**
+     * `first_name = None` reaches `auth_user.first_name`, which is `NOT NULL`; PostgreSQL
+     * raises `23502`, Django wraps it as `IntegrityError`, and `create_user`'s
+     * `except IntegrityError` answers the (misleading) 409 it answers for a duplicate.
+     */
+    it.each([['first_name'], ['last_name']])(
+      'POST /api/user with `%s: null` is 409, not a member named None',
+      async (field) => {
+        const response = await request(app.getHttpServer())
+          .post('/api/user')
+          .set(asAdmin())
+          .send({ ...objectJson, [field]: null })
+          .expect(409);
+
+        expect(response.body).toEqual({ message: 'Identification/email already exists' });
+        await expect(countUsers()).resolves.toBe(11);
+        await expect(countFinance()).resolves.toBe(11);
+        await expect(prisma.userPreference.count()).resolves.toBe(11);
+        // The mail send is the last statement inside v1's atomic block, so a row that never
+        // reached the database never reached SES either.
+        expect(sendMail).not.toHaveBeenCalled();
+      },
+    );
+
+    /**
+     * ⚠️ **`email` is not the 409 the D35 register row predicted — it is a 500.** v1 passes
+     * `obj['email']` to `UserProfile.objects.create_user(...)` as *both* `email` and
+     * `username`, and `UserManager._create_user` opens with
+     * `if not username: raise ValueError('The given username must be set')` — **before** any
+     * SQL. Measured in the container: `email=None` and `email=''` both raise it. So a falsy
+     * email is an uncaught `ValueError` (a bare 500), not `IntegrityError`.
+     */
+    it.each([[null], [''], [0], [false]])(
+      'POST /api/user with a falsy `email` (%p) is 500 — `_create_user`’s ValueError',
+      async (email) => {
+        await request(app.getHttpServer())
+          .post('/api/user')
+          .set(asAdmin())
+          .send({ ...objectJson, email })
+          .expect(500);
+
+        await expect(countUsers()).resolves.toBe(11);
+        await expect(prisma.authUser.count()).resolves.toBe(11);
+        expect(sendMail).not.toHaveBeenCalled();
+      },
+    );
+
+    /** The positive control: the same body with every field present still creates. */
+    it('POST /api/user with the unmodified fixture still creates (positive control)', async () => {
+      await request(app.getHttpServer())
+        .post('/api/user')
+        .set(asAdmin())
+        .send(objectJson)
+        .expect(201);
+      await expect(countUsers()).resolves.toBe(12);
+    });
+
+    /** `__update_user_personal`: `except IntegrityError: return (False, 409)`. */
+    it.each([['first_name'], ['last_name'], ['email']])(
+      'PATCH /api/user/<id> personal with `%s: null` is 409 and writes nothing',
+      async (field) => {
+        const personal = { ...(userUpdate().personal as Record<string, unknown>), [field]: null };
+        await request(app.getHttpServer())
+          .patch(`/api/user/${admin.id}`)
+          .set(asAdmin())
+          .send({ ...userUpdate(), type: 'personal', personal })
+          .expect(409);
+
+        const row = await prisma.userProfile.findUniqueOrThrow({
+          where: { user_ptr_id: admin.id },
+          include: { auth_user: true },
+        });
+        expect(row.auth_user.first_name).toBe('Foo Name');
+        expect(row.auth_user.last_name).toBe('Foo Last Name');
+        expect(row.auth_user.email).toBe('mail_for_tests@mail.com');
+      },
+    );
+
+    /** `__update_user_preferences` wraps everything in a **bare** `except` → 404. */
+    it.each([['primary_color'], ['secondary_color']])(
+      'PATCH /api/user/<id> preferences with `%s: null` is 404 and writes nothing',
+      async (field) => {
+        await request(app.getHttpServer())
+          .patch(`/api/user/${admin.id}`)
+          .set(asAdmin())
+          .send({
+            type: 'preferences',
+            preferences: {
+              notifications: true,
+              primary_color: '#fff',
+              secondary_color: '#000',
+              [field]: null,
+            },
+          })
+          .expect(404);
+
+        const preference = await prisma.userPreference.findFirstOrThrow({
+          where: { user_id: admin.id },
+        });
+        expect(preference.primary_color).toBe('#800000');
+        expect(preference.secondary_color).toBe('#c83737');
+        expect(preference.notifications).toBe(false);
+      },
+    );
+  });
+
+  describe('P5-F1 — a non-scalar value is stored as CPython’s repr', () => {
+    it('POST /api/user with `first_name: ["a"]` stores the four characters [\'a\']', async () => {
+      await request(app.getHttpServer())
+        .post('/api/user')
+        .set(asAdmin())
+        .send({ ...objectJson, first_name: ['a'], last_name: { a: 1 } })
+        .expect(201);
+
+      const created = await prisma.userProfile.findFirstOrThrow({
+        where: { identification: 123n },
+        include: { auth_user: true },
+      });
+      expect(created.auth_user.first_name).toBe("['a']");
+      expect(created.auth_user.last_name).toBe("{'a': 1}");
+      // …and it reaches the activation email through `'{} {}'.format(first, last)`.
+      expect(sendMail).toHaveBeenCalledWith(
+        EmailTemplate.USER_ACTIVATION,
+        ['mail@mail.com'],
+        expect.objectContaining({ user_full_name: "['a'] {'a': 1}" }),
+      );
+    });
+
+    it('PATCH /api/user/<id> personal with `first_name: ["a"]` stores the repr', async () => {
+      const personal = {
+        ...(userUpdate().personal as Record<string, unknown>),
+        first_name: ['a'],
+        last_name: { a: [1, { b: 2 }] },
+      };
+      await request(app.getHttpServer())
+        .patch(`/api/user/${admin.id}`)
+        .set(asAdmin())
+        .send({ ...userUpdate(), type: 'personal', personal })
+        .expect(200);
+
+      const row = await prisma.userProfile.findUniqueOrThrow({
+        where: { user_ptr_id: admin.id },
+        include: { auth_user: true },
+      });
+      expect(row.auth_user.first_name).toBe("['a']");
+      expect(row.auth_user.last_name).toBe("{'a': [1, {'b': 2}]}");
+    });
+
+    it('PATCH /api/user/<id> preferences with a non-scalar colour stores the repr', async () => {
+      await request(app.getHttpServer())
+        .patch(`/api/user/${admin.id}`)
+        .set(asAdmin())
+        .send({
+          type: 'preferences',
+          preferences: { notifications: true, primary_color: ['a'], secondary_color: { a: 1 } },
+        })
+        .expect(200);
+
+      const preference = await prisma.userPreference.findFirstOrThrow({
+        where: { user_id: admin.id },
+      });
+      expect(preference.primary_color).toBe("['a']");
+      expect(preference.secondary_color).toBe("{'a': 1}");
+    });
+  });
+
+  /**
+   * **D38 — the one D35 site v2 deliberately does not follow v1 to.**
+   *
+   * `activate_user` filters on `key_activation = obj['key']`. Django turns a `None` rhs into
+   * `IS NULL` (measured — `str(qs.query)` ends `"key_activation" IS NULL`), and
+   * `key_activation` is `NULL` on **every already-activated member**. So in v1 an
+   * unauthenticated `POST /api/user/activate/<id>` with `{"key": null, "identification": …,
+   * "password": "…"}` matches a live account, calls `set_password`, and hands the caller that
+   * member's login. `identification` is readable by any member through `GET /api/user`.
+   *
+   * v2 refuses. Registered as a fix, not ported.
+   */
+  describe('D38 — `key: null` never matches an activated member', () => {
+    it('is 404 against an already-activated member and leaves the password alone', async () => {
+      const { id, key } = await createAndFetch();
+      await request(app.getHttpServer())
+        .post(`/api/user/activate/${id}`)
+        .send({ password: 'newPassword123', identification: 123, key })
+        .expect(200);
+
+      const activated = await prisma.userProfile.findUniqueOrThrow({
+        where: { user_ptr_id: id },
+        include: { auth_user: true },
+      });
+      expect(activated.key_activation).toBeNull();
+
+      await request(app.getHttpServer())
+        .post(`/api/user/activate/${id}`)
+        .send({ password: 'attackerPassword', identification: 123, key: null })
+        .expect(404);
+
+      const after = await prisma.userProfile.findUniqueOrThrow({
+        where: { user_ptr_id: id },
+        include: { auth_user: true },
+      });
+      expect(after.auth_user.password).toBe(activated.auth_user.password);
+
+      // The original password still works and the attacker's does not.
+      await request(app.getHttpServer())
+        .post('/api-token-auth')
+        .send({ username: 'mail@mail.com', password: 'newPassword123' })
+        .expect(200);
+      await request(app.getHttpServer())
+        .post('/api-token-auth')
+        .send({ username: 'mail@mail.com', password: 'attackerPassword' })
+        .expect(400);
+    });
+
+    it('is 404 against a pending member too — v1 agrees here (positive control)', async () => {
+      const { id } = await createAndFetch();
+      await request(app.getHttpServer())
+        .post(`/api/user/activate/${id}`)
+        .send({ password: 'newPassword123', identification: 123, key: null })
+        .expect(404);
+
+      const row = await prisma.userProfile.findUniqueOrThrow({
+        where: { user_ptr_id: id },
+        include: { auth_user: true },
+      });
+      expect(row.key_activation).not.toBeNull();
+      expect(row.auth_user.is_active).toBe(false);
+    });
+  });
 });

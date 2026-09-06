@@ -1,3 +1,4 @@
+import { pythonStr } from '../common/utils/python-str';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { assertOwnership } from '../auth/policies/ownership';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user';
@@ -741,7 +742,10 @@ export class LoanService {
       {
         ...newLoan,
         value,
-        comments: `${comment}. ${toDjangoText(pyGet(newLoan, 'comments'))}`,
+        // ⚠️ D35: v1 builds this with `'{}. {}'.format(comment, obj['comments'])`, so a null
+        // renders as the four characters `None` — `toDjangoText` returns SQL NULL here and
+        // `${null}` would write `null`. Interpolation wants `str()`, not the column coercion.
+        comments: `${comment}. ${pythonStr(pyGet(newLoan, 'comments'))}`,
         payment: PAYMENT_REFINANCED,
         disbursement_value: null,
       },

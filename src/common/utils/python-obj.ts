@@ -1,4 +1,5 @@
 import { daysInMonth, type PlainDate } from './date.util';
+import { pythonStr } from './python-str';
 
 /**
  * The CPython behaviours v1's services rely on when they read a parsed request body,
@@ -45,13 +46,56 @@ export class PythonTypeError extends Error {
 }
 
 /**
+ * `ValueError` — raised by Django's `UserManager._create_user` on a falsy `username`
+ * (`if not username: raise ValueError('The given username must be set')`).
+ *
+ * ⚠️ It is **not** an `IntegrityError`, so it escapes `create_user`'s `except IntegrityError:`
+ * and surfaces as a **500** with nothing written — unlike a `NOT NULL` violation on
+ * `first_name`, which that same handler answers **409** (deviation **D35**). Same body shape,
+ * two different failures, because `username = obj['email']` is validated in Python while the
+ * name fields are validated by the column.
+ */
+/**
+ * CPython's `bool(value)` for a parsed-JSON value — what `if not x:` actually tests.
+ *
+ * Falsy: `None`, `False`, `0`, `0.0`, `''`, `[]`, `{}`. Everything else is truthy, including
+ * `'0'` and `'False'`. v1 applies this to **raw body values**, so a coerced-to-text check is
+ * not the same test — `str(0)` is `'0'`, which is truthy.
+ */
+export function isPythonFalsy(value: unknown): boolean {
+  if (value === null || value === undefined || value === false || value === '') {
+    return true;
+  }
+  if (typeof value === 'number') {
+    return value === 0;
+  }
+  if (typeof value === 'bigint') {
+    return value === 0n;
+  }
+  if (Array.isArray(value)) {
+    return value.length === 0;
+  }
+  if (typeof value === 'object') {
+    return Object.keys(value).length === 0;
+  }
+  return false;
+}
+
+export class PythonValueError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PythonValueError';
+  }
+}
+
+/**
  * Narrows a parsed body to a mapping. A JSON array or scalar reaches v1 as a `list`/`int`
  * and `obj['type']` then raises `TypeError`, not `KeyError`.
  */
 export function asPythonDict(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new PythonTypeError(
-      `string indices must be integers: request body is ${describeType(value)}`,
+      `string indices must be integers: request body is ${describeTypeForErrorMessage(value)}`,
     );
   }
   return value as Record<string, unknown>;
@@ -106,7 +150,7 @@ export function toDjangoInt(value: unknown, field: string): bigint {
     return value ? 1n : 0n;
   }
   throw new PythonTypeError(
-    `TypeError: int() argument must be a string or a number, not '${describeType(value)}' (${field})`,
+    `TypeError: int() argument must be a string or a number, not '${describeTypeForErrorMessage(value)}' (${field})`,
   );
 }
 
@@ -141,43 +185,7 @@ export function toDjangoBool(value: unknown, field: string): boolean {
 }
 
 /**
- * Django's `CharField` / `TextField` `get_prep_value` → `to_python(value)` → `str(value)`,
- * **with `None` folded to the four characters `None`**.
- *
- * ⚠️ **The `None` fold is not Django.** Measured on the pinned stack in the v1 container:
- *
- * ```
- * >>> TextField().get_prep_value(None)   -> None
- * >>> CharField().get_prep_value(None)   -> None
- * >>> TextField().get_prep_value(5)      -> '5'
- * >>> TextField().get_prep_value(True)   -> 'True'
- * ```
- *
- * because both fields share
- * `to_python: if isinstance(value, str) or value is None: return value; return str(value)`.
- * So in v1 a JSON `null` reaches the column as SQL `NULL` and a `NOT NULL` column raises
- * `IntegrityError` — it never stores the string. {@link toDjangoTextOrNull} is that
- * behaviour; this function is kept for the Phase 3/4 call sites that were written against
- * the fold, and correcting them is a separate, cross-phase change (see
- * `docs/phase-5-deviations.md` §3, finding **P5-F1**).
- *
- * New call sites should use {@link toDjangoTextOrNull}.
- */
-export function toDjangoText(value: unknown): string {
-  if (typeof value === 'string') {
-    return value;
-  }
-  if (value === null || value === undefined) {
-    return 'None';
-  }
-  if (typeof value === 'boolean') {
-    return value ? 'True' : 'False';
-  }
-  return describeValue(value);
-}
-
-/**
- * Django's `CharField` / `TextField` `get_prep_value`, **verbatim** — `None` stays `None`.
+ * Django's `CharField` / `TextField` `get_prep_value`, **verbatim**.
  *
  * ```python
  * def to_python(self, value):
@@ -186,18 +194,41 @@ export function toDjangoText(value: unknown): string {
  *     return str(value)
  * ```
  *
- * The `null` return is not a convenience: on a `NOT NULL` column it is what makes v1 raise
- * `IntegrityError`, and the two v1 call sites in Phase 5 answer that failure *differently* —
- * `create_activity` lets it escape (**500**), `__update_activity` sits inside
- * `patch_activity`'s bare `except:` (**404**). Folding it to `'None'` would turn both into a
- * successful write of a four-character name. See {@link toDjangoText} for the Phase 3/4
- * variant that does fold, and why.
+ * Measured on the pinned stack (CPython 3.9.25 / Django 2.2.27) and captured as a fixture in
+ * `python-str.fixture.ts`:
+ *
+ * ```
+ * >>> TextField().get_prep_value(None)      -> None          # SQL NULL
+ * >>> TextField().get_prep_value(['a'])     -> "['a']"       # CPython repr
+ * >>> TextField().get_prep_value({'a': 1})  -> "{'a': 1}"
+ * >>> TextField().get_prep_value(True)      -> 'True'
+ * >>> TextField().get_prep_value(5)         -> '5'
+ * ```
+ *
+ * ⚠️ **The `string | null` return type is the point, not an inconvenience.** Two parity
+ * findings came out of the previous shape:
+ *
+ *  * **D35** — `None` was folded to the four characters `'None'`, so a `NOT NULL` column
+ *    accepted a row v1's database refuses. Which HTTP status that refusal becomes is decided
+ *    at the **call site**, and the four v1 sites differ: `create_user`'s
+ *    `except IntegrityError` answers **409**, `__update_user_personal`'s answers **409**,
+ *    `__update_user_preferences`'s bare `except` answers **404**, and `create_activity` lets
+ *    it escape as a **500**. A helper cannot choose; a `null` return forces each caller to.
+ *  * **P5-F1** — a container was rendered by an *error-message* helper as its type name.
+ *    {@link pythonStr} is the storage renderer and `describeTypeForErrorMessage` below is the
+ *    error one; they are no longer the same function.
+ *
+ * For a **format** context — `'{}. {}'.format(...)` in `refinance_loan`, `force_bytes` inside
+ * `set_password` — call {@link pythonStr} directly. `None` really is `'None'` there.
  */
-export function toDjangoTextOrNull(value: unknown): string | null {
+export function toDjangoText(value: unknown): string | null {
+  if (typeof value === 'string') {
+    return value;
+  }
   if (value === null || value === undefined) {
     return null;
   }
-  return toDjangoText(value);
+  return pythonStr(value);
 }
 
 /**
@@ -234,7 +265,7 @@ export function toDjangoTextOrNull(value: unknown): string | null {
 export function toDjangoDate(value: unknown, field: string): PlainDate {
   if (typeof value !== 'string') {
     throw new PythonTypeError(
-      `TypeError: expected string or bytes-like object (${field}), got '${describeType(value)}'`,
+      `TypeError: expected string or bytes-like object (${field}), got '${describeTypeForErrorMessage(value)}'`,
     );
   }
   // `re.match` + Python's `$`, which also matches immediately before one trailing '\n'.
@@ -363,15 +394,19 @@ function pythonTypeName(value: unknown): string {
   return 'float';
 }
 
-/** A safe `str()`-ish rendering for an error message; never `[object Object]`. */
-function describeValue(value: unknown): string {
-  if (typeof value === 'object' && value !== null) {
-    return describeType(value);
-  }
-  return String(value);
-}
-
-function describeType(value: unknown): string {
+/**
+ * A type name for the text of an exception that v1 renders as a **bare 500 with no body**.
+ *
+ * ⚠️ **Never a stored value and never a response field.** Its predecessor, `describeValue`,
+ * was reached by `toDjangoText` and put `'list'` / `'object'` into `fondo_api_activity.name`
+ * where Django stores `['a']` (parity finding **P5-F1**). The name says so now, it is not
+ * exported, and the only callers are template literals inside `throw`.
+ *
+ * It is also not CPython's `type(x).__name__` — that says `dict`, not `object`. Correcting it
+ * would change no observable byte, because every message it appears in is discarded by the
+ * 500 renderer; {@link pythonRepr} is the function to reach for when a value must survive.
+ */
+function describeTypeForErrorMessage(value: unknown): string {
   if (value === null) {
     return 'NoneType';
   }

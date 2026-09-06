@@ -955,6 +955,59 @@ describe('Phase 5 — /api/activity (port of test_activity_views.py)', () => {
         .expect(200);
     });
 
+    /**
+     * **P5-F1.** `name` is assigned through `TextField.get_prep_value`, which is `str()` for a
+     * non-string — CPython's **repr** for a container, measured on the pinned stack:
+     * `['a']` -> `"['a']"`, `{'a': 1}` -> `"{'a': 1}"`. On the create path it is only visible
+     * in the row; on the patch path `patch_activity` answers with a fresh `get_activity(id)`,
+     * so the stored string goes straight back on the wire.
+     */
+    it.each<[unknown, string]>([
+      [['a'], "['a']"],
+      [[1, 2], '[1, 2]'],
+      [[], '[]'],
+      [{ a: 1 }, "{'a': 1}"],
+      [{}, '{}'],
+      [{ a: [1, { b: 2 }] }, "{'a': [1, {'b': 2}]}"],
+      [5, '5'],
+      [5.5, '5.5'],
+      [true, 'True'],
+      ['x', 'x'],
+    ])('P5-F1: POST /api/activity/year/<id> with name %p stores %p', async (name, expected) => {
+      const year = await seedActivityYear(prisma, { year: 2020 });
+      await request(server())
+        .post(`/api/activity/year/${String(year.id)}`)
+        .set(asAdmin())
+        .send({ ...activityJson, name })
+        .expect(201);
+
+      const row = await prisma.activity.findFirstOrThrow({ where: { year_id: year.id } });
+      expect(row.name).toBe(expected);
+    });
+
+    it.each<[unknown, string]>([
+      [['a'], "['a']"],
+      [{ a: 1 }, "{'a': 1}"],
+      [{ a: [1, { b: 2 }] }, "{'a': [1, {'b': 2}]}"],
+      ['x', 'x'],
+    ])(
+      'P5-F1: PATCH /api/activity/<id> with name %p answers %p in the 200 body',
+      async (name, expected) => {
+        const year = await seedActivityYear(prisma, { year: 2020 });
+        const activityId = await createActivity(year.id);
+
+        const response = await request(server())
+          .patch(`/api/activity/${String(activityId)}`)
+          .set(asAdmin())
+          .send({ ...activityJson, name })
+          .expect(200);
+        expect((response.body as { name: string }).name).toBe(expected);
+
+        const row = await prisma.activity.findUniqueOrThrow({ where: { id: activityId } });
+        expect(row.name).toBe(expected);
+      },
+    );
+
     /** `?patch=` present but empty is `''`, which is neither value — a 400. */
     it('PATCH ?patch= (empty) is a 400', async () => {
       await request(server()).patch('/api/activity/1?patch=').set(asAdmin()).expect(400);
