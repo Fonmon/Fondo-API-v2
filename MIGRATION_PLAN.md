@@ -1237,10 +1237,54 @@ already in v2 and needs nothing further at cutover.
 
 ### False-green findings — a standing hazard, not a one-off
 
-**Seventeen** instances found so far. Three are mine, all of the same mechanism (a scripted edit
-that silently no-ops); one — #17 — is a test written to catch a timezone bug that was itself
-defeated by a timezone bug. A test that passes for the wrong reason
-is worse than a missing one, because it is counted as coverage.
+**Twenty-two** instances so far. A test that passes for the wrong reason is worse than a missing
+one, because it is counted as coverage — and #17 is the sharpest illustration: a test written to
+catch a timezone bug, defeated by a timezone bug.
+
+#### The rule (condition C67)
+
+> ### A check that can only report "nothing found" is not a check.
+>
+> Before trusting any check, ask: **what result would this produce if the thing it looks for were
+> present?** If the answer is "the same one", it is not evidence — it is silence wearing the
+> costume of a pass.
+
+**Why this rule and not five more patches.** Eight of the twenty-two are mine, and by the Phase 5
+review the pattern was unmistakable: each instance got a correct, specific countermeasure, and the
+*class* kept producing instances. They were getting cheaper, not rarer. These four are one defect:
+
+| # | The check | Why it could only say "nothing found" |
+|---|---|---|
+| 19 | `grep -F "…"` for a sentence | the sentence wrapped, so it matched nothing whether or not it was there |
+| 20 | audit fifteen conditions by matching strings | a token can be present while the behaviour is absent — `orderBy` was computed and then discarded |
+| 21 | `npm run lint \| tail -1` | a clean run and a broken pipe print the same nothing |
+| 22 | "fixture at baseline" from row counts | counts matched while sequences were off by four and `xmin` cardinality had doubled |
+
+**What the rule requires, concretely.** Each of these is the general rule instantiated, and each
+is cheap:
+
+* **Assert exit codes, never absence of output.** `cmd >/dev/null 2>&1 && echo PASS || echo FAIL`.
+* **Search on a fragment that cannot wrap, or normalise whitespace first.** A multi-line anchor
+  is not searchable with a single-line matcher.
+* **An audit that clears something must exercise it or read the whole function.** Presence of a
+  token is not presence of a behaviour.
+* **A baseline is counts *and* sequences *and* `xmin` cardinality.** And an agent that reports
+  doing nothing may still have written — #22's residue came from a run that died mid-round.
+* **Every matrix needs a positive control** — a cell known to differ, proving the probe can see a
+  difference at all. #4 was 72/72 agreement where every cell was a 401; #12 was 208 cells
+  uniformly 500 on both sides.
+* **A control that does not compile is not a control.** Check the **test count**, not the pass
+  line: two attempts in Phase 5 reported `Tests: 0 total` and one ran 349 of 1001.
+* **Verify from the tree the claim is about.** `git branch --contains` — #18 was a doc fix
+  verified correctly on a branch the work had already left.
+* **A verifier that fails *after* the write, in a chain that keeps going, is barely a verifier.**
+  v4.1 shipped a board row saying IN PROGRESS on a closed phase for exactly that reason.
+
+**The honest limit of this rule.** It does not make the class extinct; it makes each instance
+detectable at the moment it is created rather than two gates later. The register stays open, and
+the count going up is a sign the discipline is working, not failing — every instance in it was
+found by someone, and the ones found by `nestjs-developer`, `manual-tester` and `nestjs-reviewer`
+checking *my* claims rather than believing them are the reason the number is honest.
 
 | # | Instance | Why it passed |
 |---|---|---|
