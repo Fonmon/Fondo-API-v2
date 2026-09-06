@@ -1328,8 +1328,35 @@ set, as defence in depth rather than as the primary control.
 
 **Phase status board**
 
-Updated 2026-09-04, plan rev v3.6. Ordered by execution sequence, not by number — 7a was pulled
-forward into Phase 3 (condition C24) and 7b waits on Phase 4.
+Updated **2026-09-06**, plan rev **v3.7**. Ordered by execution sequence, not by number — 7a was
+pulled forward into Phase 3 (condition C24) and 7b waited on Phase 4.
+
+> **Read this first for status.** The **Now** block below is the single place that says what is
+> happening at this moment. The table under it is the whole migration; the Conditions column is
+> the honest ledger of what each closed phase still owes.
+
+### ▶ Now — Phase 5 (Activities), in the parity loop
+
+| | |
+|---|---|
+| **Branch / head** | `feat/phase-5-activities` @ `9ad76f0` |
+| **Gate, last measured by the coordinator** | lint ✅ · `tsc` ✅ · **1977 unit / 60 suites** · **990 e2e + 1 skipped / 18 suites** · `fondodev` at baseline |
+| **Pipeline** | dev ✅ → tester ✅ **FAIL r1** → dev ✅ *(fixes landed)* → **tester 🔨 delta round running** → reviewer ⬜ |
+| **Blocking the phase** | nothing from the operator — the loop just has to finish |
+
+**Landed since the tester's first round** (this is what the delta round is checking):
+**D35** — text coercion made faithful to Django (three distinct behaviours, worked per call site);
+**D38** — the null activation key refused; **P5-F1** — storage no longer renders error-message type
+names. ⚠️ These touch **Phase 3 and 4 routes**, not only Phase 5, so the delta sweeps user
+creation and refinance too.
+
+**Still open, carried into the next dispatch** — **P5-F2** (a sequence value burned after a 500;
+my recommendation is register-not-match, the reviewer rules) and **N1** (`CONNECT` makes v2 send
+**no response at all**, on every route — llhttp rejects before Express). Neither is fixed.
+
+🔴 **Operator decision on the record (2026-09-06):** **D38's v1 exposure is accepted until
+cutover.** See the risk record in §7 for the four things that should re-open it.
+
 
 | Phase | Status | Dev | Tester | Reviewer | Analyst | Conditions |
 |---|---|---|---|---|---|---|
@@ -1340,7 +1367,7 @@ forward into Phase 3 (condition C24) and 7b waits on Phase 4.
 | 3 Users + finance | ✅ **CLOSED — approved w/ conditions** (`e926e14`) | ✅ | ✅ PASS r4 | ✅ **Approved** (C28–C39) | ✅ Aligned | **all ✅ closed** — C31–C35, C37, C39 closed in the C58 audit (`035a23a`) |
 | 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ | pulled forward by **C24** |
 | 4 Loans | ✅ **CLOSED — approved w/ conditions, both rounds** (`806ca6e`) | ✅ | ✅ PASS + ✅ **delta PASS** (`17114a0`) | ✅ **Approved** (C40–C49) + ✅ **delta approved** (C50–C58) | ✅ C29/C30/C42 | C40–C43, C50, C51 ✅; **C44–C49, C52–C58 🟡 open → P5 gate** |
-| 5 Activities | 🟡 **NEXT** — no blockers | — | — | — | — | **C58 ✅ discharged**; C44–C49, C52–C57 🟡 → P5 gate |
+| 5 Activities | 🔨 **IN PROGRESS** — implemented; parity FAIL r1 fixed, delta round running | ✅ | 🔨 delta r2 | ⬜ | ✅ Q32/Q33 | **C58 ✅ discharged**; C44–C49, C52–C57 🟡 → P5 gate; **D36** to write up |
 | 6 Saving accounts (CAPs) | ⬜ **Ready** — Q19–Q24 all answered; **D12** is a new build, not a port | — | — | — | — | — |
 | 7b Scheduler *runner* | ⬜ **Ready** — P4 closed, so no longer blocked | — | — | — | — | — |
 | 8 Files + admin | ⬜ **Ready** — P2 closed; inherits rules 12b/12c | — | — | — | — | — |
