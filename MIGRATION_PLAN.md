@@ -1390,7 +1390,7 @@ state. Faithful to v1, so no parity cell could have failed — which is exactly 
 | 3 Users + finance | ✅ **CLOSED — approved w/ conditions** (`e926e14`) | ✅ | ✅ PASS r4 | ✅ **Approved** (C28–C39) | ✅ Aligned | **all ✅ closed** — C31–C35, C37, C39 closed in the C58 audit (`035a23a`) |
 | 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ | pulled forward by **C24** |
 | 4 Loans | ✅ **CLOSED — approved w/ conditions, both rounds** (`806ca6e`) | ✅ | ✅ PASS + ✅ **delta PASS** (`17114a0`) | ✅ **Approved** (C40–C49) + ✅ **delta approved** (C50–C58) | ✅ C29/C30/C42 | C40–C43, C50, C51 ✅; **C44–C49, C52–C58 🟡 open → P5 gate** |
-| 5 Activities | 🔨 **IN PROGRESS** — implemented; r1 + delta r2 findings all closed or registered | ✅ | 🔨 delta r3 | ⬜ | ✅ Q32/Q33 | **C58 ✅ discharged**; C44–C49, C52–C57 🟡 → P5 gate; **D36 ✅ written up**, **D37 ✅ registered**, **N1 ✅ fixed** |
+| 5 Activities | ✅ **CLOSED — approved w/ conditions** (`d89f801`) | ✅ | ✅ **PASS r3** (three rounds) | ✅ **Approved** (C59–C67) | ✅ Q32/Q33 | **C59, C60, C62, C67 🔴 gate P6's start**; C61, C63–C66 🟡 → P6 gate |
 | 6 Saving accounts (CAPs) | 🟡 **NEXT** — Q19–Q24 answered; **D12** is a new build, not a port | — | — | — | — | opens under **C59/C60/C62/C67** |
 | 7b Scheduler *runner* | ⬜ **Ready** — P4 closed, so no longer blocked | — | — | — | — | — |
 | 8 Files + admin | ⬜ **Ready** — P2 closed; inherits rules 12b/12c | — | — | — | — | — |
