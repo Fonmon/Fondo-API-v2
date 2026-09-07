@@ -526,10 +526,38 @@ belongs in Phase 9's cutover runbook between "deploy v2" and "enable the schedul
 
 ### 7.4 Phase 6's D12 inherits a constraint from §4's P7-D2
 
-D12's CAP auto-close introduces a **second** `SchedulerTask.type`. Two things follow, and both
-are cheap now and expensive later: the new type must be added to `ExecuterFactory`, and any
-rolling deploy must not let an old replica see the new type — which the resolve-before-claim
-ordering already handles, but only because it is ordered that way on purpose.
+D12's CAP auto-close introduces a **second** `SchedulerTask.type`. Four things follow, and all
+four are cheap now and expensive later.
+
+1. The new type must be added to `ExecuterFactory`.
+2. Any rolling deploy must not let an old replica see the new type — which the
+   resolve-before-claim ordering already handles, but only because it is ordered that way on
+   purpose.
+3. **`ok: false` is the wrong channel for a failed close; D12's executer must `throw`.** The
+   runner gives an executer two ways to report trouble and they are not interchangeable: a
+   `throw` releases the claim, leaves the row unprocessed and gets retried on the next
+   10:00/14:00 pass; a `false` outcome marks the row `processed`, logs one `WARN` and is
+   **never retried**. §3's decision to prefer the second came from **Q6** and is about a *lost
+   push* — losing one message beats breaking the `repeat` chain — and that trade does not
+   transfer. "Task processed, CAP still open, one WARN in the log" is a financial-state
+   divergence no later pass repairs. A lost push is recoverable next month; an unclosed CAP is
+   not. Written into `SchedulerExecuterOutcome`'s docblock, because that is what a Phase 6
+   developer actually reads.
+4. **D12 must be idempotent and independently reconcilable**, because §4's **P7-D2** ordering
+   loses executer work silently. `resolve → claim → run → clone` means a process that dies
+   between the claim and the side effect leaves the row `processed` with the work never done —
+   no throw, no `ok: false`, no log line (and, until **C73** is settled, not even an
+   attempt line). For
+   a notification that is one missed push; for D12 it is a CAP that stays open with its task
+   marked done. So the close must not rest on "the task row is processed" as evidence: derive
+   the closed state from `end_date` at read time, or provide a reconciliation query that finds
+   CAPs past `end_date` still open. Re-running the close over an already-closed CAP must be a
+   no-op.
+
+Two operator questions are open on D12 and are **not** answered here — what happens to a CAP
+whose `end_date` is already past on the day the feature ships, and whether the close runs at the
+10:00 or the 14:00 Bogotá pass (or both). §3's Phase 6 *Risks* carries them; they are the
+operator's to answer when Phase 6 starts.
 
 ### 7.5 A note for Phase 9
 

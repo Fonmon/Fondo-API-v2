@@ -602,6 +602,27 @@ identical previous-year `enable` flip; both `patch=` modes identical.
   driven at the 10:00 or 14:00 scheduler run (or both).
 - ⚠️ Still the module with **zero inherited tests** — the rules above are the spec now, so write
   the suite from them rather than from v1's behavior alone.
+- ⚠️ **D12's executer must `throw` on a failed close — not return `ok: false`** (condition
+  **C74**; `docs/phase-7b-deviations.md` §7.4 item 3). Phase 7b's runner offers two failure
+  channels and they are not interchangeable: a throw releases the claim and the next
+  10:00/14:00 pass retries the row; `ok: false` marks the row `processed`, logs one `WARN` and
+  **never retries**. The second was decided by **Q6** for a *lost push*, where losing one
+  message beats breaking the `repeat` chain. It does not transfer: a lost push is recoverable
+  next month, an unclosed CAP is not — "task processed, CAP still open, one WARN" is a
+  financial-state divergence no later pass repairs.
+- ⚠️ **D12 must be idempotent and independently reconcilable.** Phase 7b claims the row
+  *before* running it (`docs/phase-7b-deviations.md` §4 **P7-D2**, §7.4 item 4), so a process
+  that dies between the claim and the side effect leaves the row `processed` with the close
+  never done — silently. Design the close so it does not depend on the runner having succeeded:
+  derive the closed state from `end_date` at read time, or ship a reconciliation query for CAPs
+  past `end_date` still open, and make a repeat close a no-op.
+- ⚠️ **`SCHEDULER_ENABLED` is a *role* flag, so D12's auto-close inherits the zero-instance
+  failure mode wholesale.** If nobody carries the flag, nothing errors and CAPs simply stop
+  closing — exactly as reminders simply stop sending (`docs/phase-7b-deviations.md` §5.4,
+  §7.2). Conditions **C68** (the run summary must reach a log, so the operator check can tell a
+  completed pass from a dead one) and **C70** (an unrecognised `SCHEDULER_ENABLED` value must
+  fail the boot rather than silently disable) are the detection story for **both**; D12 needs no
+  separate one, but it does need those two to have landed.
 
 **Parity criteria:** identical rows on create/update; identical list envelope and filtering;
 `total_savingaccounts` identical in the user finance response after each mutation.
