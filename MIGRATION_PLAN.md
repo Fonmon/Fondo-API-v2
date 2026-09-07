@@ -1432,37 +1432,33 @@ pulled forward into Phase 3 (condition C24) and 7b waited on Phase 4.
 > happening at this moment. The table under it is the whole migration; the Conditions column is
 > the honest ledger of what each closed phase still owes.
 
-### ▶ Now — Phase 5 CLOSED. Phase 6 (Saving accounts) is next.
+### ▶ Now — Phase 7b (Scheduler runner) starting. Phase 5 closed.
 
 | | |
 |---|---|
-| **Branch / head** | `feat/phase-5-activities` @ `d89f801` |
-| **Gate** | lint ✅ · `tsc` ✅ · **2047 unit / 63 suites** · **1031 e2e + 1 skipped / 18 suites** · `fondodev` at baseline on counts, sequences and `xmin`. Asserted by exit code, and **re-measured independently by the reviewer to the same numbers**. |
-| **Pipeline** | dev ✅ → tester **FAIL r1** → dev ✅ → tester **FAIL r2** → dev ✅ → dev ✅ *(N1, D36, D37)* → tester ✅ **PASS r3** → dev ✅ *(DELTA3-F1)* → reviewer ✅ **Approved w/ conditions C59–C67** |
-| **Blocking Phase 6's start** | **C59, C60, C62, C67** — mine to close, nothing from the operator |
+| **Branch / head** | `chore/phase-6-gate` @ `19c5d4d` — merges back to the line of work |
+| **Gate** | lint ✅ · `tsc` ✅ · **2093 unit / 64 suites** · **1032 e2e + 2 skipped / 19 suites** (the loan-race suite is opt-in, C56) · `fondodev` at baseline on counts, sequences and `xmin`. Asserted by exit code. |
+| **Pipeline** | Phase 5 ✅ **CLOSED** (tester PASS r3, reviewer approved C59–C67) → gate conditions ✅ **C59, C60, C62, C67 closed** → **Phase 7b ⬜ starting** |
+| **Blocking** | nothing |
 
-**Phase 5 registered D35–D38 plus P5-D1–P5-D3.** Three of the four §5 rows are cross-cutting work
-found here but living in Phase 3/4 code, which is the phase's real character: the CRUD was
-straightforward and everything expensive was underneath it.
+⚠️ **Sequencing corrected 2026-09-07 — the board had Phase 6 next and that was wrong.** §3's
+Phase 7 block says *"Resequenced (v0.3): run this directly after Phase 4, before Phases 5/6"*, and
+**Phase 6 depends on Phase 7**: D12's automatic CAP close needs a `SchedulerTask` **type**, which
+only 7b's runner can execute. D12's own row says "so Phase 6 depends on Phase 7 — already
+sequenced that way", and the board had quietly stopped being sequenced that way. Phase 5 running
+first was harmless — `activity.service.ts` writes no scheduler rows, verified — but Phase 6 before
+7b would have meant building an auto-close nothing could run.
 
-🔴 **Operator decision on the record (2026-09-06):** **D38's v1 exposure is accepted until
-cutover** — an unauthenticated account takeover, fixed in v2. The risk record in §7 lists the four
-things that should re-open it; the exposure ends at Phase 9 runbook step 3.
+**Why 7b is the right next phase on its own merits**, from §3: it is the **sole delivery path for
+loan payment reminders**, has **zero inherited tests**, is raw-SQL hstore territory, and **fails
+silently** — `scheduler/tasks.py` marks a task `processed` after `executer.run()` returns while
+`send_notification` swallows its errors, so a failed publish is recorded as a success. The plan
+calls it *the highest ratio of consequence to coverage in the migration*, and it is the last
+thing standing between the fund and losing payment reminders at cutover.
 
-**Gating Phase 6's start** — **C59** (Phase 4's eleven conditions: the reviewer audited C44–C49 and
-C52–C57 against the tree and found **one half-closed, and that as a side effect** of D29's
-implementation — C48's two-gate warning is now reached), **C60** (`python-str.ts`'s declared float
-residuals are incomplete — verified: `0.00001` is v1 `1e-05` / v2 `0.00001` and `1e16` is v1
-`1e+16` / v2 `10000000000000000`, a CPython/JS exponentiation-threshold mismatch that neither
-declared limit names), **C62** (stale in-source claims), **C67** (the generalising false-green
-rule — *a check that can only report "nothing found" is not a check*).
-
-**Rolls to Phase 6's gate:** C61, C63, C64, C65, C66.
-
-⚠️ **One business scenario escalated to `business-analyst`, no condition attached:** `ActivityUser`
-rows are written only by `create_activity`, so **a member who joins the fund after an activity
-exists can never be marked paid on it**, and the only API-level recovery discards every payment
-state. Faithful to v1, so no parity cell could have failed — which is exactly why none was written.
+**Two operator questions are already open for Phase 6's D12** and should be asked when it starts,
+not now: what happens to a CAP whose `end_date` is already past on the day the feature ships, and
+whether the close runs at the 10:00 or the 14:00 Bogotá pass (or both).
 
 | Phase | Status | Dev | Tester | Reviewer | Analyst | Conditions |
 |---|---|---|---|---|---|---|
@@ -1474,8 +1470,8 @@ state. Faithful to v1, so no parity cell could have failed — which is exactly 
 | 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ | pulled forward by **C24** |
 | 4 Loans | ✅ **CLOSED — approved w/ conditions, both rounds** (`806ca6e`) | ✅ | ✅ PASS + ✅ **delta PASS** (`17114a0`) | ✅ **Approved** (C40–C49) + ✅ **delta approved** (C50–C58) | ✅ C29/C30/C42 | C40–C43, C50, C51 ✅; **C44–C49, C52–C58 🟡 open → P5 gate** |
 | 5 Activities | ✅ **CLOSED — approved w/ conditions** (`d89f801`) | ✅ | ✅ **PASS r3** (three rounds) | ✅ **Approved** (C59–C67) | ✅ Q32/Q33 | **C59, C60, C62, C67 🔴 gate P6's start**; C61, C63–C66 🟡 → P6 gate |
-| 6 Saving accounts (CAPs) | 🟡 **NEXT** — Q19–Q24 answered; **D12** is a new build, not a port | — | — | — | — | opens under **C59/C60/C62/C67** |
-| 7b Scheduler *runner* | ⬜ **Ready** — P4 closed, so no longer blocked | — | — | — | — | — |
+| 6 Saving accounts (CAPs) | ⬜ **After 7b** — D12's auto-close needs a runner to execute it | — | — | — | — | 2 operator questions open on **D12** |
+| 7b Scheduler *runner* | 🟡 **NEXT** — sole delivery path for loan payment reminders; zero inherited tests; **fails silently** | — | — | — | — | **D7** |
 | 8 Files + admin | ⬜ **Ready** — P2 closed; inherits rules 12b/12c | — | — | — | — | — |
 | 9 Cutover, hstore→jsonb | ⬜ Blocked on P8 | — | — | — | — | **C39** lands here |
 
