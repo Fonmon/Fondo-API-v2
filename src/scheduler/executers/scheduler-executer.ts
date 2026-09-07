@@ -11,7 +11,9 @@ import type { HstoreMap } from '../../common/utils/hstore.codec';
  * loan payment reminders.
  *
  * v2 reproduces the **outcome** (the row is still marked processed) and drops the
- * **silence** (the runner logs a warning naming the task id, and the run summary counts it).
+ * **silence** (the runner logs a warning naming the task id, and the run summary counts it —
+ * but **today that count reaches no log**: `handleCron` discards `run()`'s return value, so
+ * `ok: false` is currently *warned only*, not *warned and counted*; see condition **C68**).
  * See `docs/phase-7b-deviations.md` §3.
  *
  * ⚠️ **Neither failure channel below — `throw` nor `ok: false` — covers the claim-then-crash
@@ -23,11 +25,23 @@ import type { HstoreMap } from '../../common/utils/hstore.codec';
  * push. For Phase 6's **D12** it is a CAP that stays open with its task marked done.
  *
  * What follows for **D12** is a design constraint, not a caution: the auto-close must be
- * **idempotent and independently reconcilable** — the closed state also derivable from
- * `end_date` at read time, or a reconciliation query that finds CAPs past `end_date` still
- * open — rather than treating "the task row is processed" as proof that the close happened.
- * Re-running the close over an already-closed CAP must be a no-op. Do not design D12 on the
- * assumption that a processed row means the side effect occurred; it does not.
+ * **idempotent and independently reconcilable**, rather than treating "the task row is
+ * processed" as proof that the close happened. The shape is fixed (condition **C78**):
+ *
+ * * **Close** — `UPDATE fondo_api_savingaccount SET state = 1 WHERE id = ? AND state = 0`:
+ *   a no-op on rerun, race-safe, and no read-modify-write.
+ * * **Reconciliation** — `SELECT id FROM fondo_api_savingaccount WHERE state = 0 AND
+ *   end_date < <today, America/Bogota>`: the check that does *not* depend on the runner having
+ *   succeeded. The same query is the ship-day backfill for CAPs already past `end_date`.
+ *
+ * ⚠️ **Closed-ness is materialised in `state`; it is never derived from `end_date` at read
+ * time.** Deriving it would edit a Phase 3 path that has already passed its gate
+ * (`src/users/user.service.ts` aggregates `savingAccount` at `state: 0`, porting
+ * `UserFinanceSerializer.get_total_savingaccounts`); it would put two sources of truth in a
+ * one-column state model that **Q21**'s `PUT { id, state, value }` writes directly; and — the
+ * point — a derivation is not an independent check but a redefinition, which makes the runner's
+ * failure *invisible* instead of *detectable*. Do not design D12 on the assumption that a
+ * processed row means the side effect occurred; it does not.
  */
 export interface SchedulerExecuterOutcome {
   /**
@@ -37,8 +51,10 @@ export interface SchedulerExecuterOutcome {
    *
    * * `return { ok: false }` → the row is marked `processed`, the runner logs one `WARN` naming
    *   the task id, the `repeat` successor is still cloned, and the work is **never retried**.
-   * * `throw` → the claim is released, the row stays unprocessed, and the next 10:00/14:00 pass
-   *   retries it. See `SchedulerExecuter` below.
+   * * `throw` → the claim is released, the row stays unprocessed, the next 10:00/14:00 pass
+   *   retries it — **and no `repeat` successor is cloned on this pass**, because the
+   *   release-and-rethrow in `scheduler.runner.ts` sits *before* `createRepeatInstance`. See
+   *   `SchedulerExecuter` below.
    *
    * `ok: false` was decided by **Q6** for a *lost push*: a reminder that is not sent is one
    * missed message, whereas retrying a bad credential twice a day forever would never clone the
@@ -46,12 +62,21 @@ export interface SchedulerExecuterOutcome {
    * trade holds only because the side effect is **recoverable next month** — the chain survives,
    * so the next occurrence sends.
    *
-   * ⚠️ **It does not transfer to Phase 6's D12 (CAP auto-close), whose executer must `throw`.**
+   * ⚠️ **It does not transfer to Phase 6's D12 (CAP auto-close), whose executer must `throw` —
+   * which is safe only because a CAP closes once and its task therefore carries `repeat = 0`.**
    * For a CAP that failed to close, "task processed, CAP still open, one `WARN` in the log" is a
-   * **financial-state divergence that no later pass repairs**: nothing re-derives the close and
+   * **financial-state divergence that no later pass repairs**: nothing else closes the CAP, and
    * the row that would have driven the retry is gone. A lost push is recoverable next month; an
-   * unclosed CAP is not. Any future executer whose side effect changes money or account state
-   * belongs on the `throw` side of this choice. `docs/phase-7b-deviations.md` §7.4.
+   * unclosed CAP is not. **Do not give the close task a non-zero `repeat`**: by the `throw`
+   * bullet above, a deterministically-failing repeating task throws on every pass and therefore
+   * never clones its successor — the chain-breaking outcome **Q6** chose `ok: false` to avoid.
+   *
+   * So the rule is a function of **`repeat`**, not of money (condition **C77**). `throw` is the
+   * correct channel for a task with `repeat = 0`: the worst case is a row that keeps being
+   * retried and keeps being visible. For a *repeating* task it trades one lost occurrence for
+   * the whole chain, which is why Q6 chose `ok: false` there. Money is why D12's one occurrence
+   * must not be dropped; `repeat = 0` is why throwing costs nothing else.
+   * `docs/phase-7b-deviations.md` §7.4.
    */
   readonly ok: boolean;
   /** Short tag for the log line and the run summary. */

@@ -533,31 +533,81 @@ four are cheap now and expensive later.
 2. Any rolling deploy must not let an old replica see the new type — which the
    resolve-before-claim ordering already handles, but only because it is ordered that way on
    purpose.
-3. **`ok: false` is the wrong channel for a failed close; D12's executer must `throw`.** The
-   runner gives an executer two ways to report trouble and they are not interchangeable: a
-   `throw` releases the claim, leaves the row unprocessed and gets retried on the next
-   10:00/14:00 pass; a `false` outcome marks the row `processed`, logs one `WARN` and is
-   **never retried**. §3's decision to prefer the second came from **Q6** and is about a *lost
-   push* — losing one message beats breaking the `repeat` chain — and that trade does not
-   transfer. "Task processed, CAP still open, one WARN in the log" is a financial-state
+3. **`ok: false` is the wrong channel for a failed close; D12's executer must `throw` — which
+   is safe only because a CAP closes once, so its task carries `repeat = 0`.** The runner gives
+   an executer two ways to report trouble and they are not interchangeable: a `throw` releases
+   the claim, leaves the row unprocessed, gets retried on the next 10:00/14:00 pass and **clones
+   no `repeat` successor on that pass** (the release-and-rethrow in `scheduler.runner.ts` sits
+   *before* `createRepeatInstance`); a `false` outcome marks the row `processed`, logs one
+   `WARN` and is **never retried**. §3's decision to prefer the second came from **Q6** and is
+   about a *lost push* — losing one message beats breaking the `repeat` chain — and that trade
+   does not transfer. "Task processed, CAP still open, one WARN in the log" is a financial-state
    divergence no later pass repairs. A lost push is recoverable next month; an unclosed CAP is
-   not. Written into `SchedulerExecuterOutcome`'s docblock, because that is what a Phase 6
-   developer actually reads.
+   not.
+
+   ⚠️ **That precondition is load-bearing, so the rule belongs on the `repeat` axis rather than
+   the money axis** (condition **C77**). `throw` is the correct channel for a task with
+   `repeat = 0`: the worst case is a row that keeps being retried and keeps being visible. For a
+   *repeating* task it trades one lost occurrence for the whole chain, which is why **Q6** chose
+   `ok: false` there — the trade only has a numerator when there *is* a chain. **So do not give
+   D12's close task a non-zero `repeat`**: a deterministically-failing repeating task throws on
+   every pass and therefore never clones its successor, reintroducing the exact chain-breaking
+   outcome Q6 avoided. Money is why D12's one occurrence must not be dropped; `repeat = 0` is
+   why throwing costs nothing else. Written into `SchedulerExecuterOutcome`'s docblock, because
+   that is what a Phase 6 developer actually reads.
 4. **D12 must be idempotent and independently reconcilable**, because §4's **P7-D2** ordering
    loses executer work silently. `resolve → claim → run → clone` means a process that dies
    between the claim and the side effect leaves the row `processed` with the work never done —
    no throw, no `ok: false`, no log line (and, until **C73** is settled, not even an
    attempt line). For
    a notification that is one missed push; for D12 it is a CAP that stays open with its task
-   marked done. So the close must not rest on "the task row is processed" as evidence: derive
-   the closed state from `end_date` at read time, or provide a reconciliation query that finds
-   CAPs past `end_date` still open. Re-running the close over an already-closed CAP must be a
-   no-op.
+   marked done. So the close must not rest on "the task row is processed" as evidence. The
+   shape is fixed (condition **C78**):
 
-Two operator questions are open on D12 and are **not** answered here — what happens to a CAP
-whose `end_date` is already past on the day the feature ships, and whether the close runs at the
-10:00 or the 14:00 Bogotá pass (or both). §3's Phase 6 *Risks* carries them; they are the
-operator's to answer when Phase 6 starts.
+   * **Close** — `UPDATE fondo_api_savingaccount SET state = 1 WHERE id = ? AND state = 0`:
+     idempotent on rerun, race-safe, and no read-modify-write.
+   * **Reconciliation** — `SELECT id FROM fondo_api_savingaccount WHERE state = 0 AND
+     end_date < <today, America/Bogota>`: the independent check, and the same query is the
+     ship-day backfill.
+
+   ⚠️ **Closed-ness is materialised in `state`; it is never derived from `end_date` at read
+   time.** C74 offered derivation as an equal alternative and it is not one. v2 **already
+   ships** the port that derivation would have to change — `src/users/user.service.ts`
+   aggregates `savingAccount` at `state: 0` for `total_savingaccounts` — so it means editing a
+   **Phase 3 path that has already passed its gate**, plus Phase 6's own `state` filter. It also
+   puts two sources of truth in a one-column state model that **Q21**'s `PUT { id, state, value }`
+   writes as an explicit state write: under derivation there is no coherent answer to what a
+   treasurer's `PUT state = 0` means on a row whose `end_date` is past — simultaneously a re-open
+   and a no-op. And it defeats the purpose of this item, which asked for a check *independent of
+   the runner*: a derivation is not an independent check but a redefinition, one that makes the
+   runner's failure *invisible* rather than *detectable* — the zero-instance failure mode
+   **C68**/**C70** exist to catch. §5's **D12** row carries
+   the ruling, because by the precedence rule at the head of §5 a decision that lives only in a
+   §3 *Risks* bullet is describing, not deciding.
+
+✅ **Both operator questions on D12 were answered 2026-09-07, before Phase 6 started.**
+
+* **A CAP already past `end_date` on ship day → close it (Q38).** Item 4's reconciliation query
+  *is* the backfill, so no separate mechanism is needed. Measured on `fondodev` the same day:
+  **2 CAPs exist in total** — one already `state = 1`, and exactly one `state = 0` with
+  `end_date 2024-02-28` (**900,000**, 2.5 years past). v1 never closed it because auto-close was
+  never built; the `# TODO: schedule task for closing CAP` in `services/saving_account.py` is
+  still there. **Zero** open CAPs have a future `end_date`.
+* **The close runs on the 10:00 Bogotá pass only (Q39)** — **and this needs no code.** The
+  selection predicate is date-granularity with no time component
+  (`(run_date AT TIME ZONE zone)::date <= today`, `SchedulerTaskRepository.findDueUnprocessed`),
+  and the 10:00 pass claims the row and marks it `processed`, so the 14:00 pass's
+  `processed = false` filter already excludes it. **Do not add per-type pass scheduling to
+  satisfy this answer** — the behaviour is already what was asked for. The 14:00 pass re-attempts
+  only when the 10:00 close **threw** and released the claim, which is precisely the retry path
+  item 3's `throw` rule depends on to be worth anything.
+
+⚠️ **One edge Phase 6 must decide rather than inherit:** a CAP created *between* the two passes
+whose `end_date` is today would be picked up at 14:00, not 10:00. Whether that is reachable at
+all depends on a design choice this phase has not made — whether D12 writes a `SchedulerTask` per
+CAP, or works off the reconciliation query alone. Decide it explicitly; do not let it fall out.
+
+§3's Phase 6 *Risks* carries both answers.
 
 ### 7.5 A note for Phase 9
 
