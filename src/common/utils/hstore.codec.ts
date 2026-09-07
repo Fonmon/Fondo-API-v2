@@ -351,7 +351,11 @@ export function decodePushSubscription(map: HstoreMap): PushSubscription {
  * any black-box round, because all 94 live rows carry both keys.
  *
  * The message shape matches `readEndpoint` in `notification.service.ts:143`, which is the
- * pattern the rest of the codebase uses for a ported `KeyError`.
+ * pattern the rest of the codebase uses for a ported `KeyError`. ⚠️ It is **not** what Python
+ * prints: `str(KeyError('user_ids'))` is `'user_ids'`, with no `KeyError:` prefix. The only
+ * place that difference is observable is the Phase 7b scheduler log line, where it is
+ * registered as **P7-D6**; on the HTTP paths v1's `KeyError` is a body-less 500, so the text
+ * reaches no client.
  */
 function requireHstoreKey(map: HstoreMap, key: string): void {
   if (!Object.prototype.hasOwnProperty.call(map, key)) {

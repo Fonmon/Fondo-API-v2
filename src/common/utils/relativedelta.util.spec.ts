@@ -259,8 +259,9 @@ describe('nextRepeatRunDate — SchedulerTask.repeat (models.py:103-109)', () =>
  * Phase 7b. ⚠️ `repeat` is `choices`-constrained in **Python only** — there is no check
  * constraint on the column — so an out-of-range value is a reachable database state, and v1
  * handles it by accident: `create_repeat_instance`'s four `if`s are not `elif`s and have no
- * `else`, so the task is cloned **onto its own `run_date`**, forever. `SchedulerRunner` uses
- * this guard to refuse instead (**P7-D3**).
+ * `else`, so the task is cloned **onto its own `run_date`** — twice in v1 (the day's two
+ * passes) and then never again, but on **every** pass under Phase 7b's D7 `<=` rule.
+ * `SchedulerRunner` uses this guard to refuse instead (**P7-D3**).
  */
 describe('isSchedulerRepeat', () => {
   it.each([0, 1, 2, 3, 4])('accepts %i, one of Django REPEAT_TYPES', (value) => {

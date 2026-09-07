@@ -452,8 +452,10 @@ describe('Phase 7b — scheduler runner', () => {
 
     /**
      * ⚠️ **P7-D3.** v1's four `if`s are not `elif`s and there is no `else`, so an
-     * out-of-range `repeat` clones the task **onto its own `run_date`** — an unprocessed twin
-     * that repeats the trick every pass, forever. No such row exists in `fondodev`, but the
+     * out-of-range `repeat` clones the task **onto its own `run_date`**. v1 does that twice —
+     * the day's second pass processes the twin and clones again — and then its exact
+     * calendar-day filter stops selecting it; it is **D7's `<=` here** that would make such a
+     * twin due on every pass, forever. No such row exists in `fondodev`, but the
      * column has no check constraint, so the state is reachable. v2 refuses and logs.
      */
     it('P7-D3 — refuses an out-of-range repeat instead of cloning onto the same date', async () => {

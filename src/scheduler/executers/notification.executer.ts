@@ -58,9 +58,16 @@ export class NotificationExecuter implements SchedulerExecuter {
 /**
  * `payload["<key>"]`, with v1's two failure modes preserved.
  *
- * * **Absent key** → `KeyError`, uncaught in `run`, caught by the scheduler loop. Rendered
- *   with the same `KeyError: 'key'` text the hstore codec uses so the log line reads the way
- *   v1's does.
+ * * **Absent key** → `KeyError`, uncaught in `run`, caught by the scheduler loop. The row is
+ *   left unprocessed and retried on the next pass, exactly as v1's is. ⚠️ **The log *text*
+ *   does not match v1 and is not meant to** — registered as **P7-D6** (parity round F1).
+ *   `'{}'.format(ex)` is `str(ex)`, and `str(KeyError('message'))` is `'message'`: the quotes
+ *   are the repr and there is no `KeyError:` prefix, so v1 logs `exception: 'message'` where
+ *   v2 logs `exception: KeyError: 'message'`. v2 keeps the prefix because its exception class
+ *   is a plain `Error` — drop it and the line degrades to a bare quoted word with nothing
+ *   saying what went wrong, which is the opposite of this phase's §3 stance. Rows and wire are
+ *   identical either way; the one-line change that would match v1 is in `requireText` below
+ *   and in {@link requireHstoreKey}.
  * * **SQL NULL value** → v1 would pass `None` straight into the message body and
  *   `json.dumps` would render `null` on the wire. Not reachable from either writer —
  *   Django's `HStoreField.get_prep_value` calls `str()`, so a Python `None` is stored as the

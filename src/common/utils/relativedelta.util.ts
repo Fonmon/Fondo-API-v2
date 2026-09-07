@@ -136,9 +136,11 @@ export enum SchedulerRepeat {
  * ⚠️ The column is `choices`-constrained in **Python only** — there is no check constraint —
  * so an out-of-range value is a reachable database state, and v1 handles it by accident:
  * `create_repeat_instance`'s four `if`s are not `elif`s and have no `else`, so a `repeat` of,
- * say, 7 leaves `run_date` unchanged and clones the task **onto its own date**, producing an
- * unprocessed twin that repeats the trick on the next pass, forever. Phase 7b refuses
- * instead (**P7-D3**), and this is the narrowing that lets it.
+ * say, 7 leaves `run_date` unchanged and clones the task **onto its own date**. In v1 that is
+ * **bounded** — the twin fires on the same day's second pass and is then past v1's exact
+ * calendar-day filter forever (measured) — but under Phase 7b's **D7** `<=` selection it would
+ * be due on every later pass, so v2 refuses to write it (**P7-D3**), and this is the narrowing
+ * that lets it.
  */
 export function isSchedulerRepeat(value: number): value is SchedulerRepeat {
   // ⚠️ `Number.isInteger` first, and not as a formality: a numeric TS enum carries a **reverse

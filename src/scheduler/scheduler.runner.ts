@@ -234,11 +234,20 @@ export class SchedulerRunner {
    *
    * ⚠️ **`repeat` values outside 0–4 clone nothing.** v1's four `if`s are not `elif`s and
    * carry no `else`: `repeat = 7` falls past all of them, leaves `run_date` unchanged, and
-   * `objects.create` writes a **duplicate row on the same date** — an unprocessed twin that
-   * fires again on the next pass, forever. The column is `choices`-constrained in Python only
-   * (no DB check constraint), and no such row exists in `fondodev` (626 rows: 540 `repeat=0`,
-   * 86 `repeat=4`). v2 refuses instead of reproducing an infinite loop; registered as
-   * **P7-D3**.
+   * `objects.create` writes a **duplicate row on the same date**, unprocessed. The column is
+   * `choices`-constrained in Python only (no DB check constraint), and no such row exists in
+   * `fondodev` (626 rows: 540 `repeat=0`, 86 `repeat=4`).
+   *
+   * ⚠️ **v1's version of this is bounded, and the unbounded version is ours** — measured, five
+   * v1 passes on an isolated clone: the twin is picked up by the same day's *second* pass and
+   * clones once more, and then v1's exact calendar-day filter never selects it again
+   * (`0 tasks to process` on D+1 and D+2). Two extra rows, on the original date, and it stops.
+   * But {@link SchedulerTaskRepository.findDueUnprocessed} selects with **`<=` (D7)**, and a
+   * past-due twin is due on *every* later pass — a real v2 pass on D+1 loaded exactly that row.
+   * So reproducing v1's clone here would be **strictly worse than v1**: every pass would mark
+   * its row processed and leave a fresh permanently-due successor, so the chain never ends —
+   * two rows and two pushes a day, for as long as the runner runs. The refusal is registered as
+   * **P7-D3**, and it is not separable from D7 — relaxing one means revisiting the other.
    *
    * @returns whether a clone was written.
    */

@@ -175,7 +175,7 @@ which outcome the caller is told about. Three new unit cells cover the other two
 
 ---
 
-## 4. Discoveries — `P7-D1` … `P7-D5`
+## 4. Discoveries — `P7-D1` … `P7-D6`
 
 ### P7-D1 — ⚠️ D7 replays a five-year backlog on the first enabled run. **This needs an operator decision before cutover.**
 
@@ -186,6 +186,7 @@ unprocessed tasks due under D7 (run_date_local <= today)   110
   oldest run_date                                          2020-09-27
   of those, targeting a member with a live subscription     108
   distinct user_ids lists                                    13
+  distinct members actually reachable (they hold a subscription)   13
 payment_reminder rows among them whose loan is PAID_OUT       65
 ```
 
@@ -243,14 +244,45 @@ v1's order is `resolve → run → mark → clone`; v2's is `resolve → **claim
 
 `create_repeat_instance`'s four `if`s are **not** `elif`s and carry no `else`. A `repeat` of, say,
 7 falls past all four, leaves `run_date` unchanged, and `objects.create` writes a **duplicate row
-on the same date** — an unprocessed twin that does the same thing on the next pass, and the pass
-after that, forever. The column is `choices`-constrained in **Python only**; there is no check
-constraint, verified. No such row exists in `fondodev` (626 rows: 540 `repeat = 0`, 86
+on the same date**, unprocessed. The column is `choices`-constrained in **Python only**; there is
+no check constraint, verified. No such row exists in `fondodev` (626 rows: 540 `repeat = 0`, 86
 `repeat = 4`), so this is unreachable today and reachable tomorrow.
 
+⚠️ **What v1 then does was measured, not reasoned about, and the first version of this row got it
+wrong** (parity round F3; this text replaces it). The clone keeps the **same `run_date`**, so it
+is picked up by the *same day's second pass* — but only that one. v1's filter is an exact
+calendar-day match, so once the day ends the twin is never selected again. Five v1 passes on the
+isolated clone, one `repeat = 7` row dated 2026-09-10:
+
+| pass (Bogota) | v1 log | rows after |
+|---|---|---|
+| D 10:00 | `1 tasks to process` | `2529` processed, clone **`2530` on the same date** |
+| D 14:00 | `1 tasks to process` | `2530` processed, clone **`2531`, same date again** |
+| D+1 10:00 | `0 tasks to process` | unchanged |
+| D+1 14:00 | `0 tasks to process` | unchanged |
+| D+2 10:00 | `0 tasks to process` | unchanged |
+
+**v1 is bounded**: **two extra rows** on the original date and **one extra push** — the capture
+stub recorded 2 messages in total, one of which is the task's own legitimate one and the second
+the twin's, on that day's 14:00 pass; clone `2531` is never selected and never publishes. Then
+silence. Not "forever".
+
+⚠️ **The unbounded version would be *ours*, and that is the actual argument for the refusal.**
+The twin v1 leaves behind is past due, and **D7's `<=` makes a past-due row due on every later
+pass** — measured on the rows v1 had just written: v1's `=` rule returns **0** of them from D+1
+onward, D7's `<=` returns **1**, still 1 a year later, and a real v2 pass on D+1 loaded it
+(`1 tasks to process`). So a runner that used `<=` *and* reproduced clone-onto-its-own-date would
+mint a fresh permanently-due row on **every** pass, twice a day, without end. Porting v1 here
+would have been **strictly worse than v1**, because our own D7 is what turns a two-row quirk into
+a runaway.
+
 v2 throws, which routes into v1's own `except` branch: the error is logged with the task id, the
-row stays processed, and nothing is cloned. Narrower than v1 and deliberately so — reproducing an
-unbounded row-generation loop is not parity, it is a bug with a citation.
+row stays processed, and nothing is cloned. Narrower than v1 and deliberately so.
+
+⚠️ **For whoever later wonders whether the guard can be relaxed:** it cannot be relaxed
+*independently of D7*. The refusal costs a hand-edited row its clone; removing it while `<=` is
+the selection rule costs the fund an unbounded table and an unbounded push volume. If D7 ever
+reverts to `=`, the trade changes — and only then.
 
 ### P7-D4 — a SQL `NULL` in `payload->'message'` or `->'target'` is refused
 
@@ -259,11 +291,59 @@ the wire. Unreachable from either writer — Django's `HStoreField.get_prep_valu
 so a Python `None` is stored as the **string** `'None'`, never SQL NULL — so v2 refuses loudly
 rather than widening `NotificationContent`'s types for a state only a hand-edit can produce.
 Same species, and same fail-closed direction, as condition **C23**'s decision for `user_ids`.
-An **absent** key still raises `KeyError: '<key>'`, exactly as v1 does.
+An **absent** key still raises, is still caught by the loop, and still leaves the row
+unprocessed for the next pass — the *row and wire* behaviour is v1's. ⚠️ The **log text** is
+not; see **P7-D6**.
 
 ### P7-D5 — `sendNotification` returns a delivery tag
 
 See §3. No row-level or wire-level difference.
+
+### P7-D6 — an absent payload key logs `KeyError: 'x'`, where v1 logs `'x'`
+
+⚠️ **This row exists because the first version of P7-D4 claimed a match that measurement does
+not support** (parity round F1). The claim was *"an absent key still raises `KeyError: '<key>'`,
+exactly as v1 does"*. It does not:
+
+```
+v1: ERROR Error processing task with id: 2529, exception: 'message'
+v2: ERROR Error processing task with id: 2529, exception: KeyError: 'message'
+```
+
+`scheduler/tasks.py` formats the exception with `'{}'.format(ex)`, which is `str(ex)`, and
+`str(KeyError('message'))` is `"'message'"` — the quotes are the repr of the key and there is
+**no `KeyError:` prefix**. Verified in-container on this round:
+`'…exception: {}'.format(ex)` → `… exception: 'message'`. Same for `user_ids`, whose text comes
+from `requireHstoreKey` in `hstore.codec.ts`.
+
+**Decision: keep v2's text, register the difference — do not match.** Three reasons, in the
+order that decided it:
+
+1. **Matching makes v2's log worse.** v2's exception is a plain `Error`; nothing else on the
+   line says what kind of failure it was. `exception: 'message'` is a bare quoted word. v1's
+   version is legible only because Python's type name is implied by convention, and that
+   convention does not exist here. Dropping the prefix is adding silence, which is the exact
+   thing §3 decided against for the sibling case.
+2. **`KeyError: 'x'` is a house convention five phases old, not a Phase 7b invention.** Four
+   producers write it — `hstore.codec.ts:requireHstoreKey`, `python-obj.ts:PythonKeyError`,
+   `notification.service.ts:241` and `notification.executer.ts:requireText` — and **16
+   assertions in 8 spec files** pin it (multipart uploads, powers, users, subscriptions, the
+   scheduler). On every one of those other paths v1's `KeyError` is a **body-less 500**, so the
+   text reaches no client and there is no parity to gain; changing it there would cost
+   diagnosability for nothing, and changing it *only* here would leave the codebase saying two
+   different things about the same ported exception.
+3. **Nothing observable moves.** Rows, wire bytes, the `processed` flag, the retry on the next
+   pass and the pinned line *format* (`Error processing task with id: {id}, exception: {ex}`,
+   §6.3) are all identical; only the substituted `{ex}` differs. Measured in parity cells D5
+   and D7k: `ROWS: SAME`, `WIRE: SAME (0/0)`.
+
+**If a reviewer overturns this, the minimal change is two lines** — `requireText`
+(`notification.executer.ts`) and `requireHstoreKey` (`hstore.codec.ts`), both
+`` `KeyError: '${key}'` `` → `` `'${key}'` `` — plus the 7 spec touch points those two feed
+(`notification.executer.spec.ts` 2, `hstore.codec.spec.ts` 3, `scheduler.runner.spec.ts` 2: one
+mock input at `:253`, one log-line assertion at `:275`).
+⚠️ **Do not "fix" it codebase-wide**: the other two producers only ever surface on HTTP paths
+where v1 answers a body-less 500, so changing them buys no parity and loses the type name.
 
 ---
 
@@ -395,10 +475,11 @@ being tested**, and whose table is the one the project has already damaged once.
 |---|---|---|---|---|
 | 1 | a task whose `run_date` is in the past, `processed = false` | never runs | **runs on the next pass** | **D7** (Q8) |
 | 2 | the first run against the real fixture | 1 message | **~108 messages** | **P7-D1** — do not run this against `fondodev` without draining first |
-| 3 | task with `repeat = 7` | clones onto the same date, forever | logs and clones nothing | **P7-D3** |
+| 3 | task with `repeat = 7` | clones onto the same date — **twice, on that date's two passes, then never again** (measured; the `=` day rule stops it) | logs and clones nothing | **P7-D3**. ⚠️ Under **D7**'s `<=` the same clone would be due on every later pass, so the loop v2 refuses is one *v2* would create, not one v1 has |
 | 4 | `payload->'message'` is SQL NULL | publishes `"body": null` | logs `TypeError`, row unprocessed | **P7-D4** |
 | 5 | SQS refuses the message | row processed, log line | row processed, log line **+ a WARN naming the task** | **P7-D5**, §3 |
 | 6 | two runners, one task | two pushes, two clones | one push, one clone | §1 |
+| 6a | a payload key is **absent** | `exception: 'message'` | `exception: KeyError: 'message'` | **P7-D6** — log text only; the row, the wire and the retry are identical |
 | 7 | the process log | one info line per pass | same two info lines, verbatim | — |
 
 ### 6.3 Explicitly **unchanged** — if these differ, that IS a failure
@@ -409,14 +490,16 @@ being tested**, and whose table is the one the project has already damaged once.
 * the clone's `run_date`, including the month-end clamp and the lost leap day;
 * `run_date` stored as `05:00Z` for a local-midnight task;
 * the two info log lines: `Running scheduler` and `{n} tasks to process`;
-* the error line: `Error processing task with id: {id}, exception: {ex}`;
+* the error line: `Error processing task with id: {id}, exception: {ex}` — the **format**;
+  ⚠️ the substituted `{ex}` differs for an absent payload key (`KeyError: 'x'` vs `'x'`),
+  which is **P7-D6** and expected;
 * `Executer type {n} does not exist.` for an unknown type;
 * a member with **no** subscription rows receives nothing and the task is still marked
   processed (Phase 2 condition 4 / **Q7**).
 
 ### 6.4 Pre-declared rows — do not re-file these
 
-**P7-D1**–**P7-D5** above, and **D7** in the plan's §5.
+**P7-D1**–**P7-D6** above, and **D7** in the plan's §5.
 
 ---
 

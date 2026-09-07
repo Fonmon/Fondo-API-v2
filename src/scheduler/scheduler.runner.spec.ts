@@ -409,8 +409,10 @@ describe('SchedulerRunner', () => {
 
     /**
      * ⚠️ **P7-D3.** v1's four `if`s are not `elif`s and have no `else`, so an out-of-range
-     * `repeat` leaves `run_date` untouched and clones the task **onto its own date** — an
-     * unprocessed twin that does it again on the next pass, forever. v2 refuses.
+     * `repeat` leaves `run_date` untouched and clones the task **onto its own date**. In v1
+     * that twin runs once more (the same day's second pass) and is then past its exact
+     * calendar-day filter for good; under **D7**'s `<=` it would be due on every pass from
+     * then on. v2 refuses to write it.
      */
     it('refuses to clone a repeat value outside 0–4 (P7-D3)', async () => {
       tasks.findDueUnprocessed.mockResolvedValue([task({ repeat: 7 })]);

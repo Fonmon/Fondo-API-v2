@@ -221,9 +221,14 @@ export class SchedulerTaskRepository {
    * day exactly, so a reminder whose `run_date` has already passed is never sent: the 5-day
    * loan reminder is skipped outright whenever the monthly payment file lands within five
    * days of the deadline, which is the case D7 exists to fix. v2 sends it on the next pass
-   * instead. ⚠️ **The backlog consequence is real and is registered as P7-D1** — `fondodev`
-   * holds 109 past-due unprocessed rows going back to 2020, and a first run with `<=` would
-   * publish all of them. Draining that backlog is a cutover step, not a code change.
+   * instead. ⚠️ **The backlog consequence is real and is registered as P7-D1** — this `<=`
+   * returns **110** unprocessed rows on `fondodev` (measured 2026-09-07: 109 already past,
+   * plus one dated today), the oldest from 2020-09-27, and a first run would publish 108 of
+   * them. Draining that backlog is a cutover step, not a code change; `MIGRATION_PLAN.md` §3
+   * Phase 9 step 3a is the statement, and it spares 2 of the 110 by design. ⚠️ The figure is a
+   * snapshot of a live table — re-measure it, do not copy it out of another document
+   * (it read 109 here until the parity round measured it: the count of rows *strictly* past
+   * due is not the count this predicate returns).
    *
    * ⚠️ **"Today" is `America/Bogota`, passed in, never read from the host.** v1 gets it for
    * free (`Settings.__init__` sets `os.environ['TZ']` from `TIME_ZONE`), v2 does not; the
