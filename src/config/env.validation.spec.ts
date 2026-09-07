@@ -18,6 +18,30 @@ describe('validateEnv', () => {
     expect(env.TIME_ZONE).toBe('America/Bogota');
     // v1 hardcodes the bucket name in services/file.py
     expect(env.GCS_BUCKET).toBe('fonmon');
+    // ⚠️ Phase 7b: the scheduler is OFF unless a deployment says otherwise. v1's runner is a
+    // separate `celery beat` container that the web image never starts, and this default is
+    // how v2 keeps that property. A `true` default would make every replica a runner.
+    expect(env.SCHEDULER_ENABLED).toBe(false);
+  });
+
+  describe('SCHEDULER_ENABLED (Phase 7b)', () => {
+    it.each(['true', 'TRUE', 'True', '1', 'yes', 'on', ' true '])(
+      'reads %p as enabled',
+      (value) => {
+        expect(validateEnv({ ...MINIMAL_ENV, SCHEDULER_ENABLED: value }).SCHEDULER_ENABLED).toBe(
+          true,
+        );
+      },
+    );
+
+    it.each(['false', '0', 'no', 'off', '', 'maybe', 'enabled'])(
+      'reads %p as disabled — anything not affirmative fails closed',
+      (value) => {
+        expect(validateEnv({ ...MINIMAL_ENV, SCHEDULER_ENABLED: value }).SCHEDULER_ENABLED).toBe(
+          false,
+        );
+      },
+    );
   });
 
   it('fails fast on a missing DEFAULT_FROM_EMAIL — v1 raises KeyError at import', () => {

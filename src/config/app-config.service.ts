@@ -119,4 +119,15 @@ export class AppConfigService {
   get timeZone(): string {
     return this.get('TIME_ZONE');
   }
+
+  /**
+   * Whether this process runs the Phase 7b scheduler cron.
+   *
+   * The v2 equivalent of "is this the `celery beat` container?". **False unless the
+   * deployment says otherwise** — see `SCHEDULER_ENABLED` in `env.schema.ts` for why the
+   * default is the multi-instance answer rather than a convenience.
+   */
+  get schedulerEnabled(): boolean {
+    return this.get('SCHEDULER_ENABLED');
+  }
 }

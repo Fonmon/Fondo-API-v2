@@ -434,7 +434,11 @@ describe('Phase 2 — notifications', () => {
       await insertRawSubscription(prisma, member.id, REAL_FCM_ROW);
       sqs.send.mockRejectedValue(new Error('SQS is down'));
 
-      await expect(notifications.sendNotification([member.id], 'x', '/')).resolves.toBeUndefined();
+      // ⚠️ Phase 7b: the return widened from `void` to a `NotificationDelivery` tag. The
+      // subject of this cell is unchanged — the failure does not surface as a throw — but it
+      // now also pins *which* outcome the caller is told about, which is what lets the
+      // scheduler log a swallowed publish instead of recording it as a success.
+      await expect(notifications.sendNotification([member.id], 'x', '/')).resolves.toBe('failed');
       // condition 1 — bounded retry, 3 attempts.
       expect(sqs.send).toHaveBeenCalledTimes(3);
     });

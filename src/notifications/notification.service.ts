@@ -15,6 +15,30 @@ export const UNSUBSCRIBE_OK = 200;
 export const UNSUBSCRIBE_NOT_FOUND = 404;
 
 /**
+ * What actually happened to a `sendNotification` call.
+ *
+ * ⚠️ **Added in Phase 7b, and the reason is the phase's headline risk.** v1's
+ * `send_notification` returns `None` whether it published, published nothing because the
+ * member has no devices, or failed and swallowed the exception — and
+ * `scheduler/tasks.py:24` then marks the task `processed = True` regardless. A failed
+ * publish is recorded as a success, in the one subsystem that is the sole delivery path for
+ * loan payment reminders.
+ *
+ * v2 **keeps the outcome** (the task is still marked processed — operator answer Q6, and the
+ * alternative is a task that retries a configuration error twice a day forever and never
+ * clones its `repeat` successor) and **drops the silence**: the runner logs a warning naming
+ * the task id and counts it, so `failed` is visible without changing a single row. See
+ * `docs/phase-7b-deviations.md` §3.
+ */
+export type NotificationDelivery =
+  /** SQS accepted the message. */
+  | 'published'
+  /** v1's `if len(notification_subscriptions) == 0: return` — nothing was published. */
+  | 'no-subscriptions'
+  /** Every publish attempt failed. v1 swallows this and so does v2; the log does not. */
+  | 'failed';
+
+/**
  * `fondo_api/services/notification.py:NotificationService`.
  *
  * ✅ **The scheduling half landed in Phase 3, not Phase 7** — review finding **S9**,
@@ -168,21 +192,26 @@ export class NotificationService {
    * {@link NotificationPublisher}, condition 3.
    *
    * Never throws: a publish failure is swallowed at the boundary, as in v1.
+   *
+   * @returns which of the three v1 outcomes occurred. v1 returns `None` for all three; the
+   *   discriminated value is Phase 7b's, so the scheduler can log a failed publish instead of
+   *   recording it as a success. Nothing branches on it in the HTTP paths.
    */
   async sendNotification(
     userIds: readonly number[],
     message: string,
     target: string,
-  ): Promise<void> {
+  ): Promise<NotificationDelivery> {
     const subscriptions = await this.repository.findPushSubscriptionsByUserIds(userIds);
     if (subscriptions.length === 0) {
-      return;
+      return 'no-subscriptions';
     }
 
-    await this.publisher.publish({
+    const published = await this.publisher.publish({
       subscriptions,
       message: { body: message, target },
     });
+    return published ? 'published' : 'failed';
   }
 }
 

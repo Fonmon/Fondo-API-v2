@@ -1,4 +1,5 @@
 import {
+  isSchedulerRepeat,
   SchedulerRepeat,
   addRelativeDelta,
   addRelativeDeltaToInstant,
@@ -251,5 +252,30 @@ describe('nextRepeatRunDate — SchedulerTask.repeat (models.py:103-109)', () =>
     [SchedulerRepeat.YEARLY, '2019-01-31T14:00:00.000Z'],
   ])('repeat %i clones to %s', (repeat, expected) => {
     expect(nextRepeatRunDate(runDate, repeat)?.toISOString()).toBe(expected);
+  });
+});
+
+/**
+ * Phase 7b. ⚠️ `repeat` is `choices`-constrained in **Python only** — there is no check
+ * constraint on the column — so an out-of-range value is a reachable database state, and v1
+ * handles it by accident: `create_repeat_instance`'s four `if`s are not `elif`s and have no
+ * `else`, so the task is cloned **onto its own `run_date`**, forever. `SchedulerRunner` uses
+ * this guard to refuse instead (**P7-D3**).
+ */
+describe('isSchedulerRepeat', () => {
+  it.each([0, 1, 2, 3, 4])('accepts %i, one of Django REPEAT_TYPES', (value) => {
+    expect(isSchedulerRepeat(value)).toBe(true);
+  });
+
+  it.each([-1, 5, 7, 99, 1.5, Number.NaN])('rejects %p', (value) => {
+    expect(isSchedulerRepeat(value)).toBe(false);
+  });
+
+  /**
+   * A numeric TS enum carries a reverse mapping, so a naive `value in SchedulerRepeat` also
+   * answers true for the *names*. This pins that the guard is keyed on the numeric side.
+   */
+  it('is not fooled by the enum’s reverse mapping', () => {
+    expect(isSchedulerRepeat('MONTHLY' as unknown as number)).toBe(false);
   });
 });

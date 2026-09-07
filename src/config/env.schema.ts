@@ -100,6 +100,31 @@ export const envSchema = z.object({
   LANGUAGE_LOCALE: z.literal('es').default('es'),
   /** v1: `settings.TIME_ZONE = 'America/Bogota'` with `USE_TZ = True`. */
   TIME_ZONE: z.string().trim().min(1).default('America/Bogota'),
+
+  // --- scheduler (Phase 7b) ------------------------------------------------
+  /**
+   * Whether **this** process runs the scheduler cron (`SchedulerRunner`).
+   *
+   * ⚠️ **Defaults to `false`, and that is the multi-instance answer, not a convenience.**
+   * v1's runner is `celery -A api beat`, a *separate container* from the gunicorn API — the
+   * web image never runs it, however many replicas of the web image exist. v2 keeps the same
+   * property with a flag instead of a second image: exactly one deployed process sets
+   * `SCHEDULER_ENABLED=true`, and every other replica has no cron at all. Defaulting to
+   * `false` also means no test, no local `npm run start`, and no scaled-out replica can
+   * publish a payment reminder by accident.
+   *
+   * Defence in depth against the flag being set twice lives in the data layer:
+   * `SchedulerTaskRepository.claim()` is an atomic
+   * `UPDATE … WHERE id = ? AND processed = false`, so a second runner that loaded the same
+   * row loses the claim and skips it. See `docs/phase-7b-deviations.md` §2.
+   *
+   * Accepts `true`/`1`/`yes`/`on` (case-insensitive) as true; anything else is false.
+   */
+  SCHEDULER_ENABLED: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => ['true', '1', 'yes', 'on'].includes((value ?? '').toLowerCase())),
 });
 
 /**

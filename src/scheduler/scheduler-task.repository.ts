@@ -1,6 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { AppConfigService } from '../config/app-config.service';
-import { toHstoreLiteral, type PythonEncodable } from '../common/utils/hstore.codec';
+import {
+  parseHstore,
+  toHstoreLiteral,
+  type HstoreMap,
+  type PythonEncodable,
+} from '../common/utils/hstore.codec';
+import type { PlainDate } from '../common/utils/date.util';
 import type { Prisma } from '../prisma';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -27,6 +33,23 @@ export const SCHEDULER_TASK_NOTIFICATIONS = 0;
 export interface SchedulerTaskPayload extends Record<string, PythonEncodable> {
   type: string;
   owner_id: number;
+}
+
+/**
+ * A row the runner loaded, with `payload` already parsed out of its hstore rendering.
+ *
+ * `payloadText` is kept alongside because `create_repeat_instance` writes
+ * `payload = task.payload` **verbatim** — v1 hands Django the dict it read back (all values
+ * already strings) and `HStoreField.get_prep_value` `str()`s them a second time, which is a
+ * no-op. Cloning the stored text avoids a re-encode that could differ from what v1 stored.
+ */
+export interface DueSchedulerTask {
+  readonly id: number;
+  readonly type: number;
+  readonly run_date: Date;
+  readonly repeat: number;
+  readonly payload: HstoreMap;
+  readonly payloadText: string;
 }
 
 /**
@@ -180,6 +203,131 @@ export class SchedulerTaskRepository {
       WHERE payload -> 'owner_id' = ${String(ownerId)}
         AND payload -> 'type' = ${taskType}
     `;
+  }
+
+  /**
+   * **Phase 7b.** The runner's read: today's unprocessed tasks.
+   *
+   * ```python
+   * date = datetime.now()                                  # process zone = America/Bogota
+   * tasks = SchedulerTask.objects.filter(run_date__year = date.year,
+   *                                      run_date__month = date.month,
+   *                                      run_date__day = date.day, processed = False)
+   * ```
+   *
+   * Two things are deliberately **not** a transcription:
+   *
+   * ⚠️ **`<=`, not `=` — this is deviation D7** (operator answer Q8). v1 matches the calendar
+   * day exactly, so a reminder whose `run_date` has already passed is never sent: the 5-day
+   * loan reminder is skipped outright whenever the monthly payment file lands within five
+   * days of the deadline, which is the case D7 exists to fix. v2 sends it on the next pass
+   * instead. ⚠️ **The backlog consequence is real and is registered as P7-D1** — `fondodev`
+   * holds 109 past-due unprocessed rows going back to 2020, and a first run with `<=` would
+   * publish all of them. Draining that backlog is a cutover step, not a code change.
+   *
+   * ⚠️ **"Today" is `America/Bogota`, passed in, never read from the host.** v1 gets it for
+   * free (`Settings.__init__` sets `os.environ['TZ']` from `TIME_ZONE`), v2 does not; the
+   * comparison also extracts the *stored* date in Bogota, matching the `AT TIME ZONE` that
+   * Django's `__year`/`__month`/`__day` lookups emit under `USE_TZ`. A UTC extract would move
+   * every 19:00–23:59 local task onto the next day and make the runner skip or double-run
+   * around midnight. Same trap, same helper, as `existsUnprocessedOnDay` above.
+   *
+   * **No `ORDER BY`**, matching v1's unordered queryset — heap order is what both sides
+   * iterate, and Phase 2 measured that adding one to the sibling subscription read *breaks*
+   * wire parity. The only thing order affects here is the sequence of SQS messages.
+   */
+  async findDueUnprocessed(today: PlainDate): Promise<DueSchedulerTask[]> {
+    const zone = this.config.timeZone;
+    const rows = await this.prisma.$queryRaw<
+      { id: number; type: number; run_date: Date; repeat: number; payload: string }[]
+    >`
+      SELECT id, type, run_date, repeat, payload::text AS payload
+      FROM fondo_api_schedulertask
+      WHERE processed = false
+        AND (run_date AT TIME ZONE ${zone})::date
+            <= make_date(${today.year}, ${today.month}, ${today.day})
+    `;
+    return rows.map((row) => ({
+      id: row.id,
+      type: row.type,
+      run_date: row.run_date,
+      repeat: row.repeat,
+      payload: parseHstore(row.payload),
+      payloadText: row.payload,
+    }));
+  }
+
+  /**
+   * **Phase 7b.** `task.processed = True; task.save()`, made an **atomic claim**.
+   *
+   * v1 writes an unconditional `UPDATE … SET processed = true WHERE id = ?` after
+   * `executer.run()` has returned. v2 adds `AND processed = false` and reads the row count,
+   * which turns the same statement into the compare-and-set the plan asks for
+   * (§3 Phase 7 Risks: *"Multi-instance v2 needs a lock or an atomic claim
+   * (`UPDATE … WHERE processed = false RETURNING`), or tasks run N times"*).
+   *
+   * The runner claims **before** running, so a second runner that loaded the same row loses
+   * the race and skips it rather than publishing a duplicate push and writing a duplicate
+   * repeat clone. The ordering change is registered as **P7-D2**, together with the one
+   * behaviour it costs: the claim is *released* again when the executer throws, so v1's
+   * "a failed task stays unprocessed and is retried next pass" survives everything except a
+   * hard process crash inside `run()`.
+   *
+   * @returns `true` if this call won the row.
+   */
+  async claim(id: number, client: SchedulerSqlClient = this.prisma): Promise<boolean> {
+    const updated = await client.$executeRaw`
+      UPDATE fondo_api_schedulertask
+      SET processed = true
+      WHERE id = ${id} AND processed = false
+    `;
+    return updated === 1;
+  }
+
+  /**
+   * **Phase 7b.** Undoes {@link claim} when the executer threw.
+   *
+   * v1 never sets `processed` in that case at all — the exception skips `task.save()` — so
+   * releasing restores v1's observable end state: the row is still unprocessed and the next
+   * 10:00/14:00 pass tries it again. Only called on the error path.
+   */
+  async release(id: number, client: SchedulerSqlClient = this.prisma): Promise<void> {
+    await client.$executeRaw`
+      UPDATE fondo_api_schedulertask
+      SET processed = false
+      WHERE id = ${id}
+    `;
+  }
+
+  /**
+   * **Phase 7b.** `create_repeat_instance`'s insert (`scheduler/tasks.py:43-48`):
+   *
+   * ```python
+   * SchedulerTask.objects.create(type = task.type, run_date = run_date,
+   *                              payload = task.payload, repeat = task.repeat)
+   * ```
+   *
+   * `processed` is not passed and takes Django's `default=False`; the column has no database
+   * default, so v2 supplies it (plan §4 rule 5). `payload` is written from the source row's
+   * stored text, for the reason {@link DueSchedulerTask.payloadText} gives.
+   *
+   * ⚠️ **The clone does not go through `schedule_notification`**, so the same-day dedupe does
+   * **not** apply to it. Two rows for the same owner/type on the same day are reachable this
+   * way in v1 too, and are ported rather than narrowed.
+   *
+   * @returns the new row's id.
+   */
+  async createRepeatInstance(
+    task: DueSchedulerTask,
+    runDate: Date,
+    client: SchedulerSqlClient = this.prisma,
+  ): Promise<number> {
+    const rows = await client.$queryRaw<{ id: number }[]>`
+      INSERT INTO fondo_api_schedulertask (type, run_date, payload, processed, repeat)
+      VALUES (${task.type}, ${runDate}, ${task.payloadText}::hstore, false, ${task.repeat})
+      RETURNING id
+    `;
+    return rows[0].id;
   }
 
   /**

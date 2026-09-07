@@ -22,6 +22,7 @@ import { MailModule } from './mail/mail.module';
 import { NotificationModule } from './notifications/notification.module';
 import { PasswordResetModule } from './password-reset/password-reset.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { SchedulerRunnerModule } from './scheduler/scheduler-runner.module';
 import { UserModule } from './users/user.module';
 
 /**
@@ -49,7 +50,10 @@ import { UserModule } from './users/user.module';
  * Phase 5 adds {@link ActivityModule} — `GET|POST /api/activity/year`,
  * `GET|POST /api/activity/year/<id_year>` and `GET|PATCH|DELETE /api/activity/<id>`.
  *
- * Saving accounts, files and the scheduler runner arrive in Phases 6-8.
+ * Phase **7b** adds {@link SchedulerRunnerModule} — the cron that replaces `celery beat`,
+ * the executer factory and the `repeat` cloning. It contributes **no route**.
+ *
+ * Saving accounts and files arrive in Phases 6 and 8.
  */
 @Module({
   imports: [
@@ -62,8 +66,11 @@ import { UserModule } from './users/user.module';
     LoanModule,
     ActivityModule,
     PasswordResetModule,
-    // Registered now so Phase 7 only has to add the cron provider. Declares no jobs yet.
     ScheduleModule.forRoot(),
+    // Phase 7b: the `celery beat` replacement. Declares the 10:00/14:00 America/Bogota cron
+    // but does no work unless `SCHEDULER_ENABLED` is set on *this* process — v1's beat is a
+    // separate container, and that is how the multi-instance question is answered.
+    SchedulerRunnerModule,
     HealthModule,
   ],
   providers: [

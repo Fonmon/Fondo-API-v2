@@ -188,7 +188,35 @@ describe('NotificationService', () => {
       repository.findPushSubscriptionsByUserIds.mockResolvedValue([DECODED]);
       publisher.publish.mockResolvedValue(false);
 
-      await expect(service.sendNotification([1], 'x', '/')).resolves.toBeUndefined();
+      // ⚠️ Phase 7b widened the return from `void` to a `NotificationDelivery` tag. The
+      // assertion this replaces was `resolves.toBeUndefined()`, whose subject was "does not
+      // throw" — that is still what is asserted, now naming the outcome instead of the
+      // absence of one. v1 returns `None` for all three tags; the scheduler needs to tell
+      // them apart in order to log a swallowed publish failure rather than record it as a
+      // success (`docs/phase-7b-deviations.md` §3).
+      await expect(service.sendNotification([1], 'x', '/')).resolves.toBe('failed');
+    });
+
+    describe('the three v1 outcomes, told apart (Phase 7b)', () => {
+      it('reports "published" when SQS accepted the message', async () => {
+        repository.findPushSubscriptionsByUserIds.mockResolvedValue([DECODED]);
+        publisher.publish.mockResolvedValue(true);
+
+        await expect(service.sendNotification([1], 'x', '/')).resolves.toBe('published');
+      });
+
+      it('reports "no-subscriptions" when the member granted no browser permission', async () => {
+        repository.findPushSubscriptionsByUserIds.mockResolvedValue([]);
+
+        await expect(service.sendNotification([1], 'x', '/')).resolves.toBe('no-subscriptions');
+      });
+
+      it('reports "failed" when every publish attempt failed — and still does not throw', async () => {
+        repository.findPushSubscriptionsByUserIds.mockResolvedValue([DECODED]);
+        publisher.publish.mockResolvedValue(false);
+
+        await expect(service.sendNotification([1], 'x', '/')).resolves.toBe('failed');
+      });
     });
   });
 

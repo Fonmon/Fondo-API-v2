@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-09-07 | v4.2 | ✅ **PHASE 7b IMPLEMENTED** (`feat/phase-7b-scheduler`, off `d88e3af`) — the cron runner, the executer factory and the `repeat` cloning; **no route**. **D7 implemented**; five discoveries **P7-D1**–**P7-D5** registered in `docs/phase-7b-deviations.md`. **The multi-instance question is decided: `@nestjs/schedule` + a `SCHEDULER_ENABLED` role flag + an atomic `claim()`**, not BullMQ — v1's guarantee was *topology* (beat is a separate container), BullMQ would keep the Redis this phase retires and add a second source of truth beside `fondo_api_schedulertask`, and the residual is handled in the data. **The silent-failure question is decided deliberately, both ways:** the *outcome* is ported (a swallowed publish still marks the row processed and still clones — Q6, and the alternative retries a config error twice a day forever while breaking the `repeat` chain) and the *silence* is dropped (a WARN naming the task, `NotificationService.sendNotification` returning `'published' \| 'no-subscriptions' \| 'failed'` instead of `void`). ⚠️ **One finding gates the phase: P7-D1.** D7's `<=` cannot distinguish "has passed" from "was never picked up because v1 could not", and `fondodev` holds **110** rows due on the first enabled run, oldest **2020-09-27**, **65** of them for loans already `PAID_OUT` — ~108 stale pushes. A **drain step in Phase 9's runbook** is recommended; escalated to `business-analyst`. ⚠️ **P7-D3:** `create_repeat_instance`'s four `if`s are not `elif`s and have no `else`, so an out-of-range `repeat` clones the task **onto its own date, forever** — v2 refuses. **Zero inherited tests** (v1 has none for `fondo_api/scheduler/`); 80 new cells in three new specs plus 29 in three existing ones, **nine deviations control-run**, one control caught reporting `Tests: 0 total` and rewritten. Gate: lint ✅ · tsc ✅ · **2173 unit / 67 suites** · **1061 e2e + 2 skipped / 20 suites** · `fondodev` at baseline on counts, sequences **and** `xmin`, before and after; pre-write `pg_dump` of every table at `~/.fondo-parity-dumps/20260907T055041-phase-7b-start/`. |
 | 2026-09-03 | v2.6 | **Round 2's F6 and F8 fixed; both were bigger than filed, and both were implemented rather than registered.** **F6** — `APIView.initial()` negotiates a renderer *before* `perform_authentication`, so an unacceptable `Accept` is a **406 before the guards, the handler and any write**: `DELETE /api/user/<id>` under `Accept: application/xml` was **v1 refusing and v2 soft-deleting the row** (measured, restored). `DefaultContentNegotiation.select_renderer` ported into a middleware between the URL resolver and the body parser. A second failure mode the round-2 report did not reach: `?format=` naming no renderer's `format` is `Http404` — `GET /api/user?format=xml` is a **404 before authentication** in v1 and was a 200 in v2. **P3-D8 rewritten** to claim only the rendering (browsable HTML, `?format=api`, `text/*`, and a newly measured `Accept: application/json;indent=8` → 152 bytes vs 79). **F8** — the three rows had one cause: v2 parsed multipart with **busboy**, a strict parser, and v1 uses **Django's**, which raises in three places and salvages the rest. `MultiPartParser`/`BoundaryIter`/`parse_boundary_stream`/`cgi.valid_boundary`/`parse_header` ported; multer out of the request path. 16/16 cells identical, four of them the report never reached. The report's model of the missing-`boundary` case was wrong: `None.decode()` is an **AttributeError**, which `Request.data`'s property/`__getattr__` re-entry **swallows**, so the view sees an empty `QueryDict` — hence a serializer 400 on `/api-token-auth` and a `KeyError` 500 on `PATCH /api/user`. Also closed in the fail-closed direction: `RequestDataTooBig` / `TooManyFieldsSent`, which v2 was accepting. **R2.11.5** cell added with positive controls. Gate: lint + typecheck clean, **1602 unit / 53 suites**, **699 e2e + 1 skipped / 15 suites**. Live re-verification: 125 negotiation cells + 16 multipart cells + a 23-cell regression sweep, **status distributions identical on both stacks**; the only diffs are the registered Django HTML 404/500 pages. `pg_dump` of **every table** taken before the first write and diffed after: all 20 tables **byte-identical** — `schedulertask` 626, `notificationsubscriptions` 94/1468, `auth_user` 15 (1 active ADMIN, 2 inactive), `power` 20, `loan` 425. |
 | 2026-09-06 | v4.1 | ✅ **PHASE 5 CLOSED — Approved with conditions C59–C67.** The reviewer re-measured the gate to the same numbers and ran **four independent verifications instead of reading the reports** — three measured clean and were recorded as such (the `//`-target divergence does not exist; gunicorn 19.9.0's dot-prefix workaround preserves both slashes, read out of the running container). The fourth found that **`parse_request_line` does not stop at the port**: `GET http://[/api/activity/year` is v1 **400** / v2 **404 via Express's `finalhandler`**, so O1's shape fires on a plain `GET`, not only authority-form targets — a request reaching a response without passing the URL resolver at all. **N1's model confirmed sound**, `WeakSet` guard and `restoreCatchAllRoutes` included. ⚠️ **`python-str.ts`'s declared limits are incomplete** — verified independently: `0.00001` → v1 `1e-05` / v2 `0.00001`; `1e16` → v1 `1e+16` / v2 `10000000000000000`. Neither is an integral float, so limit 1 is false as written; it is a CPython/JS exponentiation-threshold mismatch the 41-row fixture cannot sample. **`pythonInt`/`toDjangoInt` still use JS `trim()`** — the exact class `pythonStrip` was built to close, in the same directory. **Phase 4's ledger audited: of eleven conditions, one is half-closed and that as a side effect of D29** — C48's two-gate warning reached, now **C59**. |
 | 2026-09-06 | v4.0 | **Phase 5 delta round 3: everything briefed verified FIXED** — DELTA-F1 (21/21, discriminator holds), **N1 confirmed at the boundaries** the developer derived (73 raw request lines; 2-char → 400, 3-char → 403, **21/24/40/200-char methods all pass** the prefix match, `GETx` → 403 while `get` → 400; `FROB` byte-identical to `PUT` on 27/27), D36 64/64, D37 as registered with **no id collision**, D38's four v1 outcomes including the corrected `KeyError` sub-case. The tester **under-counted the developer's claim in v2's favour**: its 73 lines found 4 diffs where the developer's 31 found 1, the extra 3 being pre-existing edge items. ⚠️ **One failure, `DELTA3-F1`, pre-existing and proven so against a `d7b95f8` build**: `normalizeEmail` omitted Django's `.strip()`, so v2 **stored and mailed `"  a@b.com  "`** — it escaped the database. Fixed conditionally, because Django strips only when an `@` is present and `str.strip()` is **not** `trim()` (CPython takes U+001C–U+001F and U+0085; JS takes U+FEFF). Spec generated from 16 container-measured inputs; controls: no-strip fails 8/18, naive `trim()` fails 5/18. ⚠️ **False-green #22, mine** — I certified the fixture at baseline on row counts alone; sequences and `xmin` were off from the rate-limited attempt. Gate: **2047 unit / 63**, **1031 e2e + 1 skipped / 18**. |
@@ -636,11 +637,21 @@ identical previous-year `enable` flip; both `patch=` modes identical.
 > after `executer.run()` returns while `send_notification` swallows errors, so a failed publish
 > is recorded as success. Highest ratio of consequence to coverage in the migration.
 
-**Goal:** retire the Celery worker + beat containers.
+**Goal:** retire the Celery worker + beat containers. ✅ **Done in 7b** — and because the
+replacement is `@nestjs/schedule` rather than BullMQ, **Redis goes with them**: `BROKER_URL`
+(`api/settings/base.py:165`) has no consumer left in v2. Add it to Phase 9's decommission list.
 
 **Scope**
 - Replace `celery -A api beat` with `@nestjs/schedule` (or BullMQ on the existing Redis if
   multi-instance safety is wanted — decide in this phase).
+  ✅ **Decided (7b): `@nestjs/schedule`**, plus a deployment role flag (`SCHEDULER_ENABLED`,
+  default **false**) and an atomic database claim. Reasoning in `docs/phase-7b-deviations.md`
+  §1, in short: v1's guarantee is *topology* — beat is a separate container and the web image
+  never runs it — so the flag reproduces v1's actual property, while BullMQ would keep the
+  Redis this phase exists to retire **and** add a second source of truth for "what runs when"
+  next to `fondo_api_schedulertask`. The multi-instance residual is handled in the data by
+  `claim()`. ⚠️ **Phase 9's decommission step can therefore drop Redis** — `BROKER_URL`
+  (`api/settings/base.py:165`) has no remaining consumer in v2.
 - Cron: **10:00 and 14:00 `America/Bogota`**, matching `crontab(minute=0, hour='10,14')`.
 - Loop: load today's unprocessed `SchedulerTask`s → resolve executer by `type` → run → mark
   `processed = true` → `create_repeat_instance` clones the row forward by `repeat`
@@ -663,6 +674,13 @@ identical previous-year `enable` flip; both `patch=` modes identical.
   the migration.
 - Multi-instance v2 needs a lock or an atomic claim
   (`UPDATE … WHERE processed = false RETURNING`), or tasks run N times.
+  ✅ **Done in 7b** — `SchedulerTaskRepository.claim()`, with the executer resolved *before*
+  the claim so an unknown type is never consumed (Phase 6's D12 adds one).
+- ⚠️ **And the mirror case, which is the more likely cutover mistake because it is the
+  default: `SCHEDULER_ENABLED` set on *nobody*.** Nothing errors, nothing logs an error, and
+  the fund simply stops getting reminders. The check is a **positive** one —
+  `grep -c 'Running scheduler'` on a day's log must be **2**; a `0` is the alarm (rule C67: a
+  check that can only report "nothing found" is not a check).
 - `relativedelta` month/year arithmetic on the 29th–31st.
 - ✅ *Double-execution across v1 and v2 is no longer a concern* — the hard switch means beat
   and the v2 scheduler never run against the same DB in production. **Keep them from
@@ -708,9 +726,27 @@ migrations.
 **Runbook (for the user)**
 1. Freeze writes to v1.
 2. Stop v1 containers: `api`, `worker`, `scheduler`, `sch_work` (`scripts/run-server.sh`).
-3. Deploy v2; point DNS/proxy at it. 🔴 **This step closes D38's accepted v1 exposure** (the unauthenticated account takeover) — it ends here, not at step 6, and needs nothing extra done.
+3. Deploy v2 with **`SCHEDULER_ENABLED` unset everywhere**; point DNS/proxy at it. 🔴 **This step closes D38's accepted v1 exposure** (the unauthenticated account takeover) — it ends here, not at step 6, and needs nothing extra done.
+3a. ⚠️ **Drain the scheduler backlog before enabling the runner — P7-D1.** v2's D7 rule is
+   `run_date <= today`, and *"has passed"* and *"was never picked up because v1 could not"* are
+   the same database state. Measured on `fondodev` 2026-09-07: **110** unprocessed rows are due
+   on the first pass, the oldest from **2020-09-27**, **65** of them payment reminders for loans
+   already `PAID_OUT`. After the step-1 dump and **before** step 3b:
+   ```sql
+   UPDATE fondo_api_schedulertask SET processed = true
+   WHERE processed = false AND run_date < now() - interval '2 days';
+   ```
+   ⚠️ **Pending the operator's answer** — two alternatives (bound the catch-up in code, which
+   changes D7; or accept the flood) are written up in `docs/phase-7b-deviations.md` §4, P7-D1.
+3b. Set **`SCHEDULER_ENABLED=true` on exactly one process** — the v2 equivalent of v1's separate
+   `celery beat` container, and the only replacement for it. **Then verify it is running:**
+   `grep -c 'Running scheduler'` on the day's log must be **2** (10:00 and 14:00 Bogota). A `0`
+   means nobody has the flag and reminders have silently stopped; that is the default state, so
+   check it rather than assume it.
 4. Smoke-test the Phase 1 role matrix and one loan approval end to end.
-5. Rollback = re-point at v1, **valid only until step 6 runs.**
+5. Rollback = re-point at v1, **valid only until step 6 runs.** ⚠️ Rolling back also means
+   unsetting `SCHEDULER_ENABLED` and restarting v1's `scheduler`/`sch_work` containers — the two
+   runners must never be up against the same database (§4 rule 6).
 
 **After the switch — v2 owns the schema**
 6. **hstore → jsonb migration** (v2's first owned schema change; Q7). Two columns:
@@ -720,6 +756,8 @@ migrations.
      JSON strings containing JSON and must be unwrapped. Not a one-liner.
    - Then delete the hstore codec, drop the two raw-SQL repositories to normal Prisma models,
      and simplify Phases 2 and 7. **This is the payoff for choosing Prisma — do not skip it.**
+     In the 7b runner the whole change is one cast: `create_repeat_instance` writes
+     `${task.payloadText}::hstore` and nothing else in it touches the encoding.
    - ⚠️ **One-way door:** Django's `HStoreField` breaks the instant this runs. Rollback to v1
      is dead after step 6. Take a backup first.
 
@@ -994,7 +1032,7 @@ column; none of these are mine to decide unilaterally, because each changes prod
 | **D4** | `timelimit > 36` silently clamped to 36; `timelimit = 0` accepted, then `DivisionByZero` at approval. | **Reject with `400`** (Q9) — both bounds. Enforce `1 ≤ timelimit ≤ 36`; no silent clamp. | P4 | ✅ **Decided — fix** |
 | **D5** | Power-approval email puts every member in `ToAddresses` with empty `Bcc`. | **Move to `Bcc`** (Q18). Recipient list stays every member (Q10) — only the disclosure is fixed. | P3 | ✅ **Decided — fix** |
 | **D6** | `LoanDetail.loan` is a plain FK; re-approving a closed loan creates a second row and 500s that loan permanently. | Unique `loan_id`, upsert not insert. Now **belt-and-braces** behind D10, which blocks the transition at the source. | P4 | ✅ **Decided — fix** |
-| **D7** | A payment reminder whose `run_date` has passed is **never sent** — the 5-day reminder is skipped entirely whenever the monthly file lands within 5 days of the deadline. | **Send immediately** on the next scheduler run instead of skipping (Q8). | P7 | ✅ **Decided — change** |
+| **D7** | A payment reminder whose `run_date` has passed is **never sent** — the 5-day reminder is skipped entirely whenever the monthly file lands within 5 days of the deadline. | **Send immediately** on the next scheduler run instead of skipping (Q8). ✅ **Implemented in 7b** as `(run_date AT TIME ZONE 'America/Bogota')::date <= today`. ⚠️ **Blast radius, measured, not estimated — see P7-D1 in `docs/phase-7b-deviations.md` §4:** "has passed" and "was never picked up because v1 could not" are the same database state, and `fondodev` holds **110** rows due under `<=`, the oldest from **2020-09-27**, **65** of them payment reminders for loans already `PAID_OUT`. The first enabled run would publish ~108 stale pushes. **A drain step belongs in Phase 9's cutover runbook, between "deploy v2" and "enable the scheduler"** — escalated to `business-analyst` as an operator question. | P7 | ✅ **Decided — change**; ⚠️ **backlog question open** |
 | **D8** | Bulk loan upload returns a bare `200` with no body. | **Return the list of auto-closed loans.** No cap on how many may be closed (Q3). ⚠️ Response-shape change — `manual-tester` must expect it. | P4 | ✅ **Decided — change** |
 | **D9** | Re-approving an already-approved or closed loan is allowed and corrupts the record. | **Enforce legal state transitions** `0→1`, `0→2`, `1→3`, `1→2`; reject anything else (Q14). ⚠️ **Known asymmetry under concurrency (C51):** the transition write is a compare-and-set, so the loser of a race gets D9's 409 — which is the sequential answer for five of the six race pairs and **not** for `0→1` winning against a `0→2` loser, where sequential execution gives a **200** (from state `1`, `1→2` is legal). Registered and pinned by a unit cell, not fixed: the bounded re-read-and-retry that would close it changes behaviour on the money path. §5.1 of `docs/phase-4-deviations.md`. | P4 | ✅ **Decided — fix** |
 | **D19** | `__create_birthdate_notification` (`services/user.py:269`) calls `.replace(year=today_year)` on the stored birthdate. `date(2000,2,29).replace(year=2026)` raises `ValueError`; `UserDetailView.patch` has no handler, so it **500s and `transaction.atomic()` rolls the whole edit back**. Checked 2026-08-31: **0 of 15 members have a 29 Feb birthdate**, so this is **latent** — it fires the day one is enrolled. | Clamp to 28 Feb or 1 Mar — decide which, then handle it deliberately. | P3 | ✅ **Fixed (P3)** — clamped to **28 Feb**, because `relativedelta(years=+1)` (and therefore Phase 7's own yearly clone of this task) puts it there; 1 Mar would leave the first notification a day after every repeat of itself. |
@@ -1309,6 +1347,14 @@ is cheap:
   token is not presence of a behaviour.
 * **A baseline is counts *and* sequences *and* `xmin` cardinality.** And an agent that reports
   doing nothing may still have written — #22's residue came from a run that died mid-round.
+  ⚠️ **Nor is a rolled-back probe a no-op.** PostgreSQL sequences are **not** transactional: a
+  `BEGIN; INSERT …; ROLLBACK;` leaves the row count, `max(id)` and `xmin` cardinality all
+  exactly at baseline and the sequence one higher. Phase 7b did this to itself while building a
+  positive control for its own fixture check, and the sequence line is what caught it (repaired
+  with `setval`, re-verified). **The control for a fixture check must not write** — run the same
+  probe against a different database instead: `DB=fondo_api_test scripts/parity/fixture-check.sh`.
+  The check and its control are now in the repo at **`scripts/parity/fixture-check.sh`** rather
+  than being re-typed each round.
 * **Every matrix needs a positive control** — a cell known to differ, proving the probe can see a
   difference at all. #4 was 72/72 agreement where every cell was a 401; #12 was 208 cells
   uniformly 500 on both sides.
@@ -1432,14 +1478,16 @@ pulled forward into Phase 3 (condition C24) and 7b waited on Phase 4.
 > happening at this moment. The table under it is the whole migration; the Conditions column is
 > the honest ledger of what each closed phase still owes.
 
-### ▶ Now — Phase 7b (Scheduler runner) starting. Phase 5 closed.
+### ▶ Now — Phase 7b (Scheduler runner) **IMPLEMENTED**; awaiting `manual-tester`.
 
 | | |
 |---|---|
-| **Branch / head** | `chore/phase-6-gate` @ `19c5d4d` — merges back to the line of work |
-| **Gate** | lint ✅ · `tsc` ✅ · **2093 unit / 64 suites** · **1032 e2e + 2 skipped / 19 suites** (the loan-race suite is opt-in, C56) · `fondodev` at baseline on counts, sequences and `xmin`. Asserted by exit code. |
-| **Pipeline** | Phase 5 ✅ **CLOSED** (tester PASS r3, reviewer approved C59–C67) → gate conditions ✅ **C59, C60, C62, C67 closed** → **Phase 7b ⬜ starting** |
-| **Blocking** | nothing |
+| **Branch / head** | `feat/phase-7b-scheduler`, branched from `d88e3af` |
+| **Gate** | lint ✅ · `tsc` ✅ · **2173 unit / 67 suites** (was 2093 / 64) · **1061 e2e + 2 skipped / 20 suites** (was 1032 + 2 / 19; the loan-race suite is opt-in, C56) · `fondodev` verified at baseline on counts **and** sequences **and** `xmin` cardinality, before and after. **Every one asserted by exit code.** |
+| **Pipeline** | Phase 5 ✅ CLOSED → **Phase 7b ✅ implemented** → ⬜ `manual-tester` → ⬜ `nestjs-reviewer` |
+| **Shipped** | `SchedulerRunner` (`0 10,14 * * *` `America/Bogota`), `ExecuterFactory`, `NotificationExecuter`, `create_repeat_instance`, `SCHEDULER_ENABLED`, four methods added to 7a's `SchedulerTaskRepository` (**no second hstore repository** — plan §2). **No route.** **D7 implemented.** Five discoveries **P7-D1**–**P7-D5** in `docs/phase-7b-deviations.md`. |
+| **Blocking** | ⚠️ **one operator question, and it gates the phase: P7-D1.** D7's `<=` makes **110** rows due on the first enabled run against `fondodev`, oldest **2020-09-27**, **65** of them reminders for loans already `PAID_OUT` — ~108 stale pushes to 13 members. Three options are written up; the recommended one is a **drain statement in Phase 9's runbook**, not a code change. Escalated to `business-analyst`. |
+| **Zero inherited tests** | v1 has **no** scheduler test — no `test_scheduler*.py`, nothing under `fondo_api/scheduler/`. All 80 new cells are original: 34 + 12 + 5 unit, 29 e2e; a further 29 were added to three existing specs. **Nine deviations control-run**, and one control reported `Tests: 0 total` on the first attempt and was rewritten (§5.7 of the deviations doc). |
 
 ⚠️ **Sequencing corrected 2026-09-07 — the board had Phase 6 next and that was wrong.** §3's
 Phase 7 block says *"Resequenced (v0.3): run this directly after Phase 4, before Phases 5/6"*, and
@@ -1470,8 +1518,8 @@ whether the close runs at the 10:00 or the 14:00 Bogotá pass (or both).
 | 7a Scheduler *write half* | ✅ **Landed with P3** (`af596b0`) | ✅ | ⬜ | ⬜ | ⬜ | pulled forward by **C24** |
 | 4 Loans | ✅ **CLOSED — approved w/ conditions, both rounds** (`806ca6e`) | ✅ | ✅ PASS + ✅ **delta PASS** (`17114a0`) | ✅ **Approved** (C40–C49) + ✅ **delta approved** (C50–C58) | ✅ C29/C30/C42 | C40–C43, C50, C51 ✅; **C44–C49, C52–C58 🟡 open → P5 gate** |
 | 5 Activities | ✅ **CLOSED — approved w/ conditions** (`d89f801`) | ✅ | ✅ **PASS r3** (three rounds) | ✅ **Approved** (C59–C67) | ✅ Q32/Q33 | **C59, C60, C62, C67 🔴 gate P6's start**; C61, C63–C66 🟡 → P6 gate |
-| 6 Saving accounts (CAPs) | ⬜ **After 7b** — D12's auto-close needs a runner to execute it | — | — | — | — | 2 operator questions open on **D12** |
-| 7b Scheduler *runner* | 🟡 **NEXT** — sole delivery path for loan payment reminders; zero inherited tests; **fails silently** | — | — | — | — | **D7** |
+| 6 Saving accounts (CAPs) | ⬜ **After 7b** — D12's auto-close needs a runner to execute it; the runner now exists | — | — | — | — | 2 operator questions open on **D12**; inherits **P7-D2**'s resolve-before-claim constraint for the new task type |
+| 7b Scheduler *runner* | ✅ **IMPLEMENTED** (`feat/phase-7b-scheduler`) — awaiting tester | ✅ | ⬜ | ⬜ | ⬜ **P7-D1 open** | **D7** ✅ implemented; **P7-D1**–**P7-D5** registered |
 | 8 Files + admin | ⬜ **Ready** — P2 closed; inherits rules 12b/12c | — | — | — | — | — |
 | 9 Cutover, hstore→jsonb | ⬜ Blocked on P8 | — | — | — | — | **C39** lands here |
 
@@ -1507,8 +1555,13 @@ Adapt `buildspec.yml` rather than replacing it:
 | `post_build` | `scripts/trigger-deploy.sh` → SSM → EC2 | unchanged |
 
 - Keep the SSM deploy trigger and its `master`-branch-and-PUSH-only guard.
-- Keep the `run-server.sh` container-role pattern; `worker` and `scheduler` roles collapse
-  into the v2 app (or a single scheduler process) at Phase 7.
+- Keep the `run-server.sh` container-role pattern. ✅ **Settled in 7b:** v1's four roles
+  (`api`, `worker`, `scheduler`, `sch_work`) collapse to **one image with a flag**. Every
+  process runs `node dist/main`; **exactly one** of them sets `SCHEDULER_ENABLED=true` and is
+  the beat replacement. Nothing else distinguishes them, and no `worker` process remains — the
+  SQS publish is inline (Phase 2). ⚠️ The flag defaults to **false**, so a deployment that
+  forgets it runs no scheduler at all and says nothing about it; §3 Phase 7's *Risks* gives
+  the positive check.
 - v1 has **no lint step**. v2 adds lint + typecheck to the gate.
 
 ---
@@ -1571,6 +1624,12 @@ table (§5), flagged there.
 | Q | Topic | Blocks |
 |---|---|---|
 | **Q28** | **D5's empty `To`.** The power-of-attorney letter now goes out with `ToAddresses: []` and every member in `Bcc` — the literal reading of "move them to `Bcc`". SES accepts it, but a message with no `To:` header is scored more harshly by some spam filters and this is a formal document. The alternative is `To: <DEFAULT_FROM_EMAIL>`. Confirm before the first real approval after cutover; one-line change either way. | Nothing — recorded, not blocking |
+
+### Open — raised by the Phase 7b implementation
+
+| Q | Topic | Blocks |
+|---|---|---|
+| **Q34** | ⚠️ **D7's backlog — P7-D1.** D7 says a past-due reminder is *sent* rather than skipped. But *"has passed"* and *"was never picked up, because v1 skips it"* are the same row, and v1 has been accumulating the second kind since 2020 **precisely because** it skips them. Measured on `fondodev` 2026-09-07: **110** unprocessed rows are due on the first pass with `<=`, oldest **2020-09-27**, **108** of them targeting a member with a live push subscription, and **65** are payment reminders for loans that are already `PAID_OUT`. So the first enabled run pushes ~108 notifications reading *"Recuerde que la fecha límite de pago para el crédito N, es el: …"* with dates up to six years old, to 13 members. **Three options, written up in `docs/phase-7b-deviations.md` §4 (P7-D1):** (1) **drain at cutover** — one `UPDATE` before `SCHEDULER_ENABLED` is set, keeps D7 exactly as decided, **recommended**; (2) **bound the catch-up in code** to the last N days — a change to D7 and needs registering as one, and it permanently swallows genuinely old tasks; (3) **accept the flood**. | 🔴 **Phase 7b's gate.** No code change is needed for option 1, but the decision is. |
 
 ⚠️ **`DJANGO_SECRET_KEY` is now required in production.** v2 signs its own password-reset tokens
 with it (**P3-D4**). It reuses the variable v1's `production.py` already reads, so no

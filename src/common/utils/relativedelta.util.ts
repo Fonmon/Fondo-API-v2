@@ -129,6 +129,27 @@ export enum SchedulerRepeat {
   YEARLY = 4,
 }
 
+/**
+ * Whether a raw `fondo_api_schedulertask.repeat` value is one of the five Django
+ * `REPEAT_TYPES`.
+ *
+ * ⚠️ The column is `choices`-constrained in **Python only** — there is no check constraint —
+ * so an out-of-range value is a reachable database state, and v1 handles it by accident:
+ * `create_repeat_instance`'s four `if`s are not `elif`s and have no `else`, so a `repeat` of,
+ * say, 7 leaves `run_date` unchanged and clones the task **onto its own date**, producing an
+ * unprocessed twin that repeats the trick on the next pass, forever. Phase 7b refuses
+ * instead (**P7-D3**), and this is the narrowing that lets it.
+ */
+export function isSchedulerRepeat(value: number): value is SchedulerRepeat {
+  // ⚠️ `Number.isInteger` first, and not as a formality: a numeric TS enum carries a **reverse
+  // mapping**, so `hasOwnProperty(SchedulerRepeat, 'MONTHLY')` is `true`. The parameter is
+  // typed `number`, but the values this narrows come out of a database column, and a guard
+  // that accepts its own enum's key names is one `as` away from being useless.
+  return (
+    Number.isInteger(value) && Object.prototype.hasOwnProperty.call(SchedulerRepeat, String(value))
+  );
+}
+
 const REPEAT_DELTAS: Readonly<Record<SchedulerRepeat, RelativeDelta | null>> = Object.freeze({
   [SchedulerRepeat.NONE]: null,
   [SchedulerRepeat.DAILY]: { days: 1 },
