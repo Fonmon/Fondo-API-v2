@@ -736,8 +736,15 @@ migrations.
    UPDATE fondo_api_schedulertask SET processed = true
    WHERE processed = false AND run_date < now() - interval '2 days';
    ```
-   ⚠️ **Pending the operator's answer** — two alternatives (bound the catch-up in code, which
-   changes D7; or accept the flood) are written up in `docs/phase-7b-deviations.md` §4, P7-D1.
+   ✅ **Decided by the operator 2026-09-07 (Q34): drain.** The two alternatives — bounding the
+   catch-up in code, which changes D7; or accepting the flood — are in
+   `docs/phase-7b-deviations.md` §4, P7-D1, and were declined.
+
+   ⚠️ **Use this predicate, not `run_date < now()`.** The two-day window drains **108** of the
+   110 and deliberately **spares today's birthday task and yesterday's reminder**, which are
+   legitimate deliveries the first pass should make. `run_date < now()` would drain those too,
+   and the member whose birthday it is would simply never be greeted. **D7 is unchanged**: a
+   task that becomes past due *after* cutover is still sent rather than skipped.
 3b. Set **`SCHEDULER_ENABLED=true` on exactly one process** — the v2 equivalent of v1's separate
    `celery beat` container, and the only replacement for it. **Then verify it is running:**
    `grep -c 'Running scheduler'` on the day's log must be **2** (10:00 and 14:00 Bogota). A `0`
@@ -1629,7 +1636,7 @@ table (§5), flagged there.
 
 | Q | Topic | Blocks |
 |---|---|---|
-| **Q34** | ⚠️ **D7's backlog — P7-D1.** D7 says a past-due reminder is *sent* rather than skipped. But *"has passed"* and *"was never picked up, because v1 skips it"* are the **same row**, and v1 has been accumulating the second kind since 2020. Verified on `fondodev` 2026-09-07: **110 unprocessed tasks are past due** (oldest `2020-09-27`), **108 of them payment reminders** — and joining each to its loan, **65 are for loans already `PAID_OUT`** and 43 for loans still `APPROVED` (oldest April 2024). A sample message: *"Recuerde que la fecha límite de pago para el crédito 112, es el: 2 oct. 2020"*. The first run with `SCHEDULER_ENABLED=true` would push all of them to 13 members. | ✅ **Answered 2026-09-07 — drain them at cutover.** A single `UPDATE` in the Phase 9 runbook (**step 3a**) marks every past-due unprocessed task `processed = true`, so v2 starts clean. **D7 is unchanged**: a task that becomes past due *after* cutover is still sent rather than skipped — the drain is a one-off for six years of rows v1 was never going to deliver. The 43 live-loan reminders are drained too, deliberately: their due dates are equally gone, so sending them would confuse rather than remind. | **D7** unchanged; **P7-D1** resolved; runbook **step 3a** |
+| **Q34** | ⚠️ **D7's backlog — P7-D1.** D7 says a past-due reminder is *sent* rather than skipped. But *"has passed"* and *"was never picked up, because v1 skips it"* are the **same row**, and v1 has been accumulating the second kind since 2020. Verified on `fondodev` 2026-09-07: **110 unprocessed tasks are past due** (oldest `2020-09-27`), **108 of them payment reminders** — and joining each to its loan, **65 are for loans already `PAID_OUT`** and 43 for loans still `APPROVED` (oldest April 2024). A sample message: *"Recuerde que la fecha límite de pago para el crédito 112, es el: 2 oct. 2020"*. The first run with `SCHEDULER_ENABLED=true` would push all of them to 13 members. | ✅ **Answered 2026-09-07 — drain them at cutover.** A single `UPDATE` in the Phase 9 runbook (**step 3a**) marks **108 of the 110** `processed = true` — the predicate is `run_date < now() - interval '2 days'`, **not** `run_date < now()`, so today's birthday task and yesterday's reminder still go out. Draining those two would mean the member whose birthday it is is simply never greeted. **D7 is unchanged**: a task that becomes past due *after* cutover is still sent rather than skipped — the drain is a one-off for six years of rows v1 was never going to deliver. The 43 live-loan reminders are drained too, deliberately: their due dates are equally gone, so sending them would confuse rather than remind. | **D7** unchanged; **P7-D1** resolved; runbook **step 3a** |
 
 ⚠️ **`DJANGO_SECRET_KEY` is now required in production.** v2 signs its own password-reset tokens
 with it (**P3-D4**). It reuses the variable v1's `production.py` already reads, so no
