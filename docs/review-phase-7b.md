@@ -378,7 +378,12 @@ must be amended to say that in v2 the lost-notification window leaves **no trace
 ### C74 — **minor in effort, gates Phase 6's start** — write down what D12 inherits, before D12 exists
 
 *Location:* `src/scheduler/executers/scheduler-executer.ts` (`SchedulerExecuterOutcome` docblock);
-`MIGRATION_PLAN.md` §7.4 / Phase 6 *Risks*.
+`docs/phase-7b-deviations.md` §7.4 / `MIGRATION_PLAN.md` §3 Phase 6 *Risks*.
+> ⚠️ **Post-hoc editorial correction (2026-09-07), marked rather than made silently.** This line
+> originally read `` `MIGRATION_PLAN.md` §7.4 ``. There is no §7.4 in `MIGRATION_PLAN.md` — its §7 is
+> *Phase gate checklist* and has no numbered subsections. §7.4 is in `docs/phase-7b-deviations.md`.
+> `nestjs-reviewer`'s error, in the condition's own address line. It cost nothing: the fix commit
+> `a191f74` cites both locations correctly and the §7 ledger row already carried the correction.
 
 §7.4 already records the two cheap-now/expensive-later items (register the new type in
 `ExecuterFactory`; the resolve-before-claim ordering protects a rolling deploy). Both are right. Two
