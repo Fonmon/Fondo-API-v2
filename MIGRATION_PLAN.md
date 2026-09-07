@@ -736,7 +736,28 @@ migrations.
    already `PAID_OUT`. After the step-1 dump and **before** step 3b:
    ```sql
    UPDATE fondo_api_schedulertask SET processed = true
-   WHERE processed = false AND run_date < now() - interval '2 days';
+   WHERE processed = false AND run_date < now() - interval '2 days'
+     AND repeat = 0;
+   ```
+
+   ⚠️ **`AND repeat = 0` is load-bearing — condition C72.** Draining a *repeating* task writes
+   no clone, so it does not skip one delivery, it **ends the chain permanently**. Measured
+   2026-09-07: of the 108 rows the two-day predicate hits, **107 are `repeat = 0`** and exactly
+   **one is not** — task **1497**, a `YEARLY` birthdate task for owner **3** (Fernando,
+   `birthdate 1974-03-02`), unprocessed since 2024-03-02. Without this clause that member is
+   never greeted again, and nothing anywhere would say so.
+
+   **Decide task 1497 explicitly at cutover, with the fact that owner 3 is `is_active = false`**
+   — a soft-deleted member, so the live harm today is nil and draining it by id is defensible.
+   The clause is there for the case that is not nil. Today's birthday task (id **2021**, owner
+   **9**, Nitza Marisol, also `YEARLY`) is already protected by the two-day grace and must fire.
+
+   After the drain, confirm the intent rather than the statement:
+   ```sql
+   SELECT count(*) FILTER (WHERE repeat <> 0) AS chains_left_alive,
+          count(*) AS still_unprocessed_and_due
+   FROM fondo_api_schedulertask
+   WHERE processed = false AND run_date <= now();
    ```
    ✅ **Decided by the operator 2026-09-07 (Q34): drain.** The two alternatives — bounding the
    catch-up in code, which changes D7; or accepting the flood — are in
