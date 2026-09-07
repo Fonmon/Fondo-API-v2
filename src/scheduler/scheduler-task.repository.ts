@@ -51,8 +51,9 @@ export interface SchedulerTaskPayload extends Record<string, PythonEncodable> {
  * the executer factory and the `repeat` cloning, stays in Phase 7.
  *
  * ⚠️ **How the rows written here are validated before Phase 7 exists** (C24's actual
- * question): not by running them, but by comparing them. `fondodev` holds **632** real rows
- * written by v1 — 92 of them `birthdate` — so the parity criterion for this phase is that a
+ * question): not by running them, but by comparing them. `fondodev` holds **626** real rows
+ * written by v1 — 86 of them `payload->'type' = 'birthdate'`, 540 `payment_reminder` — so the
+ * parity criterion for this phase is that a
  * `SchedulerTask` row v2 writes for a given user is byte-identical to the one v1 writes for
  * the same user, `payload::text` included, and that the same-day dedupe suppresses the second
  * write in both. That is a *data* comparison, available now; Phase 7 later adds the

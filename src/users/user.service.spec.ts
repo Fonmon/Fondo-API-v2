@@ -9,6 +9,7 @@ import { EmailTemplate } from '../mail/email-template';
 import type { MailService } from '../mail/mail.service';
 import type { NotificationService } from '../notifications/notification.service';
 import { DjangoPasswordService } from '../auth/password/django-password.service';
+import { Prisma } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
 import {
   birthdayInYear,
@@ -295,6 +296,128 @@ describe('UserService (unit)', () => {
       expect(prisma.authUser.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ orderBy: { id: 'asc' } }),
       );
+    });
+  });
+
+  // ==========================================================================
+  // D35 — the NOT NULL reproduction, bound to the schema (C64)
+  // ==========================================================================
+  /**
+   * **Condition C64.** `createUser` and `__update_user_personal` reproduce PostgreSQL's
+   * `NOT NULL` on `auth_user.first_name`/`last_name` in **application code**, because Prisma
+   * validates required fields client-side and the database never gets the chance to refuse
+   * them. That reproduction is currently held in place by a comment
+   * (`user.service.ts`, "⚠️ If `auth_user.first_name`/`last_name` ever become nullable, this
+   * must go with them"), which is the weakest possible binding to a fact that lives in
+   * `schema.prisma`: relax the column to `String?` and the code still compiles — `string` is
+   * assignable to `string | null` — and still answers 409 for a value the database would now
+   * accept. Silent divergence, in the direction nothing tests.
+   *
+   * These are **type-level** assertions. They cost nothing at runtime and they fail at
+   * `tsc --noEmit`, which is where a schema change is felt. The `expect` bodies exist only so
+   * Jest reports a cell; the real assertion is the `NotNullable<…>` instantiation above it.
+   *
+   * The same binding covers `fondo_api_userpreference.primary_color`/`secondary_color`, whose
+   * call site uses `as string` casts that would otherwise start passing `null` through
+   * unnoticed (see the C66 note at that call site).
+   */
+  describe('D35’s NOT NULL reproduction is bound to schema.prisma, not to a comment', () => {
+    /** Instantiating this with a nullable field is a **compile error**. */
+    type NotNullable<T> = null extends T ? { ERROR: 'this column now admits null' } : T;
+
+    it('auth_user.first_name and last_name do not admit null in Prisma’s input types', () => {
+      type FirstName = NotNullable<Prisma.AuthUserCreateInput['first_name']>;
+      type LastName = NotNullable<Prisma.AuthUserCreateInput['last_name']>;
+      type FirstNameUpdate = NotNullable<Prisma.AuthUserUpdateInput['first_name']>;
+      const first: FirstName = 'Ana';
+      const last: LastName = 'Montanez';
+      const update: FirstNameUpdate = 'Ana';
+      expect([first, last, update]).toEqual(['Ana', 'Montanez', 'Ana']);
+    });
+
+    it('userpreference.primary_color and secondary_color do not admit null either', () => {
+      type Primary = NotNullable<Prisma.UserPreferenceUpdateInput['primary_color']>;
+      type Secondary = NotNullable<Prisma.UserPreferenceUpdateInput['secondary_color']>;
+      const primary: Primary = '#ffffff';
+      const secondary: Secondary = '#000000';
+      expect([primary, secondary]).toEqual(['#ffffff', '#000000']);
+    });
+
+    it('the guard is real: a column that IS nullable resolves to the error type', () => {
+      // `auth_user.last_login` is `DateTime?`. This is the positive control — without it the
+      // two cells above would pass just as well if `NotNullable` were the identity.
+      type LastLogin = NotNullable<Prisma.AuthUserCreateInput['last_login']>;
+      const control: LastLogin = { ERROR: 'this column now admits null' };
+      expect(control.ERROR).toBe('this column now admits null');
+    });
+  });
+
+  // ==========================================================================
+  // D25 / P4-D1 — the ordering, not the role array
+  // ==========================================================================
+  /**
+   * **C44's user side.** `loan.service.spec.ts` guards that `USER_READ_PRIVILEGED_ROLES` and
+   * `LOAN_READ_PRIVILEGED_ROLES` stay equal, and pins `getLoan`'s **read-then-authorise**
+   * order. This is the opposite half: `getUser` **authorises first**, so a MEMBER asking for
+   * an id that is not theirs is refused before any row is read — 403 whether or not the row
+   * exists (P4-D1), where v1 answers 404.
+   *
+   * The rule is shared with D10; the evaluation order is not, and it cannot be: on
+   * `/api/user/<id>` the ownership term is computable from the path, on `/api/loan/<id>` it
+   * is not. The e2e twin is `test/user.e2e-spec.ts` ("for a MEMBER a non-existent id is also
+   * 403, not 404 (registered)").
+   */
+  describe('getUser authorises before it reads — D25 ordering (C44)', () => {
+    const buildReader = (): { service: UserService; prisma: Record<string, unknown> } => {
+      const prisma = {
+        userFinance: { findFirst: jest.fn().mockResolvedValue(null) },
+        userPreference: { findFirst: jest.fn().mockResolvedValue(null) },
+        userProfile: { findUnique: jest.fn().mockResolvedValue(null) },
+        savingAccount: { aggregate: jest.fn().mockResolvedValue({ _sum: { value: null } }) },
+      };
+      return {
+        prisma,
+        service: new UserService(
+          prisma as unknown as PrismaService,
+          {} as MailService,
+          {} as NotificationService,
+          new DjangoPasswordService(),
+          {} as AppConfigService,
+        ),
+      };
+    };
+
+    it('refuses a non-owner MEMBER without reading a row, so a missing id is 403 not 404', async () => {
+      const { service, prisma } = buildReader();
+      const member: AuthenticatedUser = {
+        id: 2,
+        username: 'm@mail.com',
+        email: 'm@mail.com',
+        isActive: true,
+        profile: { role: Role.MEMBER, identification: 1n },
+      };
+      await expect(service.getUser(member, 4242)).rejects.toBeInstanceOf(DrfException);
+      // The discriminator: authorising *after* the lookup would have touched these.
+      for (const table of Object.values(prisma)) {
+        for (const call of Object.values(table as Record<string, jest.Mock>)) {
+          expect(call).not.toHaveBeenCalled();
+        }
+      }
+    });
+
+    it('a privileged caller still reaches the lookup, and still gets v1’s 404', async () => {
+      const { service, prisma } = buildReader();
+      const admin: AuthenticatedUser = {
+        id: 1,
+        username: 'a@mail.com',
+        email: 'a@mail.com',
+        isActive: true,
+        profile: { role: Role.ADMIN, identification: 2n },
+      };
+      await expect(service.getUser(admin, 4242)).rejects.toMatchObject({
+        status: HttpStatus.NOT_FOUND,
+      });
+      expect((prisma.userFinance as { findFirst: jest.Mock }).findFirst).toHaveBeenCalledTimes(1);
     });
   });
 

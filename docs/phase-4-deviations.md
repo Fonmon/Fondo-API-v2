@@ -50,7 +50,7 @@ per table, on `/dev/mapper/root` — persistent, not tmpfs).
 | **D8** | `bulk_update_loans` answers a bare `200` with **no body**, so nothing tells the treasurer which loans the upload just closed. | `200 {"closed_loans": [<ids>]}`, in close order, with no cap on length (operator Q3). | `loan.service.ts::bulkUpdateLoans` |
 | **D9** | `update_loan` writes `loan.state` unconditionally. Re-approving regenerates the amortisation table, writes a second `LoanDetail` (D6) and re-sends the borrower's email; `3 → 1` re-opens a closed loan; a **negative** state passes `LoanDetailView.patch`'s `new_state <= 3` check and is stored verbatim. | Legal transitions only — `0→1`, `0→2`, `1→3`, `1→2` (operator Q14). Anything else is **409** `{"message": "Invalid state transition"}` with **no mail, no scheduler write and no state change**. The loan is looked up first, so a missing id is still v1's 404. | `loan.service.ts::assertLegalLoanTransition` |
 | **D10** | `GET /api/loan/<id>` and `POST /api/loan/<id>/paymentProjection` are role ≤ 3 with **no ownership check**, so any member reads any loan by id — value, rate, comments, outstanding capital. | The loan's **owner plus roles `[0,1,2]`** (operator Q16). DRF's generic 403, byte-identical to a role denial. `refinance` is unchanged: v1 already restricts it to the owner. | `loan.service.ts::getLoan`, `::paymentProjection` |
-| **D25** | `GET /api/user/<id>` is role ≤ 3 with no ownership check, so any member reads any other member's `finance` block — `utilized_quota` and `total_savingaccounts`. v1 is inconsistent with itself: it hard-filters the *loan list* by role and returns no finance on the *user list*. | **The same predicate and the same roles as D10** — owner plus `[0,1,2]`. Operator **Q29a**: no client screen reads another member's detail. `GET /api/user/-1` is unaffected (the `-1` substitution runs first, so it always takes the owner branch). | `user.service.ts::getUser` |
+| **D25** | `GET /api/user/<id>` is role ≤ 3 with no ownership check, so any member reads any other member's `finance` block — `utilized_quota` and `total_savingaccounts`. v1 is inconsistent with itself: it hard-filters the *loan list* by role and returns no finance on the *user list*. | **The same *rule* and the same roles as D10** — owner plus `[0,1,2]` — but **not the same evaluation order**, and it cannot be (**C44**). On `/api/user/<id>` the ownership term is `actor.id === <path id>`, computable from the path with **no row read**, so the check runs **first** and closes the enumeration oracle at no cost. On `/api/loan/<id>` it is `actor.id === loan.user_id`, knowable **only** from the row, so D10 reads first and keeps v1's 404 on a missing loan; no ordering gives both. What that leaks is the existence of a dense autoincrement id and nothing else. Operator **Q29a**: no client screen reads another member's detail. `GET /api/user/-1` is unaffected (the `-1` substitution runs first, so it always takes the owner branch). | `user.service.ts::getUser` |
 | **D26** | Nothing forbids `requester === requestee` on a power request. A member acting **alone** — with no second party's consent, which D2 requires everywhere else — could create then approve a power naming themselves and make the fund emit the formal power-of-attorney letter, on letterhead and addressed to the president of the assembly, to all 15 members. Live: **0 of 20 rows are self-directed**. | **406** at *creation*, so no row and no self-addressed push notification are produced. 406 is v1's house style for a business-rule refusal on a create (`create_loan`). ⚠️ **No `(requester, meeting_date)` uniqueness rule** — operator **Q30a**, see §2.5. | `power.service.ts::createPower` |
 | **D27** | `handle_power_request` writes `power.state` unconditionally and mails on approval, so **re-approving an already-approved power re-sends the fund-wide letter, unbounded**. Same defect class as D9; guarded in neither v1 nor the P3 port. | `0 → 1` and `0 → 2` only; anything else is **409** `{"message": "Invalid state transition"}` with **no mail**. | `power.service.ts::assertLegalPowerTransition` |
 | **D29** | `create_loan` compares the **raw** body value against the column — `if obj['value'] > user_finance.available_quota` (`services/loan.py:27`) — and coerces only on the write. An integer-shaped **string** is therefore `TypeError: '>' not supported between instances of 'str' and 'int'`: an uncaught **500** before any row is written. ⚠️ And because the comparison is raw, a **fractional** `value` in `(available_quota, available_quota + 1)` is a **406**. | Two halves, decided separately. **(a) The ordering is v1's**: v2 compares raw and coerces for the write, the same sequencing Phase 3 established at `user.service.ts::updateUserFinance` (`pythonNotEqual`, then `toDjangoInt`). New shared helper `pythonGreaterThan`. **(b) A JSON string is still coerced** — v1's `TypeError` is a crash, not a rule, so `"100"` books the loan and `"600"` gets the fund's real **406** where v1 gives a 500. The deviation is taken at the call site, not inside the helper. | `loan.service.ts::createLoan`, `common/utils/python-obj.ts::pythonGreaterThan` |
@@ -86,12 +86,13 @@ actor to check against, deliberately.
 
 | # | v1 behavior | v2 behavior | Rationale |
 |---|---|---|---|
-| **P4-D1** | `GET /api/user/<id>` for a **non-existent** id answers **404** for every caller. | Under **D25** the ownership check runs **before** the lookup, so a MEMBER asking for any id that is not theirs gets **403** whether or not the row exists. Roles `[0,1,2]` still get v1's 404. | The same ordering `updateUser`'s section gate already uses (§7 "C8 resolved", step 3), and for the same reason: authorising after the lookup turns the endpoint into an id-enumeration oracle, which is half of what D25 exists to close. `manual-tester` will see 403-where-v1-404s on `GET /api/user/<n>` as a MEMBER; that is this row. |
+| **P4-D1** | `GET /api/user/<id>` for a **non-existent** id answers **404** for every caller. | Under **D25** the ownership check runs **before** the lookup, so a MEMBER asking for any id that is not theirs gets **403** whether or not the row exists. Roles `[0,1,2]` still get v1's 404. | The same ordering `updateUser`'s section gate already uses (§7 "C8 resolved", step 3), and for the same reason: authorising after the lookup turns the endpoint into an id-enumeration oracle, which is half of what D25 exists to close. ⚠️ **D10 orders itself the other way and that is deliberate, not drift** (**C44**): the loan predicate needs `loan.user_id`, so it must read first, and v2 keeps v1's 404 there. The two orderings are pinned mechanically — `loan.service.spec.ts` ("getLoan reads first", plus the older "a missing loan is 404 for everyone") and `user.service.spec.ts` ("getUser authorises before it reads"), each with an e2e twin. `manual-tester` will see 403-where-v1-404s on `GET /api/user/<n>` as a MEMBER; that is this row. |
 | **P4-D2** | `LoanView.get`'s `all_loans` is honoured only for `user.role <= 2`; for a MEMBER the argument is **not passed** and the flag is a silent no-op. | Identical — recorded, not changed. | Not a deviation. Written down because it *looks* like one: a MEMBER sending `?all_loans=true` gets a 200 listing only their own loans, with no indication the parameter was ignored. Pinned by an e2e cell so nobody "fixes" it into a 403. |
 | **P4-D3** | `LoanDetailView.patch` returns `Response(msg, 200)` with `msg = ''` for a denial and a payout. DRF's `JSONRenderer` renders that as the **two bytes `""`** (only `None` renders as zero bytes). | Identical — but v2 **was** answering zero bytes until this phase, because Nest's `ExpressAdapter.reply` sends `String(body)` for any non-object. Fixed, not deviated: `sendDrfBody` (`common/http/drf-response.ts`). | Recorded because it is a **bug this phase found and closed**, on the two most common loan writes, and because the same shape returns in Phase 8 (`FileDetailView.get` returns a bare URL string). Measured in the v1 container: `JSONRenderer().render('')` is `b'""'`, `render(None)` is `b''`. |
 | **P4-D4** | `LoanView.get` calls `int()` on `state` and `page` **unguarded** (unlike `UserView.get`, which guards on presence), so `?page=`, `?page=abc` and `?state=abc` are **500**s. | Identical. | Ported deliberately. Registered so a 500 on a malformed query string is not filed as a v2 crash. |
 | **P4-D5** | `refinance_loan` catches **only** `Loan.DoesNotExist`. A missing `disbursement_date` / `includeInterests` / `comments` key is an uncaught `KeyError` → **500**, and a loan with no `LoanDetail` makes `payment['capital_balance']` a `TypeError` → 500. | Identical. | The 400 on this route means "wrong loan" and never "wrong body". Registered because a 500 on a malformed refinance body looks like a defect and is the contract. |
 | **P4-D6** | `update_loan`'s `transaction.atomic()` wraps the approval **including the SES call**, with no timeout — a hanging SES call hangs the request. | Same unit is wrapped, with Prisma's interactive-transaction budget set to **20 s** (`maxWait` 10 s), as `createUser` already does for the same reason (condition **C22**). | Prisma requires an explicit budget; the default 5 s is shorter than the mail leg's own worst case. The observable difference is confined to an SES outage: v1 hangs, v2 rolls the approval back after 20 s. No status or body changes on any healthy path. |
+| **P4-D7** | `bulk_update_loans`'s `@transaction.atomic` has **no timeout** — a monthly run that takes an hour still commits. | The same unit is wrapped with Prisma's interactive-transaction budget set to **120 s** (`maxWait` 20 s). | Prisma requires an explicit budget and its default is 5 s, which a 28-loan file with a mail leg per approval can exceed. The all-or-nothing property is identical either way; the only observable difference is a run slower than two minutes, which commits in v1 and rolls back with a 500 here. The measured monthly run is far inside the budget. Registered at **C45/m3** so the pair is explicit: P4-D6 is the same decision for the 20 s approval budget, and leaving one of the two implicit is how the next one gets added unnoticed. |
 
 ---
 
@@ -365,7 +366,7 @@ All restored, and the full suites re-run green afterwards.
 | `POST /api/loan` with `value: 0.5` | **201**, row written with `value = 0` | **400**, same message, no row | **D30** — the bound runs on the coerced value, and `int(0.5)` is `0`. |
 | `POST /api/loan` with `value: "-1000"` | **500** (`TypeError`, no row) | **400**, same message, no row | **D30** via **D29** — the string is coerced first, then refused by the same money bound. |
 | `POST /api/loan` with `value: 1` | 201 | 201 | **D30** — the floor is *inclusive*; the fund has three live loans at `value = 1`. Not a diff; listed so the boundary is probed from both sides. |
-| `POST /api/loan/<id>/refinance` whose projected `capital_balance` is `0` | 200, a zero-value loan is written | **400** `{"message":"Loan value must be greater than 0"}` | **D30** — `refinance_loan` overwrites `value` and calls the same `create_loan`, so the floor binds there too although the *quota* check is skipped. |
+| `POST /api/loan/<id>/refinance` whose projected **`value`** — the `capital_balance`, plus the interests if `includeInterests` is truthy — is **less than 1** | 200, a loan is written with that value | **400** `{"message":"Loan value must be greater than 0"}` | **D30** — `refinance_loan` overwrites `value` and calls the same `create_loan`, so the floor binds there too although the *quota* check is skipped. ⚠️ The bound is on the **projected value**, not on `capital_balance`: the interests are added *before* `create_loan` sees the number, and the floor is checked after `toDjangoInt`. ⚠️ A **negative** `capital_balance` behaves the same and produces a strictly worse v1 row — `value = -500`, or `-522` with `includeInterests`, i.e. interest computed on a negative balance. Kept explicit rather than folded into "≤ 0", because that is the v1 row a reader should see. ⚠️ **v1 writes the child row *and* sets the parent's `refinanced_loan`; v2 touches no table at all** (measured: `tables touched: []`), and that is the **intended shape** — a refused refinance must leave no half-linked chain. Do not "fix" it by moving the link ahead of the create (**C52**). |
 | `POST /api/loan` with `value` = `available_quota + 0.5` (e.g. `500.5` against a 500 quota) | **406** `{"message":"User does not have available quota"}` | **406**, identical | **D29** ⚠️ **This one was a diff and is now fixed — measured, not assumed.** Before the fix v2 answered **201 and stored `500`**, a different number from the one submitted, because it truncated before comparing. The divergent window was exactly `quota < value < quota + 1`. If it ever answers 201 again, that IS a failure. |
 | `POST /api/loan` with an integer-shaped **string** `value` (`"100"`, `" 100 "`, `"+100"`) | **500** (`TypeError: '>' not supported between instances of 'str' and 'int'`), no row | **201**, row identical to a well-formed request | **D29** — v1's refusal is a crash, not a rule. Unchanged by the ordering fix. |
 | `POST /api/loan` with an over-quota string `value` (`"600"` against a 500 quota) | **500**, no row | **406** `{"message":"User does not have available quota"}` | **D29** — the member gets the fund's real answer. |
@@ -397,6 +398,15 @@ All restored, and the full suites re-run green afterwards.
 * `DELETE /api/loan` → **403** for ADMIN.
 * The auto-close is **silent** — no mail, no push — and its candidate set is *every* APPROVED
   loan absent from the file.
+* ⚠️ **D33 — the partial self-heal on a PAID_OUT loan.** `__update_loan_detail` resolves by
+  `loan_id` **alone, with no state filter**, so re-listing an already-closed (state `3`) loan
+  in a later monthly file **updates its `LoanDetail` and re-creates both payment reminders**,
+  on **both** stacks. It is a non-diff, which is why it belongs here and not in §4.1: if the
+  two stacks ever differ on it, that IS a failure. Measured 2 → 0 → 2 across two uploads, both
+  stacks. It is also **load-bearing** — §2.10 instructs a DBA to *expect* the self-heal after
+  a repair — so it is pinned in-repo by a unit cell (`loan.service.spec.ts`, "D33"), not only
+  in the parity harness. Adding a state filter to `updateLoanDetail` is exactly the
+  obvious-looking tidy-up that would break it silently (**C53**).
 
 ### 4.3 Pre-declared rows — do not re-file them here
 
@@ -438,10 +448,32 @@ produced v1's duplicates.
 > (`{'message': 'Invalid state transition'}`), the same answer the caller would have received
 > had it lost the guard instead of the write. Because the predicate includes the state, the
 > second transaction blocks on the first's row lock and re-evaluates after it commits, so
-> **at most one transition per loan can proceed**, and therefore at most one
-> `upsertLoanDetail` runs. That is what makes "no second row" true, and it is true only for
+> **at most one transition can proceed on the loan named in the URL**, and therefore at most
+> one `upsertLoanDetail` runs. That is what makes "no second row" true, and it is true only for
 > transitions that go through `updateLoanIn` — which, in v2, is all of them, the
 > `bulkUpdateLoans` auto-close included.
+
+⚠️ **Two narrowings on that sentence, both of them the review's (condition C55).**
+
+**It is "the loan in the URL", not "per loan".** The same method also writes the loan's
+*neighbour* — `prev_loan.state = PAID_OUT` when a refinance is approved, and
+`prev_loan.refinanced_loan = null` when one is denied — and **those two writes are
+unconditional `update`s, not compare-and-sets**. They carry no guard, so a refinance chain's
+parent has no protection from this mechanism at all; what protects it is that the only route
+that writes it is this one, reached through a CAS on the child. Read literally, "at most one
+transition per loan" would claim something about `prev_loan` that is not true.
+
+**What the CAS pins is `state` and nothing else.** Every other column the approval consumes —
+`value`, `timelimit`, `fee`, `rate`, `disbursement_date`, i.e. the entire input to the
+amortisation table and to the borrower's email — comes from the **pre-CAS `findUnique`**. If
+any of them changed between that read and the write, the CAS would still match (it only
+compares `state`) and the table would be generated from stale numbers. That is safe **today
+for one reason only: no route mutates those columns after creation.** There is no
+`PATCH /api/loan/<id>` that edits a value, and a refinance creates a *new* row rather than
+editing the old one. The invariant is therefore a property of the current routing table, not
+of this method — so the day a "correct a mistyped loan value" endpoint is added, this
+paragraph is the one that has to change with it, and the fix is to widen the CAS predicate to
+the columns the table consumes.
 
 ⚠️ **What the auto-close does with a CAS miss — corrected 2026-09-04 (review condition C50).**
 The paragraph above used to read as if the bulk path degraded gracefully. It did not: the
@@ -479,12 +511,26 @@ Two honest limits on that guarantee:
   `fondo_api_loandetail`. A writer that is not v2 — a DBA, or v1 itself while both stacks are
   live — can still insert a duplicate. Only Phase 9's physical `UNIQUE (loan_id)` closes that,
   which is why it must not slip again.
-* **No test races two real transactions.** A concurrency cell that depends on interleaving
-  passes or fails on timing, which is worse than no cell; the guarantee is pinned instead by
-  three unit cells asserting the *query shape* (`{ where: { id, state }, data: { state } }`,
-  the auto-close's predicate, and the 409 on `count === 0`). Stated plainly so nobody reads
-  the green suite as evidence that the race was reproduced and fixed — it was reasoned about
-  and designed out.
+* **The race IS reproduced — deterministically, and in two places** (condition **C55**; the
+  sentence this replaces, *"no test races two real transactions"*, was true when written and
+  stopped being true with `d3-race.py`).
+  * `scripts/parity/d3-race.py` runs it against **both** stacks and carries the positive
+    control that gives the result its meaning: **v1 answers 200/200, writes two `LoanDetail`
+    rows and sends two borrower emails** — the exact corruption D6 exists to survive — while v2
+    answers 200/409 and writes one of each. Measured, recorded in `out-d3.json`.
+  * `test/loan-race.e2e-spec.ts` is the v2 half as an **opt-in** Jest cell
+    (`FONDO_RACE_CELL=1 npm run test:e2e -- loan-race`), so the construction survives without
+    the harness. Verified to discriminate: replace the CAS predicate with `where: { id }` and
+    it goes red with 200/200.
+
+  Neither depends on timing, which is the objection the old sentence was right about. A third
+  connection holds an explicit `SELECT … FOR UPDATE` on the loan; both requests read state `0`
+  and pass the guard (a plain `SELECT` is not blocked by it); both then block on the write; and
+  **nothing is asserted until `pg_stat_activity` shows two sessions waiting on a lock**. The
+  interleaving is established by the database. The three query-shape unit cells
+  (`{ where: { id, state }, data: { state } }`, the auto-close's predicate, and the 409 on
+  `count === 0`) remain, and are what runs in the default gate.
+  ⚠️ **Phase 9 must re-run both** — once before its `UNIQUE (loan_id)` lands and once after.
 
 ### 5.2 §5's D4 row and §3's Phase 4 scope — **resolved, §5 was right**
 
@@ -513,3 +559,45 @@ may not be expecting it — flagged rather than assumed.
 
 `test_loan_views.py` is **33** methods; all 33 are ported to `test/loan.e2e-spec.ts` (91 cells
 in total), with the one moved expectation documented at §2.4.
+
+---
+
+## 6. Phase 4's review conditions — the C59 ledger
+
+**Condition C59** (`docs/review-phase-5.md` §7/§8) required that C44–C49 and C52–C57 **close or
+be formally struck**, each with C58's evidence standard: exercise the behaviour or read the whole
+function, never match a string, and record the audit's own errors. They had survived two gates;
+C48's warning that a third roll makes the tracking decorative had been reached.
+
+Worked at `chore/phase-6-gate` off `e6571bb`. One row per condition, with the artefact and the
+control that proves it discriminates.
+
+| # | Outcome | Evidence |
+|---|---|---|
+| **C44** | ✅ **Closed** — wording corrected; cells were **already present** (see the audit correction below) | §1.1's D25 row and §1.3's P4-D1 row now distinguish the shared **rule** from the differing **evaluation order**, with the path-derived-vs-row-derived reason. Cells: `test/loan.e2e-spec.ts` *"a non-existent loan is still 404 for everyone"* and `test/user.e2e-spec.ts` *"for a MEMBER a non-existent id is also 403, not 404"* — both landed in `0a8cf62`, the original Phase 4 commit. Added a mechanical pin per side next to the role-array guard (`loan.service.spec.ts` *"getLoan reads first"*, `user.service.spec.ts` *"getUser authorises before it reads"*, the latter asserting **no row is read at all**). **Control:** both orderings flipped in the source → 3 cells red, restored → 145 green. |
+| **C45** | ✅ **Closed** (five items) | **m3** `P4-D7` registered in §1.3 and at the call site. **m5** `mailBcc` moved into the `APPROVED` and `DENIED` arms — an auto-close now issues no `getUserEmails` query at all, where it issued one per closed loan inside the 120 s transaction. **m6** the `getUserIds`/`getUserEmails` carve-out from the "every query on a transactional path takes the client" rule is documented at the call site, with the reason it is safe (read-only, on tables neither transaction writes). **m7** `getLoans` now throws for `userId === null && !allLoans`, as its `page === null` sibling already did — Prisma drops an `undefined` filter and would have listed the whole fund where Django returns nothing. **§4/n4** the D28 exposure is written at the quota gate itself. |
+| **C46** | ✅ **Closed — measured on both stacks, then reproduced** | v1, read-only in the pinned container: `LoanDetail.objects.get(loan_id=X)` raises `DoesNotExist` for `999999`, `2**31`, `3e9` **and** `2**63` — logged and skipped, upload continues. v2 before the fix, against the throwaway test database: Prisma refuses at `2147483648` with `Value out of range for the type … integer`, which is not D9's 409, so the narrow catch rethrows it and the whole monthly file rolls back. Fixed by mapping out-of-`Int32` to `-1`, the same sentinel and the same reasoning as `parseLoanPathId`. Cell: `test/loan.e2e-spec.ts` *"C46: an out-of-32-bit-range id is skipped, and the rest of the file still applies"*. **Control:** fix reverted → exactly that cell red, 104 tests still collected. The fractional-quota half had already landed with D29. |
+| **C47** | ✅ **Closed** | The 28 per-loan `log` lines are replaced by **one `warn`** carrying the count and the id list in close order. `MIGRATION_PLAN.md` §9 gains "Runbook items carried from Phase 4 findings" item 5: `PATCH /api/loan` now returns `{closed_loans: […]}` and the client must be changed for D8 to be a notice rather than a capability — with M2's caveat that a treasurer who notices still cannot undo it. |
+| **C48** | ⚪ **Already closed, superseded** | C48 asked that the Phase 3 conditions be closed or re-dated. `docs/review-phase-4-delta.md` §7 escalated it to **C58**, and `docs/review-phase-5.md` §7 records C58 as done ("fifteen conditions audited against the tree in one batch, two of the audit's own verdicts caught and corrected"). Not re-opened; listed so the eleven-vs-twelve arithmetic is explicit. |
+| **C49** | ✅ **Closed** (n1–n4 + the Phase 9 list) | **n1** `@DrfNoRequestData()` added to `loan-apps.controller.ts`'s `@All()` fallback — the only one of three missing it, item 5 of `docs/adding-a-route.md`. **n2** `amortization.spec.ts`'s title now reads "matching D4's upper bound"; there is no clamp. **n3** new `src/common/utils/decimal.spec.ts` names CPython's default context and pins `prec=28` with a discriminator (`1/7` to 28 digits, which precision 20 cannot produce) and `ROUND_HALF_EVEN` against `Math.round`. **n4** at the quota gate, above. Plus `MIGRATION_PLAN.md` §3 Phase 9: **"v1 defects deliberately carried into v2 — re-decide once at cutover, or never"**, eight entries, **P4-D4 first**. |
+| **C52** | ✅ **Closed** | §4.1's refinance row now reads "the projected **`value`** — the `capital_balance`, plus the interests if `includeInterests` is truthy — is **less than 1**", keeps the negative case explicit (with the `-500` / `-522` v1 rows), and carries the parent-unlinked clause **as the intended shape**. `refinanceLoan`'s docblock records that D30 made its "no transaction" warning reachable and that touching no table is the intended outcome. D30's message nit now has an owner (`business-analyst`) and a phase (**P9**), replacing "a later pass". |
+| **C53** | ✅ **Closed** | §4.2 gains the D33 bullet (it is a non-diff, so §4.1 was the wrong home) stating that it is load-bearing for §2.10. Unit cell `loan.service.spec.ts` *"D33: a PAID_OUT loan listed in the file still has its detail updated and its reminders re-created"* — asserts the update, both `scheduleNotification` calls, **and the shape of the query** (`Object.keys(where) === ['loan_id']`). **Control:** added the obvious `loan: { state: 1 }` filter → that cell alone red. |
+| **C54** | ✅ **Closed** | Three carriers, none of them a phase document addressed to a reviewer: a 📍 pointer on §5's D31 row naming `docs/phase-4-deviations.md` §2.10; a new "Incident procedures that outlive the cutover" block inside **Phase 9's runbook**; and §9 runbook item 6, which also carries D33's consequence for the reminders. |
+| **C55** | ✅ **Closed** (all three) | "at most one transition **per loan**" → "on the loan named in the URL", with the reason: the `prev_loan` `state` and `refinanced_loan` writes are **unconditional `update`s** — verified by reading all four `loan.update` call sites, not from the review. The CAS invariant is now stated: only `state` is pinned, every column feeding the amortisation table comes from the pre-CAS read, and that is safe **only because no route mutates them** — verified by the same sweep. "No test races two real transactions" is replaced by a citation of both artefacts and the reason neither depends on timing. |
+| **C56** | ✅ **Closed** | `scripts/parity/d3-race.py` — verbatim, out of the home directory, with a header saying what it needs and why it is kept unmodified. Plus `test/loan-race.e2e-spec.ts`, the v2 half as an **opt-in** cell (`FONDO_RACE_CELL=1`) that needs no harness: a third connection holds `SELECT … FOR UPDATE`, and nothing is asserted until `pg_stat_activity` shows two sessions blocked. **Control:** CAS predicate reduced to `where: { id }` → 200/200 and the cell fails. |
+| **C57** | ✅ **Closed** (all three nits) | C22's budget note now says what the 20 s covers **since M3** (a queued caller *plus* SES) and what a P2028 looks like to the caller — pinned by `api-exception.filter.spec.ts` *"a Prisma P2028 renders P3-D6's uncaught shape"* with a 409 as the discriminator, rather than asserted in prose. `pythonTypeName`'s unreachable `return 'float'` is split and explained: `number` is now handled, and the remaining fall-through covers `symbol`/`function`, for which the noun really is wrong and unreachable. False-green **#18** now cross-references **#19** in both directions. |
+
+### 6.1 An error this audit made, recorded rather than quietly repaired
+
+`docs/review-phase-5.md` §7's audit table says C44's two ordering cells are **absent**. They are
+not, and were not: both landed in **`0a8cf62`**, the original Phase 4 commit, *before* the Phase 4
+review that raised C44 — and `loan.service.spec.ts` additionally carried
+*"a missing loan is 404 for everyone, before D10 can produce a 403"* the whole time. So the loan
+side was pinned twice and the user side once when the condition was written asking for them.
+
+Two things follow, and the second is the useful one. The condition's remaining substance was the
+**wording**, which was genuinely still open and is what §1.1 and §1.3 now carry. And the audit
+that "found" the cells missing was itself a string search for an artefact rather than a read of
+the file that would hold it — the exact failure C59 required this batch to avoid. Recorded here
+because an audit that reports only what it found is the same failure mode as a probe that reports
+only agreement.

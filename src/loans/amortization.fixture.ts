@@ -18,7 +18,10 @@
  * Coverage chosen for the edges the plan calls out (§3 Phase 4 "Risks"):
  * month-end and leap-day disbursement, year rollover, the 30/31 `days360` rule, a single
  * `UNIQUE` instalment, a 36-row table at the top of the rate band, real fund-scale money
- * (25 871 634 and 30 000 000 — the two largest live balances), a 1-row loan, a 5-peso loan
+ * (25 871 634 and 30 000 000 — fund-scale, chosen to bracket the live range: the largest
+ * `fondo_api_loan.value` today is 30 027 501 and the largest `loandetail.capital_balance` is
+ * 23 863 634. They are *not* live rows and must not be described as "the two largest"), a
+ * 1-row loan, a 5-peso loan
  * whose instalments land on exact halves, and `timelimit = 0` on a `UNIQUE` loan (the one
  * shape D4's `DivisionByZero` does **not** reach).
  */

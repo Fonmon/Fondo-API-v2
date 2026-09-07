@@ -59,7 +59,10 @@ describe('amortization — fondo_api/services/loan.py __generate_table / __calcu
       expect(getRate(10)).not.toBe(String(0.02));
     });
 
-    it('MAX_TIMELIMIT is 36, matching the clamp in create_loan', () => {
+    // ⚠️ There is no clamp any more — `5aa8b1a` replaced it with D4's 400 and the old title
+    // survived the change (**C49/n2**). 36 is D4's upper *bound*, not a value anything is
+    // silently reduced to.
+    it('MAX_TIMELIMIT is 36, matching D4’s upper bound', () => {
       expect(MAX_TIMELIMIT).toBe(36);
     });
   });

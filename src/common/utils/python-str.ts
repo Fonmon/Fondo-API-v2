@@ -27,33 +27,108 @@
  *
  * ## Known limits, stated rather than hidden
  *
- * Three of them, all rooted in what `JSON.parse` throws away before this module is reached.
- * None is reachable from the fund's clients, and each would need a bespoke JSON scanner to
- * close (v2 already has one for error messages, `common/http/python-json.ts`, but it does not
- * build values):
+ * **Two** of them, both rooted in what `JSON.parse` throws away before this module is reached,
+ * and each would need a bespoke JSON scanner to close (v2 already has one for error messages,
+ * `common/http/python-json.ts`, but it does not build values). Neither is reachable from the
+ * fund's clients, which send strings and numbers, not containers, to the text columns.
  *
- *  1. **`int` vs `float`.** `json.loads('5.0')` is the float `5.0` and `str()` gives `'5.0'`;
- *     `JSON.parse('5.0')` is the number `5`, indistinguishable from `json.loads('5')`, and
- *     this module renders `'5'`. Only integral-valued floats are affected.
- *  2. **Very large integers.** `json.loads('10**21')` is a Python `int` rendering all 22
- *     digits; the same literal is a JS double rendering `'1e+21'`.
- *  3. **`dict` key order.** CPython preserves document order; a JS object reorders
+ *  1. **`int` vs `float` — JSON does not record which one the author wrote.** `json.loads`
+ *     keeps the distinction (`'5'` is an `int`, `'5.0'` a `float`); `JSON.parse` collapses
+ *     both onto a double. This module therefore renders every number the way CPython renders a
+ *     **`float`** when the value has a fractional part — exactly, since {@link reprNumber}
+ *     now carries CPython's exponential threshold — and the way CPython renders an **`int`**
+ *     when the value is integral. Three shapes diverge, all of them integral-valued:
+ *
+ *     | body | v1 stores | v2 stores | why |
+ *     |---|---|---|---|
+ *     | `5.0` | `5.0` | `5` | CPython's `ADD_DOT_0`; the `.0` cannot be recovered |
+ *     | `-0.0` | `-0.0` | `0` | `String(-0)` is `'0'`; `json.loads('-0')` is the `int` `0` |
+ *     | `10000000000000000` | `10000000000000000` | `1e+16` | an `int` at or beyond `decpt > 16` is indistinguishable from the `float` `1e16`, which v1 *also* renders `1e+16` |
+ *
+ *     The third row is where the old limit 2 ("very large integers", stated at `10**21`) has
+ *     gone: it was the same rule with the JS threshold rather than CPython's, so it named the
+ *     wrong boundary. Below `1e16` every `int` agrees byte for byte.
+ *  2. **`dict` key order.** CPython preserves document order; a JS object reorders
  *     integer-like keys ahead of the rest, so `{"b":1,"1":2}` renders `{'1': 2, 'b': 1}` here
  *     and `{'b': 1, '1': 2}` in v1.
+ *
+ * Each row above is a **cell**, not a claim: `DJANGO_TEXT_PREP_DIVERGENCES` carries v1's value
+ * captured from the container and `python-obj.spec.ts` carries v2's beside it, so a limit that
+ * is silently closed, silently widened, or quietly stops being true fails a test.
+ *
+ * ### How this list was established as complete, rather than merely shorter
+ *
+ * By differential sweep against the pinned container, not by reading the code. Two runs, the
+ * same body list fed to `TextField().get_prep_value(json.loads(b))` in the container and to
+ * `toDjangoText(JSON.parse(b))` under `ts-node`:
+ *
+ * * **8 967 numeric bodies** — every `decpt` from -330 to +24 with four mantissa shapes, the
+ *   fixed-notation neighbourhood of both thresholds, the integral values around `1e16`…`1e23`,
+ *   and 6 000 seeded randoms including 3 000 drawn from raw 64-bit patterns. **117 divergences,
+ *   all three of them classes of limit 1** (92 `ADD_DOT_0`, 17 large-`int` literals, 8 negative
+ *   zero) and **zero unclassified**.
+ * * **5 951 string and container bodies** — every code point below U+0120 plus the boundary
+ *   ones, the quote-selection matrix, integer-like key orders, 2 000 random nested containers
+ *   and 3 000 random astral strings. Against the **pre-fix** build: 76 divergences, 9 dict key
+ *   order and **67 Unicode-database skew**, zero unclassified. The skew was a real finding and
+ *   is **closed**, not declared — see {@link isPythonNonPrintable} — so the same sweep against
+ *   the build you are reading reports **9 divergences, all of them limit 2, zero
+ *   unclassified.**
+ *
+ * The sweep is a discriminator, not an agreement check, and it was run in the failing
+ * direction first: against the pre-fix build it reports the two exponential bands and the
+ * 67 skew rows as well, which is how both were found. "Complete" here means *every* divergence
+ * the two sweeps produce is classified into one of the two limits above and none is left over
+ * — not "I looked and saw nothing".
  */
 
+import { PYTHON_NONPRINTABLE_RANGES } from './python-str.fixture';
+
 /**
- * The complement of CPython's `str.isprintable()`:
+ * CPython's `str.isprintable()`, negated:
  *
  * > Nonprintable characters are those characters defined in the Unicode character database as
  * > "Other" or "Separator", excepting the ASCII space.
  *
- * i.e. general categories `Cc Cf Cs Co Cn Zl Zp Zs`, minus U+0020. Verified against
- * `unicodedata.category` / `str.isprintable()` in the v1 container for the boundary code
- * points U+0085, U+00A0, U+00AD, U+0378, U+2000, U+2028, U+2029, U+200B, U+D7FF, U+FDD0,
- * U+E0001 (all non-printable) and U+1F600 (printable).
+ * i.e. general categories `Cc Cf Cs Co Cn Zl Zp Zs`, minus U+0020.
+ *
+ * ## Why this is a table and not `/\p{Cc}\p{Cf}…/u`
+ *
+ * It **was** that regex, and the regex is wrong — not in its category list, which is right, but
+ * in *whose* Unicode database answers it. `Cn` means "unassigned", so the predicate moves every
+ * time either runtime's UCD moves, and the two are eleven years apart: the pinned v1 is CPython
+ * 3.9.25 on **UCD 13.0.0**, Node 24 is on **UCD 17.0**. Every code point assigned between them
+ * is `Cn` (escaped) in v1 and a printable letter (stored literally) in v2.
+ *
+ * Measured by enumerating all 1 114 112 code points in both runtimes and diffing the predicate:
+ * **15 933 code points disagreed, all in the same direction** — v1 escapes, v2 stored the
+ * character. 161 ranges, including U+0870–U+088F (Arabic Extended-B), U+11FB0, U+1E7E0 and the
+ * CJK Ext-G/H additions. It is the largest divergence this module ever had and no cell could
+ * have seen it, because the 41-row fixture samples code points that were assigned in 2020.
+ *
+ * So the answer is captured from the pinned interpreter rather than asked of the local one:
+ * `PYTHON_NONPRINTABLE_RANGES` is `str.isprintable()` for every code point, generated by
+ * `scripts/gen-python-str-fixture.py` in the container. That also makes the module immune to a
+ * Node upgrade, which the regex was not — a UCD 18 would have silently re-opened the same gap.
+ *
+ * The ranges are ascending, non-overlapping and flat (`[start, end, start, end, …]`), so the
+ * lookup is a binary search on even indices.
  */
-const NON_PRINTABLE = /^[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]$/u;
+export function isPythonNonPrintable(codePoint: number): boolean {
+  let lo = 0;
+  let hi = PYTHON_NONPRINTABLE_RANGES.length / 2 - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (codePoint < PYTHON_NONPRINTABLE_RANGES[mid * 2]) {
+      hi = mid - 1;
+    } else if (codePoint > PYTHON_NONPRINTABLE_RANGES[mid * 2 + 1]) {
+      lo = mid + 1;
+    } else {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * CPython's `unicode_escape`-style widths inside a `repr`:
@@ -89,7 +164,7 @@ function reprString(value: string): string {
       out += '\\n';
     } else if (character === '\r') {
       out += '\\r';
-    } else if (NON_PRINTABLE.test(character) && character !== ' ') {
+    } else if (isPythonNonPrintable(character.codePointAt(0) as number)) {
       out += escapeCodePoint(character.codePointAt(0) as number);
     } else {
       out += character;
@@ -101,10 +176,33 @@ function reprString(value: string): string {
 /**
  * `repr(float)` / `str(float)` — identical in Python 3.
  *
- * JavaScript and CPython already agree on the shortest round-tripping decimal form and on
- * `e+`/`e-` notation; they differ on the exponent's minimum width, which CPython pads to two
- * digits (`str(1e-7)` is `'1e-07'`, JS gives `'1e-7'`). `inf`/`-inf`/`nan` are CPython's
- * spellings; `JSON.parse` cannot produce them, but `json.loads` can, so they are covered.
+ * JavaScript and CPython agree on the shortest round-tripping *digits*. They disagree on two
+ * things, and both are ported here:
+ *
+ *  1. **When to switch to exponential notation.** CPython's `format_float_short`
+ *     (`Python/pystrtod.c`, repr mode `'r'`) uses exponential iff `decpt <= -4 || decpt > 16`,
+ *     where `decpt` is the position of the decimal point relative to the first significant
+ *     digit. ECMA-262's `Number::toString` uses fixed notation for `-6 < n <= 21` — i.e.
+ *     exponential iff `decpt <= -6 || decpt > 21`. Two bands therefore diverge, one at each end:
+ *
+ *     | `decpt` | value example | CPython | JS `String()` |
+ *     |---|---|---|---|
+ *     | `-5`, `-4` | `1e-5` (`decpt = -4`) | `1e-05` | `0.00001` |
+ *     | `17`–`21` | `1e16` (`decpt = 17`) | `1e+16` | `10000000000000000` |
+ *
+ *     Measured in the pinned container, not derived: `0.00001 -> '1e-05'`,
+ *     `1.5e-5 -> '1.5e-05'`, `1e16 -> '1e+16'`, `1e17 -> '1e+17'`. Review finding **C60**;
+ *     before the fix v2 stored the JS column of that table.
+ *  2. **The exponent's minimum width**, which CPython pads to two digits (`str(1e-7)` is
+ *     `'1e-07'`, JS gives `'1e-7'`). Three-digit exponents are not padded further
+ *     (`1e-323 -> '1e-323'` on both).
+ *
+ * `inf`/`-inf`/`nan` are CPython's spellings; `JSON.parse` cannot produce them, but
+ * `json.loads` can, so they are covered.
+ *
+ * Note what is deliberately *not* reproduced: CPython's `Py_DTSF_ADD_DOT_0`, which makes an
+ * integral float render as `5.0`. That is unreachable from here — `JSON.parse` has already
+ * thrown away the distinction between `5` and `5.0` — and it is limit 1 in the block above.
  */
 function reprNumber(value: number): string {
   if (Number.isNaN(value)) {
@@ -116,7 +214,18 @@ function reprNumber(value: number): string {
   if (value === -Infinity) {
     return '-inf';
   }
-  return String(value).replace(/e([+-])(\d)$/, 'e$10$2');
+  // `toExponential()` with no argument is specified to emit the shortest digit string that
+  // round-trips — the same digits CPython gets from `_Py_dg_dtoa` mode 0 — so `decpt` can be
+  // read off it without re-deriving the shortest form.
+  const [mantissa, exponent] = value.toExponential().split('e');
+  const decpt = Number(exponent) + 1;
+  if (decpt > -4 && decpt <= 16) {
+    // CPython uses fixed notation here, and so does JS (this band is inside `-6 < n <= 21`),
+    // with the same digits — so `String()` is already the answer.
+    return String(value);
+  }
+  const sign = decpt <= 0 ? '-' : '+';
+  return `${mantissa}e${sign}${String(Math.abs(decpt - 1)).padStart(2, '0')}`;
 }
 
 /**
@@ -184,6 +293,41 @@ const PYTHON_STRIP_RE = new RegExp(`^[${PYTHON_SPACE}]+|[${PYTHON_SPACE}]+$`, 'g
 
 export function pythonStrip(value: string): string {
   return value.replace(PYTHON_STRIP_RE, '');
+}
+
+/**
+ * The whitespace CPython's **`int(str)`** skips — which is neither `trim()`'s set **nor
+ * {@link pythonStrip}'s**, and that third answer is the whole point of this constant.
+ *
+ * `int()` does not call `strip()`. It scans with `Py_UNICODE_ISSPACE`, and that macro's ASCII
+ * table covers `\t\n\v\f\r` and space but **not** the C0 separators U+001C-U+001F, which
+ * `str.isspace()` (and therefore `strip()`) does accept. Measured in the pinned container over
+ * 25 code points, `int(ch + '5' + ch)` against `(ch + '5' + ch).strip()`:
+ *
+ * | code point | `int()` | `strip()` | JS `trim()` |
+ * |---|---|---|---|
+ * | U+0009-U+000D, U+0020 | skips | strips | strips |
+ * | U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F, U+3000 | skips | strips | strips |
+ * | **U+0085** (NEL) | **skips** | strips | **keeps** — v1 answers, v2 used to 500 |
+ * | **U+001C-U+001F** | **ValueError** | **strips** | keeps |
+ * | **U+FEFF** (BOM) | **ValueError** | keeps | **strips** — v1 500s, v2 used to answer |
+ * | U+200B, U+180E | ValueError | keeps | keeps |
+ *
+ * So routing `int()` through `pythonStrip` would fix U+0085 and U+FEFF and **break**
+ * U+001C-U+001F, which currently agree by accident. Review condition **C63**; the divergence
+ * is reachable from `?page=` on `GET /api/user` and `GET /api/loan`, where v1's `int()` is
+ * unguarded (P4-D4), and from `value` / `identification` / `state` in a body.
+ */
+const PYTHON_INT_SPACE =
+  '\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000';
+const PYTHON_INT_STRIP_RE = new RegExp(`^[${PYTHON_INT_SPACE}]+|[${PYTHON_INT_SPACE}]+$`, 'gu');
+
+/**
+ * `str.strip()` restricted to the set CPython's `int()` skips. See {@link PYTHON_INT_SPACE}
+ * for why this is not {@link pythonStrip}.
+ */
+export function pythonIntStrip(value: string): string {
+  return value.replace(PYTHON_INT_STRIP_RE, '');
 }
 export function pythonStr(value: unknown): string {
   return typeof value === 'string' ? value : pythonRepr(value);

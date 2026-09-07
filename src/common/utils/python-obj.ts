@@ -1,5 +1,5 @@
 import { daysInMonth, type PlainDate } from './date.util';
-import { pythonStr } from './python-str';
+import { pythonIntStrip, pythonStr } from './python-str';
 
 /**
  * The CPython behaviours v1's services rely on when they read a parsed request body,
@@ -154,7 +154,9 @@ export function toDjangoInt(value: unknown, field: string): bigint {
     return BigInt(Math.trunc(value));
   }
   if (typeof value === 'string') {
-    const trimmed = value.trim();
+    // `pythonIntStrip`, not `trim()`: CPython's `int()` skips U+0085 (which `trim()` keeps)
+    // and refuses U+FEFF (which `trim()` strips). C63.
+    const trimmed = pythonIntStrip(value);
     if (/^[+-]?\d+$/.test(trimmed)) {
       return BigInt(trimmed);
     }
@@ -391,7 +393,21 @@ export function pythonGreaterThan(submitted: unknown, stored: bigint): boolean {
   );
 }
 
-/** CPython's `type(x).__name__` for the shapes a JSON body can carry. */
+/**
+ * CPython's `type(x).__name__` for the shapes a JSON body can carry.
+ *
+ * ⚠️ **The trailing `'float'` is a fall-through, not a `number` branch** (review nit
+ * **C57**). Its only caller is `pythonGreaterThan`, which handles `number` — and `bigint`,
+ * and `boolean` — before it throws, so a `number` never reaches here. What *can* reach it is
+ * a `symbol` or a function, for which `'float'` is simply wrong; they are unreachable from
+ * `JSON.parse` and therefore from every real call, so this is a naming defect in an
+ * unreachable branch rather than a behavioural one.
+ *
+ * Made explicit rather than "fixed": the exhaustive `typeof` list below is what a reader needs
+ * to see, and the message it feeds is discarded by v1's bare-500 renderer anyway. If a caller
+ * that can pass a `symbol` ever appears, this returns the wrong noun and the branch must be
+ * split — it does not silently do the right thing.
+ */
 function pythonTypeName(value: unknown): string {
   if (value === null || value === undefined) {
     return 'NoneType';
@@ -408,6 +424,11 @@ function pythonTypeName(value: unknown): string {
   if (typeof value === 'boolean') {
     return 'bool';
   }
+  if (typeof value === 'number') {
+    // Unreachable from `pythonGreaterThan`, which compares numbers rather than naming them.
+    return Number.isInteger(value) ? 'int' : 'float';
+  }
+  // `symbol` / `function` — unreachable from a parsed JSON body. See the docblock.
   return 'float';
 }
 
@@ -451,7 +472,8 @@ export function describeTypeForErrorMessage(value: unknown): string {
  * the message is the one CPython prints.
  */
 export function pythonInt(raw: string): number {
-  const trimmed = raw.trim();
+  // `pythonIntStrip`, not `trim()` — see {@link toDjangoInt}. C63.
+  const trimmed = pythonIntStrip(raw);
   if (!/^[+-]?\d+$/.test(trimmed)) {
     throw new Error(`ValueError: invalid literal for int() with base 10: '${raw}'`);
   }

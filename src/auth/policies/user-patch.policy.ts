@@ -28,7 +28,10 @@ export type UserSection = 'personal' | 'finance' | 'preferences';
  * Its client posts `personal` *and* `finance` in the same request every time
  * (`fondo_api/tests/test_user_views.py:49-113`), so authorising on "the body contains a
  * `finance` key" instead of on `body.type` would 403 every ordinary member profile save —
- * 14 of 15 users, on day one of cutover.
+ * **13 of 15** users on day one of cutover: `finance` is writable only by
+ * `PRIVILEGED_FINANCE_ROLES` (ADMIN and TREASURER), and `fondodev` holds one of each against
+ * 1 PRESIDENT and 12 MEMBERs. Re-derive from `auth_user`/`fondo_api_userprofile.role`, not
+ * from this sentence.
  *
  * Taking the section from this function rather than from the body's shape is what makes that
  * mistake unrepresentable: the policy is only ever handed the dispatched section.

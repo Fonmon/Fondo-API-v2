@@ -255,5 +255,43 @@ describe('ApiExceptionFilter — DRF envelopes (Phase 1)', () => {
       filter.catch(new NotFoundException(), host);
       expect(isDrfRendered(responseOf(host))).toBe(false);
     });
+
+    /**
+     * **Condition C57.** Since M3 the loser of a concurrent transition blocks across the
+     * winner's whole transaction, SES included, so the 20 s interactive budget at
+     * `loan.service.ts` now has to cover a queued caller *plus* the mail leg. If it does not,
+     * Prisma raises **P2028** (`Transaction API error: Transaction already closed`) instead of
+     * D9's 409 — and the question the review asked is what the caller then *sees*.
+     *
+     * It is not an `ApiException`, a `DrfException` or an `HttpException`, so it reaches the
+     * catch-all: a zero-byte 500, unmarked, therefore stripped of `Allow` and `Vary: Accept`
+     * by `DjangoUrlResolverMiddleware`. That is **P3-D6's uncaught shape** — the same thing v1
+     * answers when its own untimed `transaction.atomic` fails for any other reason — so the
+     * failure mode is registered rather than novel. Asserted here rather than reasoned about
+     * in a docblock.
+     */
+    it('a Prisma P2028 renders P3-D6’s uncaught shape: zero bytes, 500, unmarked', () => {
+      const { host, captured } = makeHost();
+      // The real error's identifying surface: a `code` of P2028 and no HTTP status anywhere.
+      const p2028 = Object.assign(
+        new Error('Invalid `prisma.loan.update()` invocation:\nTransaction already closed'),
+        { code: 'P2028', clientVersion: '7.10.0', name: 'PrismaClientKnownRequestError' },
+      );
+      filter.catch(p2028, host);
+
+      expect(captured.status).toBe(HttpStatus.INTERNAL_SERVER_ERROR);
+      expect(captured.rawBody).toBe('');
+      expect(captured.jsonBody).toBeUndefined();
+      // Unmarked ⇒ no `Allow`, no `Vary: Accept` — Django threw that response away.
+      expect(isDrfRendered(responseOf(host))).toBe(false);
+      // The discriminator: a 409 from the same path IS marked and DOES carry a body.
+      const conflict = makeHost();
+      filter.catch(
+        ApiException.withMessage(HttpStatus.CONFLICT, 'Invalid state transition'),
+        conflict.host,
+      );
+      expect(conflict.captured.jsonBody).toEqual({ message: 'Invalid state transition' });
+      expect(isDrfRendered(responseOf(conflict.host))).toBe(true);
+    });
   });
 });

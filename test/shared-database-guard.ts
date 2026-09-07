@@ -11,7 +11,7 @@ import { Client } from 'pg';
  * pins `DATABASE_URL` to the test database, so the *documented* footgun is closed — but a
  * tester who has just been reading the deviations doc (which has them exporting two other
  * `fondodev` URLs in the same shell) and types `TEST_DATABASE_URL=…/fondodev` destroys the
- * **94-row notification fixture, the 15 users and the 632 scheduler rows**, irreversibly.
+ * **94-row notification fixture, the 15 users and the 626 scheduler rows**, irreversibly.
  * Against `fondodev` the `migrate deploy` is a no-op (the baseline is marked applied, never
  * executed) so nothing else would have stopped the `TRUNCATE`.
  *

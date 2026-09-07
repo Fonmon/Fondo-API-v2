@@ -1226,6 +1226,57 @@ describe('Phase 4 — /api/loan (port of test_loan_views.py)', () => {
       await expect(loanRow(noDetail).then((l) => l.state)).resolves.toBe(1);
     });
 
+    /**
+     * **C46 — an out-of-`Int32` id in column 0 must miss, not abort the file.**
+     *
+     * Measured on the pinned v1 container, read-only:
+     * `LoanDetail.objects.get(loan_id=X)` raises `DoesNotExist` for `999999`, `2**31`,
+     * `3e9` **and** `2**63` — Python's `int` is arbitrary precision and PostgreSQL compares an
+     * `integer` column against an out-of-range numeric literal happily. v1 logs
+     * `Loan with id: X, not exists` and continues the upload.
+     *
+     * Measured on v2 before the fix: Prisma refuses the same value client-side with
+     * `Value out of range for the type: value "3000000000" is out of range for type integer`.
+     * That is not D9's 409, so the narrow catch rethrows it and the `$transaction` rolls back
+     * the **whole monthly file**. The cell drives both halves at once: a good row that must
+     * still apply, and a poisoned row that must be skipped.
+     */
+    it('C46: an out-of-32-bit-range id is skipped, and the rest of the file still applies', async () => {
+      const good = await seedLoan(prisma, {
+        userId: admin.id,
+        value: 100n,
+        timelimit: 5,
+        fee: 0,
+        rate: '0',
+        disbursementDate: '2000-01-01',
+        state: 1,
+      });
+      await seedLoanDetail(prisma, { loanId: good, paydayLimit: '2000-01-01' });
+
+      const response = await request(server())
+        .patch('/api/loan')
+        .set(asAdmin())
+        .attach(
+          'file',
+          Buffer.from(
+            `3000000000\t1\t2\t1/1/2018\t3\t4\t1/1/2018\n` +
+              `99999999999999999999\t1\t2\t1/1/2018\t3\t4\t1/1/2018\n` +
+              `${good}\t100\t10\t15/6/2018\t1\t90\t1/6/2018\n`,
+            'utf8',
+          ),
+          'loans.txt',
+        )
+        .expect(200);
+
+      // The listed good loan is shielded from the auto-close and its detail was written.
+      expect(response.body).toEqual({ closed_loans: [] });
+      const detail = await prisma.loanDetail.findFirst({ where: { loan_id: good } });
+      expect(detail?.total_payment).toBe(100n);
+      expect(detail?.capital_balance).toBe(90n);
+      // The two poisoned ids shielded nothing, exactly as v1's real integers shield nothing.
+      await expect(loanRow(good).then((l) => l.state)).resolves.toBe(1);
+    });
+
     it('an empty file auto-closes every APPROVED loan — the blast radius, exercised', async () => {
       const approved: number[] = [];
       for (let i = 0; i < 3; i += 1) {

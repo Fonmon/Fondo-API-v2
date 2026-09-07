@@ -2143,7 +2143,7 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
     /**
      * ⚠️ The v1 defect: `handle_power_request` writes `power.state` unconditionally and mails
      * on approval, so re-approving an already-approved power **re-sends the fund-wide
-     * power-of-attorney letter to all 15 members, unbounded**. Same class as D9.
+     * power-of-attorney letter to every active member, unbounded**. Same class as D9.
      */
     it('1 -> 1 is 409 with NO second letter', async () => {
       const { id, requesteeToken } = await createPower();

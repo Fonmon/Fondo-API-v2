@@ -944,7 +944,19 @@ export class UserService {
         where: { id: stored.id },
         data: {
           notifications,
-          // D35: null reaches the column, as in v1; the `NOT NULL` constraint decides.
+          // ⚠️ **D35, and the status here is right for a different reason than it looks**
+          // (**C66**). In v1 a JSON `null` really does reach the column and PostgreSQL's
+          // `NOT NULL` refuses it, and the `IntegrityError` lands in this method's bare
+          // `except` → **404**. In v2 the value never reaches PostgreSQL at all: Prisma
+          // validates the required field **client-side** and throws before any SQL is sent.
+          // Different mechanism, same 404, because the same bare `except` catches both — and
+          // measured that way on both stacks, not assumed.
+          //
+          // The `as string` casts are what make that reachable rather than a compile error:
+          // `toDjangoText` returns `string | null`. Kept deliberately — narrowing here would
+          // turn v1's 404 into a v2 400 and move a status — and bound to the schema by a
+          // type-level assertion in `user.service.spec.ts` (C64), so relaxing either column
+          // to nullable fails the build rather than silently changing the answer.
           primary_color: toDjangoText(pyGet(obj, 'primary_color')) as string,
           secondary_color: toDjangoText(pyGet(obj, 'secondary_color')) as string,
         },
@@ -1012,8 +1024,8 @@ export class UserService {
     //
     // `UserActivateView` sets `permission_classes = []`, so the route is unauthenticated. The
     // only other input is `identification`, which `GET /api/user` returns to any member and
-    // which the power-of-attorney letter prints for all 15 (D5). So an unauthenticated
-    // `POST /api/user/activate/<id>` with `{"key": null, "identification": <cédula>,
+    // which the power-of-attorney letter carries to every active member (D5). So an
+    // unauthenticated `POST /api/user/activate/<id>` with `{"key": null, "identification": <cédula>,
     // "password": "…"}` calls `set_password` on a live account and hands over the login.
     //
     // Fixed, not ported. There is no legitimate caller: a real activation link always carries

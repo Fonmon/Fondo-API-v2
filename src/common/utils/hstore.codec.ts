@@ -26,7 +26,7 @@
  *
  * v1 reads them back with `json.loads(payload['user_ids'])` and
  * `json.loads(subscription['keys'].replace("'", '"'))`. Both are reproduced here verbatim.
- * **Do not "fix" them** — 94 subscription rows and 632 scheduler rows in the live database
+ * **Do not "fix" them** — 94 subscription rows and 626 scheduler rows in the live database
  * are already encoded this way, and Phase 9 (hstore -> jsonb) is where the repair belongs.
  *
  * ⚠️ Two traps when porting the read path:

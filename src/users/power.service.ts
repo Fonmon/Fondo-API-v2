@@ -58,8 +58,10 @@ export const POWER_REJECTED = 2;
  * including one addressed to somebody else — and trigger the fund-wide email. Q17: restrict.
  *
  * **D5 — the letter goes out blind.** v1 puts every member's address in `ToAddresses` with an
- * empty `Bcc`, disclosing all 15 addresses to all 15 members on every approval. Q18: move them
- * to `Bcc`. The recipient list is unchanged (Q10: all members).
+ * empty `Bcc`, disclosing the whole recipient list to everyone on it, on every approval.
+ * `get_users_attr('email')` filters `is_active=True`, so today that is **13 of the 15
+ * `auth_user` rows** (11 distinct addresses — two pairs share one). Q18: move them to `Bcc`.
+ * The recipient list is unchanged (Q10: all members).
  *
  * ## Two more, added in Phase 4
  *
@@ -67,7 +69,7 @@ export const POWER_REJECTED = 2;
  * the caller, so no member can give away another's vote — but a member acting **alone**, with
  * no second party's consent (which every other power requires under D2), could create and then
  * approve a power naming themselves and make the fund emit the formal power-of-attorney letter,
- * on Fondo Montañez letterhead and addressed to the president of the assembly, to all 15
+ * on Fondo Montañez letterhead and addressed to the president of the assembly, to every active
  * members. Live on 2026-09-03: **0 of 20 rows are self-directed**. Refused at *creation*, not
  * approval, so no row and no self-addressed push notification are produced; 406 is v1's house
  * style for a business-rule refusal on a create (`create_loan`).
@@ -337,7 +339,7 @@ export class PowerService {
  *
  * `handle_power_request` writes `power.state` unconditionally and mails on approval
  * (`services/user.py:193-206`), so **re-approving an already-approved power re-sends the
- * fund-wide power-of-attorney letter to all 15 members, unbounded** — the same defect class
+ * fund-wide power-of-attorney letter to every active member, unbounded** — the same defect class
  * as **D9** for loans, and guarded in neither v1 nor the Phase 3 port. Anything that is not
  * `0 → 1` or `0 → 2` is a **409** with no mail and no write. Re-sending a lost letter becomes
  * an ops task rather than an API state write.

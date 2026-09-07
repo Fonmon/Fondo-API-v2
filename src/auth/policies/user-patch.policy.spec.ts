@@ -466,7 +466,8 @@ describe('§5 D1 — PATCH /api/user/<id> authorisation policy', () => {
       it("ignores a finance block in a member's ordinary personal save", () => {
         // The v1 body shape: `{type: 'personal', personal: {...}, finance: {...}}`
         // (test_user_views.py:49-113). Authorising on the presence of `finance` would 403
-        // 14 of 15 members on day one.
+        // 13 of 15 members on day one — everyone outside PRIVILEGED_FINANCE_ROLES, i.e. the
+        // 1 PRESIDENT and the 12 MEMBERs on the current `fondodev` fixture.
         const body = {
           type: 'personal',
           personal: { first_name: 'Ana', role: Role.MEMBER },

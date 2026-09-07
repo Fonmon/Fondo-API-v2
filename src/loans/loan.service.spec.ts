@@ -97,6 +97,43 @@ describe('LoanService (unit)', () => {
     it('MEMBER is deliberately absent from the privileged set', () => {
       expect(LOAN_READ_PRIVILEGED_ROLES).not.toContain(Role.MEMBER);
     });
+
+    /**
+     * **C44 — the two orderings, mechanically.** The arrays are guarded above; the *order* in
+     * which each predicate runs relative to its row read was not, and the two are deliberately
+     * **opposite**:
+     *
+     * | route | order | why it cannot be the other one |
+     * |---|---|---|
+     * | `GET /api/user/<id>` | authorise, **then** read | the ownership term is `actor.id === <path id>`, computable from the path with no row — so authorising first is free, and it closes the id-enumeration oracle D25 exists to close |
+     * | `GET /api/loan/<id>` | read, **then** authorise | the ownership term is `actor.id === loan.user_id`, knowable *only* from the row. No ordering both preserves v1's 404 on a missing loan and hides existence from a non-owner; v2 kept v1's 404 |
+     *
+     * So "the same predicate and the same roles as D10" is true of the **rule** and false of
+     * the **evaluation order**. What leaks on the loan side is the existence of a loan id and
+     * nothing else — no value, rate, owner or comments, all of which v1 handed to any member.
+     *
+     * The loan side is pinned three ways: the cell below (which additionally asserts the read
+     * *happened*), `getLoan — deviation D10 › a missing loan is 404 for everyone` above, and
+     * `test/loan.e2e-spec.ts` ("a non-existent loan is still 404 for everyone"). The user side
+     * is pinned in `user.service.spec.ts` ("getUser authorises before it reads") and in
+     * `test/user.e2e-spec.ts` ("for a MEMBER a non-existent id is also 403, not 404").
+     * Each one fails if a later "consistency" refactor flips its side — verified by flipping
+     * both and watching three cells go red.
+     */
+    it('getLoan reads first: a missing id is 404 for a non-owner MEMBER, never 403', async () => {
+      const findUnique = jest.fn().mockResolvedValue(null);
+      const service = new LoanService(
+        { loan: { findUnique } } as unknown as PrismaService,
+        {} as unknown as UserService,
+        {} as unknown as NotificationService,
+        {} as unknown as MailService,
+      );
+      await expect(service.getLoan(MEMBER, 4242)).rejects.toMatchObject({
+        status: HttpStatus.NOT_FOUND,
+      });
+      // The discriminator: the row was read *before* the predicate could refuse.
+      expect(findUnique).toHaveBeenCalledTimes(1);
+    });
   });
 
   // ==========================================================================
@@ -844,6 +881,49 @@ describe('LoanService (unit)', () => {
         payday_limit: new Date('2017-01-03T00:00:00.000Z'),
         from_date: new Date('2017-01-01T00:00:00.000Z'),
       });
+    });
+
+    /**
+     * **D33 — the partial self-heal, pinned in-repo (C53).**
+     *
+     * `__update_loan_detail` resolves by `loan_id` **alone, with no state filter**
+     * (`services/loan.py:__update_loan_detail`), so re-listing an **already-closed** loan in a
+     * later monthly file updates its `LoanDetail` and re-creates both payment reminders. Both
+     * stacks behave identically — it is a non-diff, measured 2 → 0 → 2 across two uploads —
+     * which is exactly why nothing would have caught its removal: no parity cell can fail on
+     * a behaviour both stacks share, and until this cell it was pinned only in the tester's
+     * harness, outside the repo.
+     *
+     * It is **load-bearing**: with **D31 withdrawn** (operator declined re-opening `3 → 1`),
+     * `docs/phase-4-deviations.md` §2.10 instructs a DBA repairing a wrongly auto-closed loan
+     * to *expect* the self-heal. Adding a state filter here — the obvious-looking tidy-up —
+     * would silently break a documented recovery procedure.
+     *
+     * `approved: []` is what makes the loan not-APPROVED: it is absent from the `state = 1`
+     * set the auto-close reads, while its detail row still exists.
+     */
+    it('D33: a PAID_OUT loan listed in the file still has its detail updated and its reminders re-created', async () => {
+      const { service, prisma, notifications } = buildBulk({
+        existingDetailFor: [7],
+        approved: [],
+      });
+      await service.bulkUpdateLoans(
+        Buffer.from('7\t100\t10\t15/6/2018\t1\t90\t1/6/2018\n', 'utf8'),
+      );
+
+      expect(prisma.loanDetail.update).toHaveBeenCalledTimes(1);
+      expect(callArgs(prisma.loanDetail.update)[0].data).toMatchObject({
+        total_payment: 100n,
+        capital_balance: 90n,
+      });
+      // Both reminders, T-5d and T-1d — the "re-created" half of the self-heal.
+      expect(notifications.scheduleNotification).toHaveBeenCalledTimes(2);
+
+      // ⚠️ The discriminator. A state filter here would make the cell above vacuous rather
+      // than failing, so assert the shape of the query itself: `loan_id` and nothing else.
+      const where = callArgs(prisma.loanDetail.findFirst)[0].where as Record<string, unknown>;
+      expect(Object.keys(where)).toEqual(['loan_id']);
+      expect(where.loan_id).toBe(7);
     });
 
     it('test_bulk_update_loans: an id with no LoanDetail is logged and skipped, not created', async () => {

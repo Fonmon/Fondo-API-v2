@@ -217,6 +217,17 @@ export class LoanService {
 
     const rawValue = pyGet(obj, 'value');
 
+    // ⚠️ **This is the fund's only quota gate, and D28's withdrawal is what it costs**
+    // (**C49/n4**). `available_quota` is writable by ADMIN and TREASURER
+    // (`PRIVILEGED_FINANCE_ROLES`), and D28 — restricting a TREASURER from approving their
+    // own loan — was **withdrawn** by operator **Q31**, ported from v1 unchanged. So a
+    // TREASURER can raise their own `available_quota`, pass the check below, and approve the
+    // resulting loan themselves. That is an accepted exposure, not an oversight: the loop is
+    // closed in `docs/phase-4-deviations.md` §1.2, `docs/operator-q29a-q30a-q31.md`,
+    // `loan-detail.controller.ts`'s class docblock, `loan.service.ts:88-93` and a **passing**
+    // e2e cell whose docblock says a failure there is a policy change needing an operator.
+    // Changing it is the operator's call, not a tidy-up.
+
     // ## D29 — compare **raw**, coerce for the write
     //
     // v1's gate is `if obj['value'] > user_finance.available_quota and not refinance`
@@ -295,6 +306,12 @@ export class LoanService {
     });
 
     await this.notifications.sendNotification(
+      // ⚠️ **C45/m6 — the documented exception to the "every query on a transactional path
+      // takes the client" rule** stated at the top of this class. `getUserIds` and
+      // `getUserEmails` (in `updateLoan`) do **not** take `tx`. Safe, and only for these two:
+      // both are read-only, both hit `auth_user`/`fondo_api_userprofile`, and neither
+      // transaction writes those tables — so there is no uncommitted state they could miss.
+      // Anything that reads a table the enclosing transaction writes must take the client.
       await this.users.getUserIds([0, 2]),
       'Ha sido creada una nueva solicitud de crédito',
       `/loan/${created.id}`,
@@ -337,6 +354,15 @@ export class LoanService {
     paginate = true,
     client: LoanSqlClient = this.prisma,
   ): Promise<PageEnvelope<LoanDto> | UnpaginatedEnvelope<LoanDto>> {
+    if (!allLoans && userId === null) {
+      // **C45/m7.** Unreachable from the controller — the only `null` caller passes
+      // `allLoans = true` — and guarded for the same reason as `page === null` below, which
+      // is the sibling case the pattern was established for. Without it Prisma **drops** an
+      // `undefined` filter and lists the whole fund, where Django's `filter(user_id=None)`
+      // compiles to `user_id IS NULL` and returns nothing: an impossible argument would have
+      // become a data leak rather than an empty page.
+      throw new TypeError('getLoans: userId must be a number unless allLoans is true');
+    }
     const where: Prisma.LoanWhereInput = {
       ...(allLoans ? {} : { user_id: userId ?? undefined }),
       ...(state === 4 ? {} : { state }),
@@ -558,6 +584,23 @@ export class LoanService {
     return this.prisma.$transaction(async (tx) => this.updateLoanIn(tx, id, state), {
       // The approval leg sends the borrower's email *inside* v1's `transaction.atomic()`.
       // The default 5 s interactive budget is shorter than SES's own worst case (C22).
+      //
+      // ⚠️ **The budget now has to cover a queued caller *plus* SES** (review nit **C57**).
+      // Since M3 the state write is a compare-and-set, so a second concurrent transition on
+      // the same loan blocks on the winner's row lock and waits out the winner's *entire*
+      // remaining transaction — `getUserEmails`, `generateAmortizationTable`,
+      // `upsertLoanDetail` and `sendMail` — before it can re-evaluate. Before M3 the loser
+      // completed immediately, with a lost update. 20 s covers SES's own 5 s connect + 10 s
+      // socket budget (`ses.client.ts`) with headroom for one queued caller; a third
+      // simultaneous caller on the *same loan* could exceed it.
+      //
+      // If it is exceeded the caller gets Prisma's **P2028**, which is not an `ApiException`,
+      // a `DrfException` or an `HttpException`, so `ApiExceptionFilter`'s catch-all renders it
+      // — a **zero-byte 500 with no `Allow` and `Vary: Origin`**, which is exactly **P3-D6**'s
+      // uncaught shape and therefore the same thing v1 answers when *its* untimed
+      // `transaction.atomic` fails for any other reason. Pinned in
+      // `api-exception.filter.spec.ts` ("a Prisma P2028 renders P3-D6's uncaught shape"), so
+      // the claim is a cell rather than a reading of the filter.
       timeout: 20_000,
       maxWait: 10_000,
     });
@@ -613,9 +656,14 @@ export class LoanService {
       throw ApiException.withMessage(HttpStatus.CONFLICT, 'Invalid state transition');
     }
 
-    const mailBcc = await this.users.getUserEmails([0, 2]);
+    // ⚠️ **C45/m5 — computed inside the branches that mail, not above them.** v1 calls
+    // `get_users_attr('email', [0,2])` *inside* the `state == 1` and `state == 2` arms
+    // (`services/loan.py:96,110`). Hoisting it was output-identical but issued one extra
+    // query per **auto-closed** loan — 28 on a whole-fund close — inside the 120 s bulk
+    // transaction, which v1 never does. `1 → 3` and every 409 now issue none.
 
     if (state === LOAN_APPROVED) {
+      const mailBcc = await this.users.getUserEmails([0, 2]);
       const { table, summary } = generateAmortizationTable({
         value: loan.value,
         timelimit: loan.timelimit,
@@ -641,6 +689,7 @@ export class LoanService {
     }
 
     if (state === LOAN_DENIED) {
+      const mailBcc = await this.users.getUserEmails([0, 2]);
       await this.mail.sendMail(
         EmailTemplate.CHANGE_STATE_LOAN_DENIED,
         [loan.user.auth_user.email],
@@ -706,6 +755,15 @@ export class LoanService {
    * ⚠️ **No transaction.** v1 has none, so a `create_loan` failure between the two writes
    * leaves the old loan un-linked; and `create_loan`'s SQS publish must not run inside one
    * (Phase 2 condition 3).
+   *
+   * ⚠️ **D30 turned that hypothetical into a reachable path** (**C52**). Before D30 the only
+   * way to fail between the two writes was a crash; now a projected `value` below 1 — a
+   * fully-paid or negative `capital_balance` — is a deliberate 400 from `createLoan`, so the
+   * `prisma.loan.update` below simply never runs and the refusal touches **no table at all**
+   * (measured: `tables touched: []`). v1 in the same case writes the child *and* links the
+   * parent. **That asymmetry is the intended shape, not a gap**: a refused refinance must
+   * leave no parent pointing at a loan that does not exist. Do not "fix" it by moving the
+   * link ahead of the create. Registered in `docs/phase-4-deviations.md` §4.1.
    *
    * ⚠️ `#{}` interpolates the raw URL segment in v1 (`id` is a `str` from the regex), which
    * renders identically to the integer.
@@ -839,7 +897,24 @@ export class LoanService {
 
         for (const line of lines) {
           const data = line.trim().split('\t');
-          const loanId = Number(toDjangoInt(requireColumn(data, 0), 'loan id'));
+          // ⚠️ **C46 — an out-of-`Int32` id must MISS, not abort the file.** `int()` is
+          // arbitrary precision and PostgreSQL compares an `integer` column against an
+          // out-of-range numeric literal happily, so v1's
+          // `LoanDetail.objects.get(loan_id=3000000000)` is a plain `DoesNotExist`: logged,
+          // skipped, upload continues. Measured on the pinned stack for `2**31`, `3e9` and
+          // `2**63` — all four `DoesNotExist`. Prisma refuses the same value client-side
+          // (`Value out of range for the type … integer`, measured), and that error is **not**
+          // D9's 409, so the narrow catch below rethrows it and the `$transaction` rolls back
+          // the **whole monthly file** — every detail upsert, every scheduler row, every
+          // auto-close — for one mistyped digit in column 0.
+          //
+          // Same hazard and same answer as `parseLoanPathId`: map it to **`-1`**, an id no row
+          // can hold (the sequence starts at 1), so the lookup misses exactly where v1's does.
+          // The `loanIds` shield is unaffected — v1 pushes the real out-of-range integer,
+          // which matches no live loan either, so `-1` shields exactly as much: nothing.
+          const rawLoanId = toDjangoInt(requireColumn(data, 0), 'loan id');
+          const loanId =
+            rawLoanId > 2147483647n || rawLoanId < -2147483648n ? -1 : Number(rawLoanId);
           // ⚠️ Appended *before* the update is attempted — an unknown id still shields
           // nothing, but a known-but-unapproved id shields itself from the auto-close.
           loanIds.push(loanId);
@@ -865,7 +940,6 @@ export class LoanService {
         const closed: number[] = [];
         for (const loan of approved.list) {
           if (!loanIds.includes(loan.id)) {
-            this.logger.log(`Auto closing loan with id ${loan.id}`);
             try {
               await this.updateLoanIn(tx, loan.id, LOAN_PAID_OUT);
             } catch (error) {
@@ -897,9 +971,26 @@ export class LoanService {
             closed.push(loan.id);
           }
         }
+        // ⚠️ **C47 — one `warn` line, not 28 at `log`.** v1 emits
+        // `logger.info('Auto closing loan with id {}')` per loan, which is the whole alerting
+        // story for a **whole-fund close**: 28 info lines nobody is paged on, and — per M2 —
+        // a treasurer who does notice cannot undo it through the API. D8's response body is a
+        // capability the client has to be changed to use (Phase 9 runbook), so it is not the
+        // notice either. The per-loan lines are consolidated rather than dropped: every id is
+        // in the list below, verbatim and in close order, and the level is the one an operator
+        // actually alerts on. Whether a mass close should also *notify* is a business question
+        // carried with C42.
+        if (closed.length > 0) {
+          this.logger.warn(`Auto closed ${closed.length} loan(s): [${closed.join(', ')}]`);
+        }
         return { closed_loans: closed };
       },
       // 374 detail rows plus up to 28 auto-closes, each writing scheduler rows, in one unit.
+      // **P4-D7** (C45/m3). v1's `@transaction.atomic` has **no** timeout; Prisma requires a
+      // budget and its default (5 s) is far below a monthly run. A run slow enough to exceed
+      // two minutes commits in v1 and rolls back with a 500 here. All-or-nothing is preserved
+      // either way and the measured run is far inside the budget. Registered rather than left
+      // implicit, because its sibling — the 20 s approval budget — is **P4-D6**.
       { timeout: 120_000, maxWait: 20_000 },
     );
   }

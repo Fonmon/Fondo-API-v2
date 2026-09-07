@@ -54,9 +54,10 @@ export class ActivityDetailController {
    * `UserProfileSerializer` for every attached member, so any authenticated member (`GET 3`)
    * reads every other member's `identification`, `email` and `birthdate` from this route.
    * That is v1's behaviour; unlike loans (**D10**) and users (**D25**), no restriction is
-   * introduced here — Phase 5 owns no §5 rows and the plan has none pre-declared for it. It
-   * is registered as a **finding** for `business-analyst` in `docs/phase-5-deviations.md` §3,
-   * not silently changed.
+   * introduced here. It went to `business-analyst` rather than being silently changed, and
+   * came back decided: it is **D36** in `MIGRATION_PLAN.md` §5 — *ported unchanged*, accepted
+   * by the operator under **Q32**, with the four e2e role cells as its pin. Read the register
+   * row for the reasoning; do not restate it here.
    */
   @Get(':id')
   @HttpCode(HttpStatus.OK)

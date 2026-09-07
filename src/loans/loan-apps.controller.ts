@@ -5,6 +5,7 @@ import { V1View } from '../auth/decorators/v1-view.decorator';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user';
 import { ApiException } from '../common/http/api.exception';
 import { DrfException } from '../common/http/drf.exception';
+import { DrfNoRequestData } from '../common/http/drf-parser.interceptor';
 import { asPythonDict, pyGet, pyHas } from '../common/utils/python-obj';
 import { LoanService, strptimeIsoDate } from './loan.service';
 import { parseLoanPathId } from './loan-path-id';
@@ -88,7 +89,15 @@ export class LoanAppsController {
     throw ApiException.empty(HttpStatus.NOT_FOUND);
   }
 
-  /** See `LoanController.methodNotAllowed` — the route exists so the guard can run. */
+  /**
+   * See `LoanController.methodNotAllowed` — the route exists so the guard can run.
+   *
+   * `@DrfNoRequestData()` is item 5 of `docs/adding-a-route.md`'s checklist and this fallback
+   * was the only one of the three missing it (**C49/n1**). Inert today — the role matrix
+   * denies every non-`POST` method at the guard, before the interceptor — but this is the file
+   * Phase 8 copies, and an inert-by-accident checklist item is one someone omits next time.
+   */
+  @DrfNoRequestData()
   @All(':id/:app')
   methodNotAllowed(@Req() request: Request): never {
     throw DrfException.methodNotAllowed(request.method, 'POST, OPTIONS');

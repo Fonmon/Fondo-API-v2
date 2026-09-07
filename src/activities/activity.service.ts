@@ -56,9 +56,14 @@ class DjangoNotNullViolation extends Error {
  *
  * ## Nothing here deviates from v1
  *
- * Phase 5 owns **no** rows in `MIGRATION_PLAN.md` §5 — the register's `Phase` column has no
- * `P5` entry. Everything below is a straight port, including three shapes that look like
- * bugs and are not being fixed:
+ * Everything below is a straight port. `MIGRATION_PLAN.md` §5 is the authority on what this
+ * phase owns — read it there rather than here; the register's own Phase 5 block explains why
+ * the `grep -c '| P5 |'` check that used to be quoted in this docblock is no longer a check.
+ * Nothing in the register asks this file to change: **D36** was registered by the
+ * `business-analyst` *after* implementation and changes no Phase 5 code (operator **Q32**),
+ * and **D37** is about a burned sequence value, not about this service's logic.
+ *
+ * Three shapes here look like bugs and are deliberately not fixed:
  *
  * | # | v1 shape | why it is carried |
  * |---|---|---|
@@ -244,9 +249,13 @@ export class ActivityService {
    * ⚠️ `state` takes `IntegerField(choices=..., default=0)` — **`0 NOT_PAID`**. It is a
    * Python-side default with no DB default, so v2 sets it (plan §4 rule 5).
    *
-   * One row per active member: **15** on the current `fondodev` fixture. `createMany` is used
-   * rather than v1's loop because the rows are independent and the ids are assigned by the
-   * same sequence in the same order; nothing observable distinguishes them.
+   * One row per **active** member: **13** on the current `fondodev` fixture — 15 `auth_user`
+   * rows of which users 3 and 15 are `is_active = false`. Re-derive it
+   * (`select count(*) from auth_user where is_active`) rather than trusting this number; a
+   * probe written to assert 15 fails on **both** stacks and reads like a v2 defect.
+   * `createMany` is used rather than v1's loop because the rows are independent and the ids
+   * are assigned by the same sequence in the same order; nothing observable distinguishes
+   * them.
    */
   private async addUsers(tx: ActivitySqlClient, activityId: number): Promise<void> {
     const users = await tx.userProfile.findMany({

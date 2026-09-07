@@ -14,7 +14,8 @@ import {
   toDjangoSmallInt,
   toDjangoText,
 } from './python-obj';
-import { DJANGO_TEXT_PREP_FIXTURE } from './python-str.fixture';
+import { DJANGO_TEXT_PREP_DIVERGENCES, DJANGO_TEXT_PREP_FIXTURE } from './python-str.fixture';
+import { pythonStrip } from './python-str';
 
 /**
  * The CPython behaviours v1's services rely on. Each cell states which v1 line depends on it,
@@ -150,6 +151,88 @@ describe('python-obj', () => {
       expect(toDjangoText(5.5)).toBe('5.5');
       expect(toDjangoText('x')).toBe('x');
       expect(toDjangoText('')).toBe('');
+    });
+
+    /**
+     * **C60 — the exponential threshold.** CPython switches to exponential iff
+     * `decpt <= -4 || decpt > 16`; ECMA-262 iff `decpt <= -6 || decpt > 21`. The generated
+     * fixture above now samples both boundaries from both sides, so these cells are the
+     * *reason*, stated once, rather than a second copy of the data.
+     */
+    it('uses CPython’s exponential threshold, not JavaScript’s (C60)', () => {
+      // Low boundary: JS would say '0.00001' / '0.000015'.
+      expect(toDjangoText(0.00001)).toBe('1e-05');
+      expect(toDjangoText(1.5e-5)).toBe('1.5e-05');
+      expect(String(0.00001)).toBe('0.00001'); // the discriminator: what JS alone would store
+      // High boundary: JS would say '10000000000000000'.
+      expect(toDjangoText(1e16)).toBe('1e+16');
+      expect(toDjangoText(1e17)).toBe('1e+17');
+      expect(String(1e16)).toBe('10000000000000000');
+      // Just inside the band on both sides — an off-by-one in either direction fails here.
+      expect(toDjangoText(0.0001)).toBe('0.0001');
+      expect(toDjangoText(4503599627370495.5)).toBe('4503599627370495.5');
+      // The exponent is padded to two digits and no further.
+      expect(toDjangoText(1e-7)).toBe('1e-07');
+      expect(toDjangoText(1e-323)).toBe('1e-323');
+    });
+
+    /**
+     * **C60 — the Unicode-database skew.** `\p{Cn}` answers with *Node's* UCD (17.0); v1's
+     * `str.isprintable()` answers with CPython 3.9's (13.0). 15 933 code points disagreed.
+     * The escape table is now captured from the container, so these cells pin the pinned
+     * database rather than the local one — and they fail the moment someone reaches for the
+     * regex again.
+     */
+    it('escapes by the pinned interpreter’s Unicode database, not Node’s (C60)', () => {
+      const cn13 = /^[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]$/u;
+      // Assigned in UCD 14-17, unassigned in 13.0 — v1 escapes all three.
+      expect(toDjangoText(['\u0870'])).toBe("['\\u0870']");
+      expect(toDjangoText(['\u{1e7e0}'])).toBe("['\\U0001e7e0']");
+      expect(toDjangoText(['\u{13e8f}'])).toBe("['\\U00013e8f']");
+      // Node disagrees about every one of them — this is the discriminator.
+      expect(cn13.test('\u0870')).toBe(false);
+      expect(cn13.test('\u{1e7e0}')).toBe(false);
+      // Controls, both measured in the container: U+11FB0 and U+1F600 were already assigned
+      // in UCD 13 and are stored literally by both stacks; U+0378 is unassigned in both and
+      // is escaped by both. Without these the cell above could pass by escaping everything.
+      expect(toDjangoText(['\u{11fb0}'])).toBe("['\u{11fb0}']");
+      expect(toDjangoText(['\u{1f600}'])).toBe("['\u{1f600}']");
+      expect(toDjangoText(['\u0378'])).toBe("['\\u0378']");
+    });
+
+    /**
+     * **The "Known limits" block, as cells.** Each body below is one CPython behaviour v2
+     * deliberately does not reproduce, because `JSON.parse` has already discarded what it
+     * would need. v1's value is generated in the container; v2's is written here. A limit
+     * that is silently closed fails the first `expect`; one that widens fails the second.
+     */
+    describe('known limits — pinned in both directions', () => {
+      const v2Renders: Record<string, string> = {
+        '5.0': '5',
+        '-2.0': '-2',
+        '1e-330': '0',
+        '-0.0': '0',
+        '10000000000000000': '1e+16',
+        '9999999999999999': '1e+16',
+        '1000000000000000000000': '1e+21',
+        '{"b": 1, "1": 2}': "{'1': 2, 'b': 1}",
+        '{"10": 0, "9": 1}': "{'9': 1, '10': 0}",
+      };
+
+      it.each(DJANGO_TEXT_PREP_DIVERGENCES)(
+        'v1 stores %s as %j — v2 does not, and that is limit 1 or 2',
+        (body, v1Value) => {
+          const rendered = toDjangoText(JSON.parse(body));
+          expect(rendered).toBe(v2Renders[body]);
+          expect(rendered).not.toBe(v1Value);
+        },
+      );
+
+      it('covers every divergent body the generator emits', () => {
+        expect(DJANGO_TEXT_PREP_DIVERGENCES.map(([body]) => body).sort()).toEqual(
+          Object.keys(v2Renders).sort(),
+        );
+      });
     });
   });
 
@@ -343,6 +426,74 @@ describe('python-obj', () => {
     it('refuses a float, a hex literal and an underscored literal', () => {
       for (const raw of ['1.0', '0x10', '1e3']) {
         expect(() => pythonInt(raw)).toThrow('ValueError');
+      }
+    });
+
+    /**
+     * **C63 — `int()`'s whitespace set is a third answer**, neither `trim()`'s nor
+     * `pythonStrip`'s. Both call sites used `trim()`, which is the mistake `pythonStrip` was
+     * written to close, in the same directory. Every expectation below was measured in the
+     * pinned container as `int(ch + '5' + ch)`; the paired `trim()` assertion is the
+     * discriminator, so reverting to `trim()` fails these cells rather than passing them.
+     *
+     * Reachable from `?page=` on `GET /api/user` and `GET /api/loan` (P4-D4's unguarded
+     * `int()`), and from `value` / `identification` / `state` in a body.
+     */
+    it('skips U+0085 (NEL), which JS trim() keeps — v1 answers where v2 used to 500', () => {
+      expect(pythonInt('\u00855\u0085')).toBe(5);
+      expect(toDjangoInt('\u00855\u0085', 'value')).toBe(5n);
+      expect(() => {
+        const trimmed = '\u00855\u0085'.trim();
+        if (!/^[+-]?\d+$/.test(trimmed)) throw new Error('ValueError');
+      }).toThrow('ValueError');
+    });
+
+    /**
+     * The case that justifies `pythonIntStrip` existing separately from `pythonStrip`: these
+     * two disagree with **each other**, not merely with JS `trim()`.
+     *
+     * Measured in the container: `int('\u001c5\u001c')` raises `ValueError`, while
+     * `'\u001c5\u001c'.strip()` returns `'5'`. So `int()`'s whitespace set is not
+     * `str.strip()`'s, and routing integers through the string helper would make v2 answer
+     * where v1 raises.
+     */
+    it('refuses U+001C, which str.strip() strips — int() and strip() are different sets', () => {
+      expect(() => pythonInt('\u001c5\u001c')).toThrow('ValueError');
+      expect(() => toDjangoInt('\u001c5\u001c', 'value')).toThrow('ValueError');
+      // The discriminator: the *string* helper does strip it, which is why they are two.
+      expect(pythonStrip('\u001c5\u001c')).toBe('5');
+    });
+
+    it('refuses U+FEFF (BOM), which JS trim() strips — v1 500s where v2 used to answer', () => {
+      expect(() => pythonInt('\ufeff5')).toThrow('ValueError');
+      expect(() => toDjangoInt('\ufeff5', 'value')).toThrow(PythonTypeError);
+      expect('\ufeff5'.trim()).toBe('5');
+    });
+
+    it('refuses U+001C-U+001F, which `str.strip()` DOES strip — so `pythonStrip` is the wrong helper', () => {
+      for (const ch of ['\u001c', '\u001d', '\u001e', '\u001f']) {
+        expect(() => pythonInt(ch + '5')).toThrow('ValueError');
+        expect(() => toDjangoInt(ch + '5', 'value')).toThrow(PythonTypeError);
+      }
+      expect(pythonStrip('\u001c5\u001f')).toBe('5');
+    });
+
+    it('skips the Unicode separators int() accepts, and refuses the two it does not', () => {
+      for (const ch of [
+        '\u00a0',
+        '\u1680',
+        '\u2000',
+        '\u200a',
+        '\u2028',
+        '\u2029',
+        '\u202f',
+        '\u205f',
+        '\u3000',
+      ]) {
+        expect(pythonInt(ch + '5' + ch)).toBe(5);
+      }
+      for (const ch of ['\u200b', '\u180e']) {
+        expect(() => pythonInt(ch + '5')).toThrow('ValueError');
       }
     });
   });
