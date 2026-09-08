@@ -63,6 +63,15 @@ export default tseslint.config(
       // C67 one level up: a control that exercises only the case you already thought of.
       // `nestjs-reviewer` planted five bypass forms and four of them passed clean.
       //
+      // ⚠️ WHAT THIS RULE DOES AND DOES NOT CLOSE. It is closure over a PLANT SET, not over
+      // the class -- three review passes have each found forms the previous set missed (4, then
+      // 3, then 8 more). AST selectors cannot close **value-flow aliasing**: once `Date` is
+      // bound to a parameter, a field, or a computed expression, no syntactic pattern reaches
+      // it, and `(Date as any)['U'+'TC']` survives every selector below. That boundary is the
+      // honest statement of the guarantee, and it is worth more than a ninth selector: this
+      // rule raises the cost of the accident, it does not make the remap unreachable. The
+      // measured plant set is in `MIGRATION_PLAN.md` D43.
+      //
       // `new Date(y, m, d)` is the important one: it runs the same `MakeFullYear`
       // (measured: `new Date(50,0,1).getFullYear() === 1950`), it is the MORE idiomatic
       // spelling, and it carries a local-time-zone bug on top. The single-argument forms
@@ -113,6 +122,18 @@ export default tseslint.config(
           message:
             'Aliasing Date by assignment defeats the Date.UTC ban (B2). Use utcMillisFromParts.',
         },
+        // ⚠️ Third pass (Minor 11). `nestjs-reviewer` planted nine more forms and all nine
+        // passed clean. The internal inconsistency it named is the reason these are here: the
+        // config already treats bracket spelling as in scope for `Date['UTC']`, so defending
+        // that while leaving `d['setYear']` open was not a judgement, it was an oversight.
+        { selector: "MemberExpression[property.value='Date']", message: 'Reaching Date through a bracket-spelled property routes around the ban (B2).' },
+        { selector: "MemberExpression[property.value=/^(setYear|getYear)$/]", message: 'Bracket-spelled setYear/getYear carry the same 1900 base (B2).' },
+        { selector: "MemberExpression[computed=true][object.name='Date']", message: 'Computed access on Date routes around the ban (B2).' },
+        { selector: "CallExpression > Identifier[name='Date']", message: 'Passing Date as a value routes around the ban (B2) — inject a clock returning a number instead.' },
+        { selector: "ArrayExpression > Identifier[name='Date']", message: 'Smuggling Date through an array routes around the ban (B2).' },
+        { selector: "ReturnStatement > Identifier[name='Date']", message: 'Returning Date routes around the ban (B2).' },
+        { selector: "Property[shorthand=true][value.name='Date']", message: 'Shorthand-property capture of Date routes around the ban (B2).' },
+        { selector: "NewExpression[callee.name='Date'] > SpreadElement", message: 'new Date(...args) hides the argument count; the multi-argument form carries the MakeFullYear remap (B2).' },
       ],
     },
   },

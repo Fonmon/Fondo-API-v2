@@ -1710,6 +1710,41 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
     expect(powers[0].meeting_date.toISOString().slice(0, 10)).toBe('2020-01-01');
   });
 
+  /**
+   * ## D44 / Major 6 at the route — Minor 12
+   *
+   * The unit control for D44 runs against a mocked Prisma. `nestjs-reviewer` pointed out that
+   * its sibling B2/D43 got route cells asserting status **and** row, and that every
+   * `meeting_date` anywhere in `test/` is a well-formed date — so nothing pinned that the real
+   * route refuses a rolled-over calendar date and leaves the table empty.
+   *
+   * `'2020-02-30'` was v1 **500 with no row** and v2 **200 writing 2020-03-01 plus the
+   * notification**. That is the whole defect, through the real stack.
+   */
+  it('D44: POST /api/user/power refuses an impossible calendar date and writes nothing', async () => {
+    const before = await prisma.power.count();
+
+    await request(app.getHttpServer())
+      .post('/api/user/power')
+      .set(asAdmin())
+      .send({ type: 'post', meeting_date: '2020-02-30', requestee: members[0].id })
+      .expect(500);
+
+    await expect(prisma.power.count()).resolves.toBe(before);
+  });
+
+  it('D44: POST /api/user/power accepts a one-digit month and day, as date_re does', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/api/user/power')
+      .set(asAdmin())
+      .send({ type: 'post', meeting_date: '2020-1-1', requestee: members[0].id })
+      .expect(200);
+    expect(response.text).toBe('');
+
+    const powers = await prisma.power.findMany({ orderBy: { id: 'desc' }, take: 1 });
+    expect(powers[0].meeting_date.toISOString().slice(0, 10)).toBe('2020-01-01');
+  });
+
   /** `test_get_powers_pagination` */
   it('test_get_powers_pagination: eleven requests paginate ten and two pages', async () => {
     const requestee = members[0];

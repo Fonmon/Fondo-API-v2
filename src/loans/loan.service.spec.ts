@@ -209,16 +209,22 @@ describe('LoanService (unit)', () => {
       // rows existed, while making `'2018-01-0٥'` a 200-with-a-row where v1 raises.
       ['2018-01-0٥', "0[1-9]'s second char is ASCII too — the fold is [1-2]\\d's alone"],
       ['2018-01-3١', 'same for 3[0-1]'],
-      // ⚠️ Minor 8 — and read this before trusting it as a control. This row pins the
-      // BEHAVIOUR (a post-UCD-13.0 digit is refused) and does NOT pin the digit class.
-      // Measured: swapping PYTHON_DIGIT_CLASS for `\p{Nd}` leaves it green, and so does
-      // removing the `Number.isFinite` guard as well. Two independent mechanisms close it --
-      // the fold leaves an unknown code point alone so `Number()` yields NaN and the guard
-      // returns null, and the caller's `getUTCFullYear() !== year` round-trip refuses NaN
-      // anyway. So on the `strptime` path the class choice is not behaviourally observable.
-      // The cell that genuinely discriminates on the class lives on the `toDjangoDate` path
-      // in `python-obj.spec.ts`, where the drift IS observable. Kept here as a regression pin,
-      // labelled for what it is: the alternative is a row that looks like a control and is not.
+      // ⚠️ Minor 8 / Major 8 — THIS ROW IS A CONTROL. Do not delete it, and do not
+      // "simplify" PYTHON_DIGIT_CLASS to a Unicode-property test (D42 forbids that in bold).
+      //
+      // An earlier version of this comment said the opposite -- that the row only pins
+      // behaviour, because the class choice was not observable here. That was wrong, and it
+      // was wrong because the mutant behind it is one the code makes IMPOSSIBLE: swapping the
+      // class for a property test desynchronises the class from the fold, and both derive from
+      // the same PYTHON_DECIMAL_DIGIT_RANGES array, so they cannot disagree (verified
+      // exhaustively over all 1,114,112 code points: 0 in either direction).
+      //
+      // The mutations that ARE reachable, each measured:
+      //   * narrowing the class (-> '0-9')            -> 5 failures, the accept rows above
+      //   * the pinned table going stale, which widens
+      //     class and fold TOGETHER                    -> 3 failures, THIS ROW among them
+      //   * widening the class alone                   -> unreachable by construction
+      // Marking a working control inert is how it gets deleted.
       ['\u{1E4F0}018-01-01', 'U+1E4F0 NAG MUNDARI ZERO — Nd to Node, unknown to CPython 3.9.25'],
     ])('Major 5: refuses %j  // %s', (raw) => {
       expect(() => strptimeIsoDate(raw)).toThrow(/ValueError/);

@@ -539,10 +539,13 @@ export function parseStrptimeIsoDate(
   // that distinction erodes.
   const dayText = match[3].startsWith(' ') ? match[3].slice(1) : match[3];
   const day = Number(transformDecimalToAscii(dayText));
-  // ⚠️ Defensive, and Minor 8's point: if the class and the fold ever disagree about what a
-  // digit is, the regex admits a character the fold leaves alone and `Number()` yields NaN.
-  // The callers' round-trip check happens to turn that into a 500 (NaN !== NaN), but relying
-  // on it would make this helper's contract weaker than its docblock claims.
+  // ⚠️ Defensive only, and deliberately NOT the countermeasure for UCD drift. The class and
+  // the fold derive from the SAME `PYTHON_DECIMAL_DIGIT_RANGES` array, so they cannot disagree
+  // about what a digit is -- verified exhaustively over all 1,114,112 code points, 0 in either
+  // direction. This guard therefore covers a state the code makes unreachable; it is kept
+  // because the alternative (a NaN year reaching a caller and being refused only by a
+  // round-trip check) is a contract weaker than this helper's docblock claims. Drift is
+  // controlled by the Major 5 matrix -- see Major 8.
   if (!Number.isFinite(year) || !Number.isFinite(day)) {
     return null;
   }

@@ -171,9 +171,17 @@ describe('PowerService (unit)', () => {
           meeting_date: raw,
           requestee: 2,
         }),
-      ).rejects.toThrow();
-      // The row AND the notification — v1 reaches neither.
+        // ⚠️ Nit 4 — pins WHICH ValidationError branch fired. v1 distinguishes `invalid`
+        // ("has an invalid date format", a regex miss) from `invalid_date` ("has the correct
+        // format (YYYY-MM-DD) but it is an invalid date", a calendar miss). All three rows
+        // here are calendar/range misses, so a bare `.toThrow()` would also have passed if the
+        // regex had rejected them for the wrong reason.
+      ).rejects.toThrow(/but it is an invalid date/);
+      // ⚠️ Minor 13 — the docblock said "the row AND the notification"; the cell asserted only
+      // the row. Prose claiming more than the cell arbitrates, in the commit that fixed exactly
+      // that pattern (Major 7). Both are asserted now.
       expect(prisma.power.create).not.toHaveBeenCalled();
+      expect(notifications.sendNotification).not.toHaveBeenCalled();
     });
   });
 
