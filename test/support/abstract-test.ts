@@ -214,6 +214,40 @@ export async function seedActivityUser(
   return row.id;
 }
 
+/**
+ * `SavingAccount.objects.create(...)` — Phase 6.
+ *
+ * ⚠️ v1 has **no** saving-account fixtures at all (no `test_saving_account_views.py`), so
+ * this helper has no `setUp` to transcribe. Its shape comes from the model: `created_at` is
+ * `auto_now_add` and `state` / `value` carry Python-side defaults, so none of the three has a
+ * database default and all three are spelled out (plan §4 rule 5).
+ *
+ * `endDate` is a `@db.Date`, written at UTC midnight — reading it back with `fromDateColumn`
+ * then returns the same calendar day in every server zone (rule 5c).
+ */
+export async function seedSavingAccount(
+  prisma: PrismaService,
+  options: {
+    userId: number;
+    endDate: string;
+    state?: number;
+    value?: bigint | number;
+    createdAt?: Date;
+  },
+): Promise<number> {
+  const account = await prisma.savingAccount.create({
+    data: {
+      created_at: options.createdAt ?? new Date(),
+      end_date: new Date(`${options.endDate}T00:00:00.000Z`),
+      state: options.state ?? 0,
+      value: BigInt(options.value ?? 0),
+      user_id: options.userId,
+    },
+    select: { id: true },
+  });
+  return account.id;
+}
+
 /** `AbstractTest.create_user` — the ADMIN every v1 view test authenticates as. */
 export async function seedAdminUser(prisma: PrismaService): Promise<SeededUser> {
   return seedUser(prisma, {

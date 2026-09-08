@@ -128,6 +128,36 @@ export class SchedulerRunner {
    * decorator's `disabled` option because the decorator is evaluated at class-definition
    * time, before any configuration exists. The observable effect is the same — no work, no
    * query, no publish — and this way the guard is unit-testable.
+   *
+   * ## ⚠️ The pass summary reaches the log, and a dead pass is distinguishable — **C68**
+   *
+   * This method used to `await this.run()` and discard the result, which had two costs. The
+   * `failedDelivery` count {@link SchedulerExecuterOutcome} promises was computed and thrown
+   * away, so `ok: false` was *warned only*; and a throw anywhere outside the per-task
+   * `try` — {@link SchedulerTaskRepository.findDueUnprocessed} failing, for instance —
+   * escaped into `@nestjs/schedule`'s default `console.error`, with **no `Logger` line at
+   * all**. The operator check the phase wrote for itself, `grep -c 'Running scheduler'`,
+   * therefore returned **2** whether the pass processed 110 rows or died on the statement
+   * after that line.
+   *
+   * So the pass now ends with exactly one line either way, and the two are distinguishable:
+   *
+   * ```
+   * Scheduler pass finished: loaded=110 processed=108 failedDelivery=2 skippedClaimed=0 errored=2 cloned=86
+   * Scheduler pass failed: <message>
+   * ```
+   *
+   * `grep -c 'Scheduler pass finished'` is the check that answers the question the old one
+   * only appeared to. **This is the detection story Phase 6's D12 inherits** rather than
+   * building its own: a CAP that silently stops closing shows up exactly as a reminder that
+   * silently stops sending — as a pass whose `loaded` is 0 when it should not be, or as a
+   * `finished` line that never appears.
+   *
+   * The pass-level error is **logged and swallowed** rather than rethrown. `run()` already
+   * contains every per-task failure, so reaching here means the pass itself is over; letting
+   * it escape would only re-emit the same information through a channel with no `Logger`
+   * context and no timestamp discipline. The next 10:00/14:00 pass retries every row, because
+   * a row is only `processed` if it was claimed **and** its executer returned.
    */
   @Cron(SCHEDULER_CRON_EXPRESSION, {
     name: SCHEDULER_CRON_JOB,
@@ -138,7 +168,15 @@ export class SchedulerRunner {
     if (!this.config.schedulerEnabled) {
       return;
     }
-    await this.run();
+    try {
+      const summary = await this.run();
+      this.logger.log(formatRunSummary(summary));
+    } catch (error) {
+      this.logger.error(
+        `Scheduler pass failed: ${describe(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
   }
 
   /**
@@ -182,7 +220,27 @@ export class SchedulerRunner {
         } catch (error) {
           // v1 never reaches `task.save()` on this path, so the row must go back to
           // unprocessed for the next pass to retry it.
-          await this.tasks.release(task.id);
+          //
+          // ⚠️ **The release is itself in a `try` — condition C69.** It used to be a bare
+          // `await this.tasks.release(...)` followed by `throw error`, and if the release
+          // rejected, that `throw` was never reached: the *executer's* error was destroyed
+          // and replaced by a database error, while the row stayed `processed` with nothing
+          // done. Both facts have to survive, and they are different facts — what the
+          // executer failed at (v1's own log line, emitted by the outer `catch`) and that the
+          // row is now stuck claimed (no v1 counterpart; it is a consequence of P7-D2's
+          // reordering, so it gets its own line rather than shadowing v1's).
+          try {
+            await this.tasks.release(task.id);
+          } catch (releaseError) {
+            this.logger.error(
+              `Failed to release the claim on task ${task.id} after its executer threw. ` +
+                'The row is still marked processed and its work was never done; it will ' +
+                'NOT be retried. Release it by hand: ' +
+                `UPDATE fondo_api_schedulertask SET processed = false WHERE id = ${task.id}. ` +
+                `Release error: ${describe(releaseError)}`,
+              releaseError instanceof Error ? releaseError.stack : undefined,
+            );
+          }
           throw error;
         }
 
@@ -275,4 +333,19 @@ export class SchedulerRunner {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The one line a completed pass leaves behind (**C68**).
+ *
+ * Written as a function, and exported through the runner's own log rather than assembled at
+ * the call site, so the operator check and the unit cell can agree on a literal prefix
+ * (`Scheduler pass finished:`) that a later edit to the field list cannot move.
+ */
+function formatRunSummary(summary: SchedulerRunSummary): string {
+  return (
+    `Scheduler pass finished: loaded=${summary.loaded} processed=${summary.processed} ` +
+    `failedDelivery=${summary.failedDelivery} skippedClaimed=${summary.skippedClaimed} ` +
+    `errored=${summary.errored} cloned=${summary.cloned}`
+  );
 }

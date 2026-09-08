@@ -92,6 +92,14 @@ export class NotificationPublisher {
    *   marking a task processed regardless (a known, accepted v1 behaviour — Q6).
    */
   async publish(content: NotificationContent): Promise<boolean> {
+    // v1: logger.info("Sending request to MNS...") — `fondo_api/celery/tasks.py:15`, the
+    // first statement of `send_notification` and therefore *before* the queue URL is read.
+    // Ported rather than dropped (condition **C73**): it is the only line that marks an
+    // *attempt*, so without it a publish that dies before either of the two lines below
+    // leaves no trace at all — and it is the line that makes `Message sent, id:` countable
+    // against something.
+    this.logger.log('Sending request to MNS...');
+
     const queueUrl = this.config.notificationsQueueUrl;
     if (queueUrl === undefined) {
       // v1 passes `QueueUrl=None`; botocore raises ParamValidationError and the bare

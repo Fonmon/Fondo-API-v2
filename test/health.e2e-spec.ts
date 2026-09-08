@@ -28,16 +28,26 @@ describe('Phase 0 application boot', () => {
     expect(response.body).toEqual({ status: 'ok', database: 'up' });
   });
 
-  it('ships no Phase 6-8 business endpoints yet', async () => {
-    // Saving accounts, files and admin are Phases 6-8.
-    // ⚠️ `/api/loan` moved to the *guarded* list below when Phase 4 landed, and the three
-    // `/api/activity` routes when Phase 5 did. A route that does not exist 404s at
-    // `DjangoUrlResolverMiddleware`; one that exists but is unauthenticated 401s at the
-    // guard. Keeping the two lists apart is what makes this assertion mean something — an
-    // empty list would pass for either reason.
-    for (const path of ['/api/saving-account', '/api/file', '/api/admin']) {
+  it('ships no Phase 7-8 business endpoints yet', async () => {
+    // Files and admin are Phases 8 and 7's `AdminView`.
+    // ⚠️ `/api/loan` moved to the *guarded* list below when Phase 4 landed, the three
+    // `/api/activity` routes when Phase 5 did, and **`/api/saving-account` when Phase 6
+    // did**. A route that does not exist 404s at `DjangoUrlResolverMiddleware`; one that
+    // exists but is unauthenticated 401s at the guard. Keeping the two lists apart is what
+    // makes this assertion mean something — an empty list would pass for either reason.
+    for (const path of ['/api/file', '/api/admin']) {
       await request(app.getHttpServer()).get(path).expect(404);
     }
+  });
+
+  it('exposes the Phase 6 saving-account route, guarded', async () => {
+    // `^api/saving-account/?$` — the trailing slash is optional, so both forms reach the
+    // guard and 401 rather than 404ing at the resolver.
+    await request(app.getHttpServer()).get('/api/saving-account').expect(401);
+    await request(app.getHttpServer()).get('/api/saving-account/').expect(401);
+    await request(app.getHttpServer()).put('/api/saving-account').expect(401);
+    // ...and nothing beyond the pattern resolves at all.
+    await request(app.getHttpServer()).get('/api/saving-account/1').expect(404);
   });
 
   it('exposes the Phase 5 activity routes, guarded', async () => {

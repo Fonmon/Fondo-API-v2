@@ -34,14 +34,63 @@ describe('validateEnv', () => {
       },
     );
 
-    it.each(['false', '0', 'no', 'off', '', 'maybe', 'enabled'])(
-      'reads %p as disabled — anything not affirmative fails closed',
+    it.each(['false', '0', 'no', 'off', 'FALSE', 'Off', ' no '])(
+      'reads %p as disabled',
       (value) => {
         expect(validateEnv({ ...MINIMAL_ENV, SCHEDULER_ENABLED: value }).SCHEDULER_ENABLED).toBe(
           false,
         );
       },
     );
+
+    /**
+     * ⚠️ **Condition C70.** This block used to assert the opposite — `'maybe'`, `'enabled'`
+     * and `''` were pinned as "disabled", so the spec itself certified that
+     * `SCHEDULER_ENABLED=ture` silently disables the scheduler. Zero instances is the
+     * cutover mistake `docs/phase-7b-deviations.md` §7.2 names as *most likely*, because it
+     * is the default: nothing errors, nobody holds the flag, and reminders stop being sent
+     * and (from Phase 6) CAPs stop being closed, with nothing in any log.
+     */
+    it.each(['ture', 'maybe', 'enabled', 'TRUE!', 'y', 't', '2'])(
+      'refuses %p at boot rather than reading it as disabled (C70)',
+      (value) => {
+        expect(() => validateEnv({ ...MINIMAL_ENV, SCHEDULER_ENABLED: value })).toThrow(
+          EnvValidationError,
+        );
+        expect(() => validateEnv({ ...MINIMAL_ENV, SCHEDULER_ENABLED: value })).toThrow(
+          /SCHEDULER_ENABLED/,
+        );
+      },
+    );
+
+    /**
+     * Present-but-empty is the *same* accident as the typo — `SCHEDULER_ENABLED=` in a unit
+     * file, or `SCHEDULER_ENABLED=${FLAG}` with `FLAG` unset. Absent is different: that is
+     * every replica which legitimately is not the runner, and it stays `false`.
+     */
+    it('refuses an empty value but still accepts the variable being absent', () => {
+      expect(() => validateEnv({ ...MINIMAL_ENV, SCHEDULER_ENABLED: '' })).toThrow(
+        EnvValidationError,
+      );
+      expect(() => validateEnv({ ...MINIMAL_ENV, SCHEDULER_ENABLED: '   ' })).toThrow(
+        EnvValidationError,
+      );
+      expect(validateEnv({ ...MINIMAL_ENV }).SCHEDULER_ENABLED).toBe(false);
+    });
+
+    /** The message has to name the variable *and* say what to do, or it is a riddle. */
+    it('names the variable and the accepted words in the boot failure', () => {
+      try {
+        validateEnv({ ...MINIMAL_ENV, SCHEDULER_ENABLED: 'ture' });
+        throw new Error('expected validateEnv to throw');
+      } catch (error) {
+        const message = (error as EnvValidationError).message;
+        expect(message).toContain('SCHEDULER_ENABLED');
+        expect(message).toContain('true/1/yes/on');
+        expect(message).toContain('false/0/no/off');
+        expect(message).toContain("'ture'");
+      }
+    });
   });
 
   it('fails fast on a missing DEFAULT_FROM_EMAIL — v1 raises KeyError at import', () => {

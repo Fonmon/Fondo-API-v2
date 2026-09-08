@@ -15,6 +15,25 @@ const nonEmpty = (name: string): z.ZodString =>
     .min(1, `${name} must not be empty`);
 
 /**
+ * The **closed** grammar for `SCHEDULER_ENABLED` — condition **C70**.
+ *
+ * Kept as a `Map` rather than two arrays so that "is this word recognised" and "what does it
+ * mean" cannot drift apart: the refinement asks {@link Map.has} and the transform asks
+ * {@link Map.get} of the *same* table, so a word can never be accepted and then silently read
+ * as `false`. That drift is the failure this condition is about, one level down.
+ */
+const SCHEDULER_ENABLED_WORDS = new Map<string, boolean>([
+  ['true', true],
+  ['1', true],
+  ['yes', true],
+  ['on', true],
+  ['false', false],
+  ['0', false],
+  ['no', false],
+  ['off', false],
+]);
+
+/**
  * The v2 replacement for v1's scattered `os.environ` reads.
  *
  * v1 fails at *import* time with a bare `KeyError` when `DEFAULT_FROM_EMAIL` or
@@ -118,13 +137,47 @@ export const envSchema = z.object({
    * `UPDATE … WHERE id = ? AND processed = false`, so a second runner that loaded the same
    * row loses the claim and skips it. See `docs/phase-7b-deviations.md` §2.
    *
-   * Accepts `true`/`1`/`yes`/`on` (case-insensitive) as true; anything else is false.
+   * ## ⚠️ An unrecognised value **fails the boot** — condition **C70**
+   *
+   * This used to accept anything and fold it to `false`, and the spec *pinned* that
+   * leniency (`'maybe'`, `'enabled'` and `''` were all asserted as "disabled"). The result
+   * was that `SCHEDULER_ENABLED=ture` disabled the scheduler in silence: nothing errors,
+   * nobody holds the flag, and reminders — and, from Phase 6, **CAP auto-closes** — simply
+   * stop happening. `docs/phase-7b-deviations.md` §7.2 names zero-instance as the *most
+   * likely* cutover mistake precisely because it is the default, and a lenient parser makes
+   * a typo indistinguishable from the default.
+   *
+   * So the grammar is now closed and explicit:
+   *
+   * | value | result |
+   * |---|---|
+   * | **absent** | `false` — the 20 replicas that are not the runner, and the local default |
+   * | `true` / `1` / `yes` / `on` (any case, surrounding whitespace trimmed) | `true` |
+   * | `false` / `0` / `no` / `off` (same) | `false` |
+   * | **anything else, including the empty string** | **boot fails** with this variable named |
+   *
+   * ⚠️ **Present-but-empty is a failure, not a synonym for absent.** `SCHEDULER_ENABLED=` in
+   * a unit file or `SCHEDULER_ENABLED=${FLAG}` with `FLAG` unset is a templating accident,
+   * and it is the *same* accident as the typo: someone meant to set the flag and did not.
+   * Absent stays `false` because absent is what every non-runner replica legitimately is.
    */
   SCHEDULER_ENABLED: z
     .string()
-    .trim()
     .optional()
-    .transform((value) => ['true', '1', 'yes', 'on'].includes((value ?? '').toLowerCase())),
+    .superRefine((value, ctx) => {
+      if (value === undefined || SCHEDULER_ENABLED_WORDS.has(value.trim().toLowerCase())) {
+        return;
+      }
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          `SCHEDULER_ENABLED must be one of true/1/yes/on or false/0/no/off (received ` +
+          `'${value}'). Leave it unset to disable. A value this parser does not recognise ` +
+          'is refused rather than treated as false, because a silently-disabled scheduler ' +
+          'stops sending reminders and closing CAPs with nothing in the log (C70).',
+      });
+    })
+    .transform((value) => SCHEDULER_ENABLED_WORDS.get(value?.trim().toLowerCase() ?? '') ?? false),
 });
 
 /**

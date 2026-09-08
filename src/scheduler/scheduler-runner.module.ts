@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { AppConfigModule } from '../config/config.module';
 import { NotificationModule } from '../notifications/notification.module';
+import { SavingAccountModule } from '../saving-accounts/saving-account.module';
 import { ExecuterFactory } from './executers/executer.factory';
 import { NotificationExecuter } from './executers/notification.executer';
+import { SavingAccountCloseExecuter } from './executers/saving-account-close.executer';
 import { SchedulerModule } from './scheduler.module';
 import { SchedulerRunner } from './scheduler.runner';
 
@@ -21,6 +23,12 @@ import { SchedulerRunner } from './scheduler.runner';
  * the graph acyclic and matches v1's own layout, where `fondo_api/scheduler/` imports
  * `fondo_api/services/notification.py` and nothing imports back.
  *
+ * ✅ **Phase 6 adds a second executer** — {@link SavingAccountCloseExecuter}, D12's CAP
+ * auto-close — and with it an import of `SavingAccountModule`. That direction is the safe
+ * one: Phase 6 *writes* close tasks and this module *runs* them, so nothing in
+ * `SavingAccountModule` depends on the runner and the graph stays acyclic without a
+ * `forwardRef`.
+ *
  * ⚠️ Registering this module does **not** start anything by itself. The cron is declared
  * unconditionally so that its expression and time zone are inspectable through
  * `SchedulerRegistry` in every environment, but `SchedulerRunner.handleCron` returns
@@ -28,8 +36,8 @@ import { SchedulerRunner } from './scheduler.runner';
  * the beat container". See `env.schema.ts`.
  */
 @Module({
-  imports: [AppConfigModule, SchedulerModule, NotificationModule],
-  providers: [NotificationExecuter, ExecuterFactory, SchedulerRunner],
+  imports: [AppConfigModule, SchedulerModule, NotificationModule, SavingAccountModule],
+  providers: [NotificationExecuter, SavingAccountCloseExecuter, ExecuterFactory, SchedulerRunner],
   exports: [SchedulerRunner, ExecuterFactory],
 })
 export class SchedulerRunnerModule {}

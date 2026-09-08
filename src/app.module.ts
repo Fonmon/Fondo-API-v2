@@ -22,6 +22,7 @@ import { MailModule } from './mail/mail.module';
 import { NotificationModule } from './notifications/notification.module';
 import { PasswordResetModule } from './password-reset/password-reset.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { SavingAccountModule } from './saving-accounts/saving-account.module';
 import { SchedulerRunnerModule } from './scheduler/scheduler-runner.module';
 import { UserModule } from './users/user.module';
 
@@ -53,7 +54,11 @@ import { UserModule } from './users/user.module';
  * Phase **7b** adds {@link SchedulerRunnerModule} — the cron that replaces `celery beat`,
  * the executer factory and the `repeat` cloning. It contributes **no route**.
  *
- * Saving accounts and files arrive in Phases 6 and 8.
+ * Phase 6 adds {@link SavingAccountModule} — `GET|POST|PUT /api/saving-account` — together
+ * with **D12**, the CAP auto-close, whose executer is registered on
+ * {@link SchedulerRunnerModule} because that is the module that runs tasks.
+ *
+ * Files arrive in Phase 8.
  */
 @Module({
   imports: [
@@ -65,6 +70,7 @@ import { UserModule } from './users/user.module';
     UserModule,
     LoanModule,
     ActivityModule,
+    SavingAccountModule,
     PasswordResetModule,
     ScheduleModule.forRoot(),
     // Phase 7b: the `celery beat` replacement. Declares the 10:00/14:00 America/Bogota cron

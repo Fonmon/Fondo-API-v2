@@ -26,6 +26,31 @@ export type SchedulerSqlClient =
 export const SCHEDULER_TASK_NOTIFICATIONS = 0;
 
 /**
+ * **Phase 6 / D12** — the CAP auto-close. The **second** `SchedulerTask.type`, and the first
+ * one v1 does not have: `SchedulerTask.TASK_TYPES` (`models.py:100-102`) declares only
+ * `(0, 'NOTIFICATIONS')`, and `services/saving_account.py` still carries
+ * `# TODO: schedule task for closing CAP`.
+ *
+ * ⚠️ `type` is `choices`-constrained **in Python only** — there is no database check
+ * constraint — so writing a `1` is a schema-compatible insert on the Django-owned table
+ * (plan §4: the schema is not reshaped until Phase 9). A v1 process that somehow loaded such
+ * a row would raise `Exception("Executer type 1 does not exist.")` in
+ * `scheduler/executers/factory.py`, leave the row unprocessed and log it — which is the same
+ * fail-closed outcome v2's {@link ExecuterFactory} produces, and is why the rolling-deploy
+ * note in that class matters (`docs/phase-7b-deviations.md` §7.4 item 2).
+ */
+export const SCHEDULER_TASK_CLOSE_SAVING_ACCOUNT = 1;
+
+/**
+ * `payload->'type'` for a D12 close task.
+ *
+ * Distinct from the two notification values (`'birthdate'`, `'payment_reminder'`) so that
+ * `remove_sch_notitfications`-shaped deletes, which key on `owner_id` **and** `type`, can
+ * never reach a close task by accident.
+ */
+export const CLOSE_SAVING_ACCOUNT_PAYLOAD_TYPE = 'saving_account_close';
+
+/**
  * The payload `schedule_notification` is called with. Every value is `str()`-ed by Django's
  * `HStoreField.get_prep_value` on the way to the column; `user_ids` becomes a Python list
  * repr (`'[2, 4, 3]'`), which is why the reader `json.loads`es exactly that one key.
@@ -33,6 +58,26 @@ export const SCHEDULER_TASK_NOTIFICATIONS = 0;
 export interface SchedulerTaskPayload extends Record<string, PythonEncodable> {
   type: string;
   owner_id: number;
+}
+
+/**
+ * **Phase 6 / D12.** The payload of a CAP close task.
+ *
+ * Deliberately **not** shaped like {@link SchedulerTaskPayload}:
+ *
+ *  * there is no `owner_id`, because the subject of this task is a *saving account*, not a
+ *    member, and reusing `owner_id` for an account id would make the two dedupe/delete
+ *    queries in this class silently able to match each other's rows;
+ *  * there is no `user_ids`, `message` or `target`, because **a close sends no notification
+ *    at all** — operator answer **Q22**. Carrying a recipient list "for later" is how a
+ *    notification gets added by a future reader who assumes the keys are there for a reason.
+ *
+ * Every value still goes through `HStoreField.get_prep_value`'s `str()` on the way to the
+ * column, so `saving_account_id` is stored as text and read back as text.
+ */
+export interface CloseSavingAccountTaskPayload extends Record<string, PythonEncodable> {
+  type: typeof CLOSE_SAVING_ACCOUNT_PAYLOAD_TYPE;
+  saving_account_id: number;
 }
 
 /**
@@ -179,6 +224,52 @@ export class SchedulerTaskRepository {
       INSERT INTO fondo_api_schedulertask (type, run_date, payload, processed, repeat)
       VALUES (${SCHEDULER_TASK_NOTIFICATIONS}, ${runDate}, ${literal}::hstore, false, ${repeat})
     `;
+  }
+
+  /**
+   * **Phase 6 / D12.** Writes the one-shot task that closes a CAP on its `end_date`.
+   *
+   * ## ⚠️ There is no `repeat` parameter, and that is condition **C77**
+   *
+   * `repeat` is the literal `0` in the SQL below and cannot be supplied by a caller. The
+   * condition asks for the literal at the task-creation site; making the parameter *absent*
+   * is the same guarantee enforced by the type system instead of by a reviewer, and it is
+   * the guarantee that matters, because a non-zero `repeat` here would silently invalidate
+   * the rule the executer is written under.
+   *
+   * The chain of reasoning, which is easy to lose and expensive to rediscover:
+   *
+   *  1. {@link SavingAccountCloseExecuter} must **`throw`** on a failed close rather than
+   *     return `ok: false`, because `ok: false` marks the row `processed` and never retries —
+   *     "task processed, CAP still open, one WARN" is a financial-state divergence no later
+   *     pass repairs (**C74**).
+   *  2. A `throw` is only cheap because {@link SchedulerRunner} releases the claim and
+   *     rethrows **before** `createRepeatInstance`, so a throwing task clones no successor.
+   *  3. For a task with `repeat = 0` there is no successor to lose, so the worst case is a
+   *     row that keeps being retried and keeps being visible. For a *repeating* task the
+   *     same `throw` trades one occurrence for the **whole chain** — which is exactly what
+   *     **Q6** chose `ok: false` to avoid.
+   *
+   * So: *money is why D12's one occurrence must not be dropped; `repeat = 0` is why throwing
+   * costs nothing else* (**C77**, `docs/phase-7b-deviations.md` §7.4 item 3).
+   *
+   * `processed` is supplied explicitly for the reason the class comment gives: Django
+   * declares `default=False` in Python and the column has no database default.
+   *
+   * @returns the new row's id, so a caller and a test can assert on the row it wrote.
+   */
+  async createCloseSavingAccountTask(
+    runDate: Date,
+    payload: CloseSavingAccountTaskPayload,
+    client: SchedulerSqlClient = this.prisma,
+  ): Promise<number> {
+    const literal = toHstoreLiteral(payload);
+    const rows = await client.$queryRaw<{ id: number }[]>`
+      INSERT INTO fondo_api_schedulertask (type, run_date, payload, processed, repeat)
+      VALUES (${SCHEDULER_TASK_CLOSE_SAVING_ACCOUNT}, ${runDate}, ${literal}::hstore, false, 0)
+      RETURNING id
+    `;
+    return rows[0].id;
   }
 
   /**

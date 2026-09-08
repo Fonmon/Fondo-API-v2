@@ -383,6 +383,95 @@ describe('SchedulerRunner', () => {
       expect(runDate.toISOString()).toBe(expected);
     });
 
+    /**
+     * ⚠️ **Condition C76 — the cells that tell UTC-space arithmetic from Bogota-local.**
+     *
+     * Every other clone cell in this file, in `test/scheduler-runner.e2e-spec.ts` and in
+     * every parity ME cell uses `05:00Z`, which is midnight in Bogota: the UTC calendar date
+     * and the Bogota calendar date **agree**, so none of them can distinguish the two
+     * implementations. v1 adds `relativedelta` to the `datetime` Django hands it, which under
+     * `USE_TZ = True` is in **UTC**, and `relativedelta.__radd__` calls `other.replace(...)`
+     * on those UTC fields — so v2 must read *and* rewrite the UTC fields, never Bogota's.
+     *
+     * ## ⚠️ There are **two** wrong implementations, and one cell catches only one of them
+     *
+     * This was measured, not reasoned: the cell C76 suggested was written first, on its own,
+     * and a `fromDateColumn` → `toBogotaDate` mutant **passed it**. The two failure modes
+     * are separable, and each needs its own cell.
+     *
+     * | mutant | what changes | differs from v1 when |
+     * |---|---|---|
+     * | **read-local** — `toBogotaDate(instant)` for the date, UTC time reattached | the day the delta starts from | the source UTC day ≠ the source Bogota day *and* no clamp collapses the two — i.e. DAILY / WEEKLY / YEARLY, and MONTHLY into a 31-day month |
+     * | **round-trip-local** — convert to Bogota, add, convert back | the wall time the result is pinned to | a clamp binds, so the local day and the UTC day land in different months |
+     *
+     * A month-end MONTHLY hop into February — C76's suggestion — is exactly the case where
+     * `min(28, 31)` and `min(28, 30)` are **both 28**, so read-local survives it. The DAILY
+     * and YEARLY cells below are the ones that do not.
+     */
+    it('adds a DAILY delta from the UTC day, not the Bogota day (C76: read-local)', async () => {
+      // 2026-01-31 in UTC, 2026-01-30 in Bogota. +1 day is 1 Feb in UTC space and would be
+      // 31 Jan if the day were read locally — a whole month apart in the rendered date.
+      tasks.findDueUnprocessed.mockResolvedValue([
+        task({ repeat: 1, run_date: new Date('2026-01-31T01:00:00.000Z') }),
+      ]);
+
+      await runner.run(LATE_EVENING_UTC);
+
+      const [, runDate] = tasks.createRepeatInstance.mock.calls[0] as [DueSchedulerTask, Date];
+      expect(runDate.toISOString()).toBe('2026-02-01T01:00:00.000Z');
+      expect(runDate.toISOString()).not.toBe('2026-01-31T01:00:00.000Z');
+    });
+
+    it('advances a YEARLY task from the UTC day (C76: read-local)', async () => {
+      // The real birthday chains are `repeat = 4`, so this is the shape that matters. UTC
+      // 31 Jan + 1 year is 31 Jan; read locally it would be 30 Jan, and a member would be
+      // greeted a day early every year, for ever.
+      tasks.findDueUnprocessed.mockResolvedValue([
+        task({ repeat: 4, run_date: new Date('2026-01-31T01:00:00.000Z') }),
+      ]);
+
+      await runner.run(LATE_EVENING_UTC);
+
+      const [, runDate] = tasks.createRepeatInstance.mock.calls[0] as [DueSchedulerTask, Date];
+      expect(runDate.toISOString()).toBe('2027-01-31T01:00:00.000Z');
+      expect(runDate.toISOString()).not.toBe('2027-01-30T01:00:00.000Z');
+    });
+
+    /**
+     * C76's own suggested cell — the **round-trip-local** discriminator.
+     *
+     * | space | day | clamp | result |
+     * |---|---|---|---|
+     * | UTC (v1, and what this asserts) | 31 Jan | Feb has 28 days → 28 | `2026-02-28T01:00:00.000Z` |
+     * | round-trip-local | 30 Jan 20:00 | → 28 Feb 20:00 local | `2026-03-01T01:00:00.000Z` |
+     *
+     * **One day apart**, and in different months.
+     */
+    it('clamps into UTC space, not Bogota-local (C76: round-trip-local)', async () => {
+      tasks.findDueUnprocessed.mockResolvedValue([
+        task({ repeat: 3, run_date: new Date('2026-01-31T01:00:00.000Z') }),
+      ]);
+
+      await runner.run(LATE_EVENING_UTC);
+
+      const [, runDate] = tasks.createRepeatInstance.mock.calls[0] as [DueSchedulerTask, Date];
+      expect(runDate.toISOString()).toBe('2026-02-28T01:00:00.000Z');
+      expect(runDate.toISOString()).not.toBe('2026-03-01T01:00:00.000Z');
+    });
+
+    /** The leap-day chain, on the same trap and the same axis. */
+    it('loses the leap day in UTC space (C76: round-trip-local)', async () => {
+      tasks.findDueUnprocessed.mockResolvedValue([
+        task({ repeat: 4, run_date: new Date('2024-02-29T01:00:00.000Z') }),
+      ]);
+
+      await runner.run(LATE_EVENING_UTC);
+
+      const [, runDate] = tasks.createRepeatInstance.mock.calls[0] as [DueSchedulerTask, Date];
+      expect(runDate.toISOString()).toBe('2025-02-28T01:00:00.000Z');
+      expect(runDate.toISOString()).not.toBe('2025-03-01T01:00:00.000Z');
+    });
+
     it('preserves the time of day, so a local-midnight task stays at local midnight', async () => {
       tasks.findDueUnprocessed.mockResolvedValue([
         task({ repeat: 4, run_date: new Date('2026-08-25T05:00:00.000Z') }),
@@ -458,6 +547,211 @@ describe('SchedulerRunner', () => {
         '0 tasks to process',
       ]);
       expect(summary.loaded).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // C68 — the pass summary reaches a log, and a dead pass is distinguishable
+  // -------------------------------------------------------------------------
+
+  /**
+   * ⚠️ **Condition C68.** `handleCron` used to discard `run()`'s return value, so the
+   * `failedDelivery` count was computed and thrown away and a whole-pass failure went to
+   * `@nestjs/schedule`'s default `console.error` with no `Logger` line at all. The operator
+   * check the phase wrote for itself — `grep -c 'Running scheduler'` — returned **2**
+   * whether the pass processed 110 rows or died on the next statement.
+   *
+   * This is the detection story **Phase 6's D12 inherits**: a CAP that silently stops
+   * closing is caught the same way a reminder that silently stops sending is.
+   */
+  describe('the pass summary (C68)', () => {
+    it('logs one summary line naming every counter, after a completed pass', async () => {
+      tasks.findDueUnprocessed.mockResolvedValue([
+        task({ id: 1, repeat: 4 }),
+        task({ id: 2, repeat: 0 }),
+      ]);
+
+      await runner.handleCron();
+
+      const lines = calls(logged.log).map((call) => call[0]);
+      expect(lines).toEqual([
+        'Running scheduler',
+        '2 tasks to process',
+        'Scheduler pass finished: loaded=2 processed=2 failedDelivery=0 skippedClaimed=0 ' +
+          'errored=0 cloned=1',
+      ]);
+    });
+
+    it('carries the failedDelivery count that used to be thrown away', async () => {
+      tasks.findDueUnprocessed.mockResolvedValue([task({ id: 1 })]);
+      executer.run.mockResolvedValue({ ok: false, detail: 'failed' });
+
+      await runner.handleCron();
+
+      expect(calls(logged.log).map((call) => call[0])).toContain(
+        'Scheduler pass finished: loaded=1 processed=1 failedDelivery=1 skippedClaimed=0 ' +
+          'errored=0 cloned=0',
+      );
+    });
+
+    /**
+     * The half that matters most: a pass that dies **outside** the per-task `try` used to
+     * leave no `Logger` line whatsoever, so the two states — 110 rows processed and nothing
+     * at all — printed the same two lines.
+     */
+    it('logs a distinct line when the pass itself dies, instead of nothing', async () => {
+      tasks.findDueUnprocessed.mockRejectedValue(new Error('connection terminated'));
+
+      await expect(runner.handleCron()).resolves.toBeUndefined();
+
+      expect(calls(logged.error).map((call) => call[0])).toEqual([
+        'Scheduler pass failed: connection terminated',
+      ]);
+      // ⚠️ The discriminator: `Running scheduler` alone is present in BOTH cases, which is
+      // exactly why the runbook's old grep could not tell them apart.
+      const lines = calls(logged.log).map((call) => call[0]);
+      expect(lines).toEqual(['Running scheduler']);
+      expect(lines.some((line) => line.startsWith('Scheduler pass finished'))).toBe(false);
+    });
+
+    it('does not log a summary when this process is not the scheduler', async () => {
+      config.schedulerEnabled = false;
+
+      await runner.handleCron();
+
+      expect(calls(logged.log)).toHaveLength(0);
+      expect(calls(logged.error)).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // C77 (iii) — a throwing close executer leaves the row unprocessed and clones nothing
+  // -------------------------------------------------------------------------
+
+  /**
+   * ⚠️ **Condition C77, gate obligation (iii)** — for Phase 6's **D12**.
+   *
+   * The whole "must `throw`, never `ok: false`" rule rests on one mechanical fact about this
+   * runner: the `catch` releases the claim and **rethrows before `createRepeatInstance`**. So
+   * a throwing executer leaves its row unprocessed *and* writes no successor.
+   *
+   * This is the only cell that catches someone later "fixing" the runner to clone before it
+   * runs — a change that would look like a harmless reordering, would keep every other cell
+   * in the file green, and would silently turn D12's retry path into a duplicate-row
+   * generator.
+   *
+   * It is written against a **`type = 1`** task on purpose: that is D12's shape, and the
+   * `repeat: 0` on it is the second half of the reason a throw is cheap here.
+   */
+  describe('a throwing D12 close executer (C77 iii)', () => {
+    const closeTask = (): DueSchedulerTask =>
+      task({
+        id: 501,
+        type: 1,
+        repeat: 0,
+        payload: { type: 'saving_account_close', saving_account_id: '3' },
+        payloadText: '"type"=>"saving_account_close", "saving_account_id"=>"3"',
+      });
+
+    beforeEach(() => {
+      tasks.findDueUnprocessed.mockResolvedValue([closeTask()]);
+      executer.run.mockRejectedValue(new Error('deadlock detected'));
+    });
+
+    it('releases the claim, so the row is unprocessed again for the next pass', async () => {
+      await runner.run(LATE_EVENING_UTC);
+
+      expect(tasks.claim).toHaveBeenCalledWith(501);
+      expect(tasks.release).toHaveBeenCalledWith(501);
+    });
+
+    it('writes NO clone — the release-and-rethrow sits before createRepeatInstance', async () => {
+      const summary = await runner.run(LATE_EVENING_UTC);
+
+      expect(tasks.createRepeatInstance).not.toHaveBeenCalled();
+      expect(summary).toMatchObject({ processed: 0, errored: 1, cloned: 0 });
+    });
+
+    /**
+     * The same task with a **non-zero** `repeat` would be the failure C77 is about: it throws
+     * on every pass and therefore never clones its successor, ending the chain. Asserted here
+     * so the consequence is visible next to the rule rather than only in prose.
+     */
+    it('would end a chain if the close task ever carried a non-zero repeat', async () => {
+      tasks.findDueUnprocessed.mockResolvedValue([{ ...closeTask(), repeat: 4 }]);
+
+      await runner.run(LATE_EVENING_UTC);
+
+      expect(tasks.createRepeatInstance).not.toHaveBeenCalled();
+    });
+
+    /** Positive control: the same task succeeding is processed, and still clones nothing. */
+    it('is processed and still clones nothing when the close succeeds', async () => {
+      executer.run.mockResolvedValue({ ok: true, detail: 'closed' });
+
+      const summary = await runner.run(LATE_EVENING_UTC);
+
+      expect(tasks.release).not.toHaveBeenCalled();
+      expect(tasks.createRepeatInstance).not.toHaveBeenCalled();
+      expect(summary).toMatchObject({ processed: 1, errored: 0, cloned: 0 });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // C69 — a failed release must not destroy the executer's error
+  // -------------------------------------------------------------------------
+
+  /**
+   * ⚠️ **Condition C69.** The error path was `await this.tasks.release(id); throw error;` —
+   * so if `release()` rejected, the `throw` was unreachable, the executer's error was
+   * destroyed and replaced by a database error, and the row stayed `processed` with nothing
+   * done. Both facts have to survive.
+   */
+  describe('when releasing the claim fails (C69)', () => {
+    beforeEach(() => {
+      tasks.findDueUnprocessed.mockResolvedValue([task({ id: 77 })]);
+      executer.run.mockRejectedValue(new Error('SQS credentials rejected'));
+      tasks.release.mockRejectedValue(new Error('connection terminated'));
+    });
+
+    it('still logs v1’s error line for the executer’s own failure', async () => {
+      await runner.run(LATE_EVENING_UTC);
+
+      expect(calls(logged.error).map((call) => call[0])).toContain(
+        'Error processing task with id: 77, exception: SQS credentials rejected',
+      );
+    });
+
+    it('logs the stuck claim separately, naming the row and the repair statement', async () => {
+      await runner.run(LATE_EVENING_UTC);
+
+      const stuck = calls(logged.error)
+        .map((call) => call[0])
+        .filter((line) => line.startsWith('Failed to release the claim'));
+      expect(stuck).toHaveLength(1);
+      expect(stuck[0]).toContain('task 77');
+      expect(stuck[0]).toContain(
+        'UPDATE fondo_api_schedulertask SET processed = false WHERE id = 77',
+      );
+      expect(stuck[0]).toContain('connection terminated');
+    });
+
+    it('counts the row as errored and writes no clone', async () => {
+      const summary = await runner.run(LATE_EVENING_UTC);
+
+      expect(summary).toMatchObject({ processed: 0, errored: 1, cloned: 0 });
+      expect(tasks.createRepeatInstance).not.toHaveBeenCalled();
+    });
+
+    /** Positive control: with a working `release`, only v1's line is emitted. */
+    it('emits only v1’s line when the release succeeds', async () => {
+      tasks.release.mockResolvedValue(undefined);
+
+      await runner.run(LATE_EVENING_UTC);
+
+      expect(calls(logged.error).map((call) => call[0])).toEqual([
+        'Error processing task with id: 77, exception: SQS credentials rejected',
+      ]);
     });
   });
 });
