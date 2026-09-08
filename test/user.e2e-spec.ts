@@ -2552,10 +2552,16 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
    */
   describe('B2 - parseBirthdate at the route', () => {
     // ⚠️ The payload is NESTED: v1 reads `obj['personal']`, not the top level
-    // (`services/user.py:11` -> `__update_user_personal(id, obj['personal'])`). My first draft
+    // (`services/user.py:11` -> `__update_user_personal(id, obj['personal'])`). A first draft
     // of these cells put `birthdate` at the top level, so the route answered 200 and wrote
-    // nothing -- a cell that would have passed for the wrong reason once the assertion was
-    // relaxed. Caught because the assertion read the ROW rather than the status.
+    // nothing.
+    //
+    // "Assert the row, not the status" is the tactic that caught it. The PROPERTY worth
+    // carrying forward is more general, and `nestjs-reviewer` was right that the narrow form
+    // leaks: **a cell must be shown to fail against the mutation it claims to catch.** A row
+    // assertion is no safer than a status assertion if the row already holds the expected
+    // value from a fixture -- which is exactly the trap a payload that never reaches the code
+    // under test sets. Every cell in this block has been run against the pre-fix tree.
     const withBirthdate = (birthdate: string): Record<string, unknown> => {
       const body = userUpdate();
       return {
@@ -2585,6 +2591,13 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
         .set(asAdmin())
         .send(withBirthdate('2018-1-1'))
         .expect(200);
+
+      // ⚠️ Reads the ROW, not just the status — Minor 6. A 200 alone would not distinguish
+      // "parsed as 2018-01-01" from "parsed as something else" or "silently not written".
+      const row = await prisma.userProfile.findUniqueOrThrow({
+        where: { user_ptr_id: admin.id },
+      });
+      expect(row.birthdate?.toISOString().slice(0, 11)).toBe('2018-01-01T');
     });
 
     it('refuses year 0000, as strptime does', async () => {
@@ -2595,13 +2608,30 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
         .expect(500);
     });
 
-    it('refuses Arabic-Indic digits, because strptime does (unlike Django date_re)', async () => {
-      // ⚠️ The opposite of `toDjangoDate`, deliberately. Folding here would be a NEW divergence.
+    it('refuses a fully Arabic-Indic date — because of the MONTH, not a general rule', async () => {
+      // ⚠️ Major 5. An earlier version of this cell said "because strptime does (unlike Django
+      // date_re)" and the comment said folding here would be a new divergence. Both wrong:
+      // `%Y` IS Unicode-aware and folded. What refuses this string is `%m`, whose branches are
+      // all ASCII. The cell was true and its stated reason was not -- see the accepting case
+      // below, which the old rule would have forbidden.
       await request(app.getHttpServer())
         .patch(`/api/user/${admin.id}`)
         .set(asAdmin())
         .send(withBirthdate('٢٠١٨-٠١-٠١'))
         .expect(500);
+    });
+
+    it('ACCEPTS a Unicode year with an ASCII month and day, as %Y is Unicode-aware', async () => {
+      await request(app.getHttpServer())
+        .patch(`/api/user/${admin.id}`)
+        .set(asAdmin())
+        .send(withBirthdate('٢٠١٨-01-01'))
+        .expect(200);
+
+      const row = await prisma.userProfile.findUniqueOrThrow({
+        where: { user_ptr_id: admin.id },
+      });
+      expect(row.birthdate?.toISOString().slice(0, 11)).toBe('2018-01-01T');
     });
   });
 });

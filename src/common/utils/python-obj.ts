@@ -303,11 +303,14 @@ export function toDjangoDate(value: unknown, field: string): PlainDate {
   // (JS `\d` is ASCII-only with or without the `u` flag), one function over; registered as a
   // fourth axis on **D42** rather than a new row.
   //
-  // ⚠️ **This does NOT apply to the two `strptime` ports** (`parseBirthdate`,
-  // `strptimeIsoDate`). Measured on the same interpreter, `strptime` **refuses** them:
-  //     strptime('٢٠١٨-٠١-٠١', '%Y-%m-%d') -> ValueError: time data ... does not match format
-  // so their ASCII-only `\d` is correct parity. `nestjs-reviewer` reported all three as one
-  // finding; the measurement splits them.
+  // ⚠️ **The two `strptime` ports fold too, but only in some directives** -- see
+  // {@link parseStrptimeIsoDate}. `_strptime` generates a PER-DIRECTIVE pattern: `%Y` is
+  // `\d\d\d\d` and Unicode-aware, `%m` is ASCII in every branch, `%d` is ASCII in its first
+  // character and Unicode-aware in `[1-2]\d`'s second. An earlier version of this comment said
+  // the fold "does NOT apply" there and that `strptime` refuses Unicode digits generally --
+  // both false, and the cells that asserted it were defending a divergence. The one true
+  // observation behind it is narrower: `strptime('٢٠١٨-٠١-٠١')` fails **because of the
+  // month**, not because of a general ASCII rule.
   const folded = transformDecimalToAscii(value);
   // `re.match` + Python's `$`, which also matches immediately before one trailing '\n'.
   const match = /^(\d{4})-(\d{1,2})-(\d{1,2})\n?$/.exec(folded);

@@ -57,13 +57,37 @@ export default tseslint.config(
     files: ['src/**/*.ts'],
     ignores: ['src/common/utils/date.util.ts', 'src/**/*.spec.ts'],
     rules: {
+      // ⚠️ FOUR selectors, not one. The first version of this rule banned `Date.UTC(...)`
+      // and nothing else, and the control recorded for it -- "a fresh raw Date.UTC reports
+      // exactly one error" -- proved the rule FIRES, not that the class is CLOSED. That is
+      // C67 one level up: a control that exercises only the case you already thought of.
+      // `nestjs-reviewer` planted five bypass forms and four of them passed clean.
+      //
+      // `new Date(y, m, d)` is the important one: it runs the same `MakeFullYear`
+      // (measured: `new Date(50,0,1).getFullYear() === 1950`), it is the MORE idiomatic
+      // spelling, and it carries a local-time-zone bug on top. The single-argument forms
+      // (`new Date(millis)`, `new Date(iso)`, `new Date()`) are untouched.
       'no-restricted-syntax': [
         'error',
         {
-          selector:
-            "MemberExpression[object.name='Date'][property.name='UTC']",
+          selector: "MemberExpression[object.name='Date'][property.name='UTC']",
           message:
             'Use utcMillisFromParts from src/common/utils/date.util.ts. Raw Date.UTC maps years 0-99 to 1900+year, which datetime.date does not (condition B2).',
+        },
+        {
+          selector: "MemberExpression[object.name='Date'][property.value='UTC']",
+          message:
+            "Date['UTC'] is Date.UTC spelled differently, and carries the same years 0-99 remap (B2). Use utcMillisFromParts.",
+        },
+        {
+          selector: "VariableDeclarator[init.name='Date']",
+          message:
+            'Aliasing or destructuring Date defeats the Date.UTC ban (B2). Use utcMillisFromParts from src/common/utils/date.util.ts.',
+        },
+        {
+          selector: "NewExpression[callee.name='Date'][arguments.length>=2]",
+          message:
+            'new Date(y, m, d) runs the same MakeFullYear remap as Date.UTC (years 0-99 become 1900+year) AND interprets the parts in the local time zone. Use utcMillisFromParts (B2).',
         },
       ],
     },

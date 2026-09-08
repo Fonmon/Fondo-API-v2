@@ -466,6 +466,72 @@ const PYTHON_INT_LITERAL_RE = /^[+-]?[0-9](?:_?[0-9])*$/;
  * Returns a `bigint` because CPython's `int` is unbounded and `toDjangoInt` feeds `bigint`
  * columns; `pythonInt` narrows.
  */
+/**
+ * The character class CPython's `\d` denotes **inside a `str` pattern with no `re.ASCII`** —
+ * i.e. any decimal digit, not `[0-9]`. Built from the same pinned table the fold uses, so the
+ * two can never disagree about what a digit is.
+ */
+const PYTHON_DIGIT_CLASS = ((): string => {
+  let out = '';
+  for (let i = 0; i < PYTHON_DECIMAL_DIGIT_RANGES.length; i += 2) {
+    const lo = PYTHON_DECIMAL_DIGIT_RANGES[i];
+    const hi = PYTHON_DECIMAL_DIGIT_RANGES[i + 1];
+    const esc = (cp: number): string => `\\u{${cp.toString(16)}}`;
+    out += lo === hi ? esc(lo) : `${esc(lo)}-${esc(hi)}`;
+  }
+  return out;
+})();
+
+/**
+ * `datetime.strptime(value, '%Y-%m-%d')`, mirroring the pattern `_strptime` actually generates
+ * rather than approximating it.
+ *
+ * ⚠️ **`strptime` is not one parser — it is a per-directive pattern, and the directives
+ * disagree about Unicode.** "Does `strptime` accept Unicode digits?" is not a well-formed
+ * question, which is exactly why measuring one string generalised wrongly. Dumped from the
+ * pinned CPython 3.9.25:
+ *
+ * ```
+ * _strptime.TimeRE().pattern('%Y-%m-%d')
+ * '(?P<Y>\d\d\d\d)-(?P<m>1[0-2]|0[1-9]|[1-9])-(?P<d>3[0-1]|[1-2]\d|0[1-9]|[1-9]| [1-9])'
+ * flags: IGNORECASE | UNICODE
+ * ```
+ *
+ * * **`%Y` is `\d\d\d\d` — Unicode-aware**, and `int()` folds it. `'٢٠١٨-01-01'` is
+ *   **2018-01-01**.
+ * * **`%m` is ASCII in every branch.** `'2018-٠١-01'` is a `ValueError`.
+ * * **`%d` is half.** The first character is ASCII in every branch, but `[1-2]\d`'s *second*
+ *   character is Unicode-aware: `'2018-01-1٥'` is **2018-01-15**. And there is a
+ *   **space-padded** branch `| [1-9]`, so `'2018-01- 5'` is **2018-01-05** — that one needs no
+ *   exotic script at all, just a `%e`-style formatter on the client.
+ *
+ * All nine cases measured in the pinned container. An earlier version of this port refused all
+ * of them and a register row recorded that refusal as *correct*, which is worse than the
+ * original defect: a divergence a test asserts. Found by `nestjs-reviewer`.
+ *
+ * Returns `null` where `strptime` raises, so each caller keeps its own exception text.
+ */
+const STRPTIME_ISO_RE = new RegExp(
+  `^([${PYTHON_DIGIT_CLASS}]{4})-(1[0-2]|0[1-9]|[1-9])-(3[0-1]|[1-2][${PYTHON_DIGIT_CLASS}]|0[1-9]|[1-9]| [1-9])$`,
+  'u',
+);
+
+export function parseStrptimeIsoDate(
+  value: string,
+): { year: number; month: number; day: number } | null {
+  const match = STRPTIME_ISO_RE.exec(value);
+  if (match === null) {
+    return null;
+  }
+  // `int()` over the captured groups, which folds the Unicode digits `%Y` and `[1-2]\d` allow.
+  // The space-padded day branch leaves a leading ' ', which `int()` strips.
+  return {
+    year: Number(transformDecimalToAscii(match[1])),
+    month: Number(match[2]),
+    day: Number(transformDecimalToAscii(match[3].trim())),
+  };
+}
+
 export function parsePythonIntLiteral(raw: string): bigint | null {
   const literal = transformDecimalToAscii(pythonIntStrip(raw));
   if (!PYTHON_INT_LITERAL_RE.test(literal)) {

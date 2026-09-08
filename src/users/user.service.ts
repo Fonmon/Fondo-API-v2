@@ -1,4 +1,4 @@
-import { pythonStrip } from '../common/utils/python-str';
+import { parseStrptimeIsoDate, pythonStrip } from '../common/utils/python-str';
 import { utcMillisFromParts } from '../common/utils/date.util';
 import { randomBytes } from 'node:crypto';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
@@ -1261,17 +1261,18 @@ function parseBirthdate(value: unknown): PlainDate {
       `TypeError: strptime() argument 1 must be str, not ${value === null ? 'NoneType' : typeof value}`,
     );
   }
-  // ⚠️ `\d{1,2}`, not `\d{2}` — CPython's `%m`/`%d` accept one or two digits:
-  // `strptime('2018-1-1', '%Y-%m-%d')` is `2018-01-01` (measured, pinned 3.9.25), so the
-  // stricter form was a v1 200 against a v2 500. `strptimeIsoDate` in `loan.service.ts` --
-  // the sibling port of the same builtin -- already had it right; the two disagreeing with
-  // each other is the shape B1 was.
-  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(value);
-  if (match === null) {
+  // ⚠️ `parseStrptimeIsoDate`, not a hand-rolled regex — **Major 5**. `_strptime` generates
+  // `(?P<Y>\d\d\d\d)-(?P<m>1[0-2]|0[1-9]|[1-9])-(?P<d>3[0-1]|[1-2]\d|0[1-9]|[1-9]| [1-9])`,
+  // and the directives disagree about Unicode: `%Y` is Unicode-aware and folded by `int()`,
+  // `%m` is ASCII in every branch, `%d` is ASCII in its first character but Unicode-aware in
+  // `[1-2]\d`'s second, and it carries a space-padded branch. `strptime('2018-1-1')` and
+  // `strptime('٢٠١٨-01-01')` both succeed in v1; both were 500s here. Shared with
+  // `strptimeIsoDate` in `loan.service.ts` -- two hand-rolled ports of one builtin disagreeing
+  // with each other is the shape B1 was, and it recurred here.
+  const parsed = parseStrptimeIsoDate(value);
+  if (parsed === null) {
     throw new PythonTypeError(`ValueError: time data '${value}' does not match format '%Y-%m-%d'`);
   }
-  const [, year, month, day] = match;
-  const parsed = { year: Number(year), month: Number(month), day: Number(day) };
   // ⚠️ `utcMillisFromParts`, never raw `Date.UTC` — **B2, second round**. See
   // `strptimeIsoDate`: the round-trip check below fired for every year in [0,99].
   const asDate = new Date(utcMillisFromParts(parsed.year, parsed.month - 1, parsed.day));

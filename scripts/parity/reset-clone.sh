@@ -67,6 +67,26 @@ psql -v ON_ERROR_STOP=1 -d "$DB" -c "
 pg_restore --data-only --disable-triggers --no-owner -d "$DB" "$DUMP"
 
 OID_AFTER=$(psql -tAq -d "$DB" -c "SELECT oid FROM pg_type WHERE typname = 'hstore'")
+
+# ⚠️ The two reads above only span THIS restore. A `dropdb`/`createdb` done by hand, or by a
+# different script, before this one runs is invisible to them -- and that is the likelier
+# operator error at 2am during a cutover. So the OID is also pinned to a sidecar beside the
+# dump on first use, and checked against it every run: the guard then spans the clone's whole
+# life rather than one restore.
+SIDECAR="$(dirname "$DUMP")/.hstore-oid"
+if [ -f "$SIDECAR" ]; then
+  PINNED=$(cat "$SIDECAR")
+  if [ "$PINNED" != "$OID_AFTER" ]; then
+    echo "REFUSING: hstore OID differs from the one pinned beside this dump" >&2
+    echo "  pinned $PINNED, now $OID_AFTER -- the database was dropped and re-created at" >&2
+    echo "  some point since. false-green #23." >&2
+    exit 6
+  fi
+else
+  printf '%s' "$OID_AFTER" > "$SIDECAR"
+  echo "Pinned hstore OID $OID_AFTER to $SIDECAR."
+fi
+
 if [ "$OID_BEFORE" != "$OID_AFTER" ]; then
   echo "REFUSING: hstore OID moved ($OID_BEFORE -> $OID_AFTER) -- false-green #23." >&2
   echo "Django 2.2 caches this OID per process; a long-lived gunicorn has just silently" >&2

@@ -618,10 +618,12 @@ describe('python-obj', () => {
      * 3.9.25:
      *     date_re.match('٢٠١٨-٠١-٠١').groupdict() -> {'year': '٢٠١٨', ...} -> date(2018, 1, 1)
      *
-     * ⚠️ **And it stops here.** `strptime` REFUSES the same string on the same interpreter, so
-     * `parseBirthdate` and `strptimeIsoDate` must keep their ASCII-only `\d`.
-     * `nestjs-reviewer` reported all three parsers as one finding; the measurement splits them,
-     * and folding in the other two would have created a divergence rather than closed one.
+     * ⚠️ **It does NOT stop here, and an earlier version of this docblock said it did.**
+     * `_strptime` generates a per-directive pattern and the directives disagree: `%Y` is
+     * `\d\d\d\d` and Unicode-aware, `%m` is ASCII in every branch, `%d` is ASCII in its
+     * first character only. `strptime('٢٠١٨-٠١-٠١')` fails **because of the month** -- one
+     * measurement of one string, generalised into a rule that was wrong for seven other
+     * inputs. See {@link parseStrptimeIsoDate} and `loan.service.spec.ts`'s Major 5 matrix.
      */
     it('D42: folds Unicode decimal digits, because Django date_re + int() does', () => {
       expect(toDjangoDate('٢٠١٨-٠١-٠١', 'end_date')).toEqual({ year: 2018, month: 1, day: 1 });

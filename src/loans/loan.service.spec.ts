@@ -168,16 +168,42 @@ describe('LoanService (unit)', () => {
     });
 
     /**
-     * ⚠️ The Unicode-digit fold belongs to `toDjangoDate` and NOT here, and the difference was
-     * measured rather than assumed. `nestjs-reviewer` reported all three date parsers as one
-     * finding; the pinned interpreter splits them:
-     *     date_re.match('٢٠١٨-٠١-٠١')                -> matches, int() folds -> date(2018,1,1)
-     *     strptime('٢٠١٨-٠١-٠١', '%Y-%m-%d')          -> ValueError
-     * Django's `date_re` is Unicode-aware; `_strptime`'s generated pattern is not. So refusing
-     * here is correct parity, and folding here would have been a new divergence.
+     * ## Major 5 — `strptime` is a PER-DIRECTIVE pattern, and the directives disagree
+     *
+     * An earlier version of these cells asserted "strptime refuses Unicode digits" and a
+     * register row recorded that as settled. **It was wrong, and asserting it was worse than
+     * the original defect** — a divergence a test defends. `nestjs-reviewer` dumped the
+     * generated pattern:
+     *
+     *     _strptime.TimeRE().pattern('%Y-%m-%d')
+     *     '(?P<Y>\d\d\d\d)-(?P<m>1[0-2]|0[1-9]|[1-9])-(?P<d>3[0-1]|[1-2]\d|0[1-9]|[1-9]| [1-9])'
+     *
+     * `%Y` is `\d\d\d\d` — Unicode-aware, folded by `int()`. `%m` is ASCII in every branch.
+     * `%d` is ASCII in its FIRST character but Unicode-aware in `[1-2]\d`'s second, and it has
+     * a space-padded branch. So the fully-Arabic string is refused **by the month**, not by
+     * some general ASCII rule — and seven other inputs v1 accepts were being refused here.
+     *
+     * Every row below measured in the pinned container (CPython 3.9.25).
      */
-    it('B2/D42: refuses Arabic-Indic digits, because strptime does', () => {
-      expect(() => strptimeIsoDate('٢٠١٨-٠١-٠١')).toThrow(/ValueError/);
+    it.each([
+      ['٢٠١٨-01-01', { year: 2018, month: 1, day: 1 }, '%Y is Unicode-aware'],
+      ['۲۰۱۸-01-01', { year: 2018, month: 1, day: 1 }, 'a different Unicode digit script'],
+      ['٢٠١٨-1-1', { year: 2018, month: 1, day: 1 }, 'Unicode year, one-digit ASCII month/day'],
+      ['2018-01-1٥', { year: 2018, month: 1, day: 15 }, "[1-2]\\d's SECOND char is Unicode"],
+      ['2018-01-2٩', { year: 2018, month: 1, day: 29 }, 'same branch, other leading digit'],
+      ['2018-01- 5', { year: 2018, month: 1, day: 5 }, "%d's space-padded branch ' [1-9]'"],
+      ['2018-1- 5', { year: 2018, month: 1, day: 5 }, 'space-padded day, one-digit month'],
+    ])('Major 5: accepts %j -> %o  // %s', (raw, expected) => {
+      expect(strptimeIsoDate(raw)).toEqual(expected);
+    });
+
+    it.each([
+      ['2018-٠١-01', '%m is ASCII in every branch'],
+      ['2018-1٥-01', 'same — a two-digit Unicode month'],
+      ['2018-01-٠١', "%d's FIRST character is ASCII in every branch"],
+      ['٢٠١٨-١-١', 'month refuses, which is why the fully-Arabic string fails'],
+    ])('Major 5: refuses %j  // %s', (raw) => {
+      expect(() => strptimeIsoDate(raw)).toThrow(/ValueError/);
     });
 
     it('accepts an unpadded month and day, as %m/%d do', () => {

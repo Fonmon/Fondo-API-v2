@@ -1,4 +1,4 @@
-import { pythonStr } from '../common/utils/python-str';
+import { parseStrptimeIsoDate, pythonStr } from '../common/utils/python-str';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { assertOwnership } from '../auth/policies/ownership';
 import type { AuthenticatedUser } from '../auth/types/authenticated-user';
@@ -1251,13 +1251,16 @@ export function strptimeIsoDate(value: unknown): PlainDate {
       `TypeError: strptime() argument 1 must be str, not ${value === null ? 'NoneType' : typeof value}`,
     );
   }
-  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(value);
-  if (match === null) {
+  // ⚠️ `parseStrptimeIsoDate`, not a hand-rolled `\d{1,2}` regex — **Major 5**. `_strptime`
+  // generates `(?P<Y>\d\d\d\d)-(?P<m>1[0-2]|0[1-9]|[1-9])-(?P<d>3[0-1]|[1-2]\d|0[1-9]|[1-9]| [1-9])`
+  // and the directives DISAGREE about Unicode: `%Y` is Unicode-aware and folded, `%m` is ASCII
+  // in every branch, `%d` is ASCII in its first character but Unicode-aware in `[1-2]\d`'s
+  // second — and it has a space-padded branch. Seven inputs v1 accepts were refused here.
+  const parts = parseStrptimeIsoDate(value);
+  if (parts === null) {
     throw new PythonTypeError(`ValueError: time data '${value}' does not match format '%Y-%m-%d'`);
   }
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
+  const { year, month, day } = parts;
   // ⚠️ `utcMillisFromParts`, never raw `Date.UTC` — **B2, second round**. The round-trip
   // comparison below is what made this reachable: `Date.UTC` remaps a year in [0,99] to
   // 1900+year, so `probe.getUTCFullYear() !== year` fired for every such year and this threw.
