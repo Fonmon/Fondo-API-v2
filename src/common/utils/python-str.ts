@@ -509,6 +509,13 @@ const PYTHON_DIGIT_CLASS = ((): string => {
  * of them and a register row recorded that refusal as *correct*, which is worse than the
  * original defect: a divergence a test asserts. Found by `nestjs-reviewer`.
  *
+ * ⚠️ **The `$` anchor is not literally what `_strptime` does, and the equivalence is
+ * format-specific.** CPython uses `re.match` plus a `found.end() != len(data_string)` check,
+ * which does **not** backtrack for a longer overall match; JS `$` does. Worked through for
+ * `%Y-%m-%d` and unobservable — the literal `-`s pin the month, and every `%d` branch is one
+ * or two characters — but do not carry this shape to another format without redoing that
+ * argument.
+ *
  * Returns `null` where `strptime` raises, so each caller keeps its own exception text.
  */
 const STRPTIME_ISO_RE = new RegExp(
@@ -525,11 +532,21 @@ export function parseStrptimeIsoDate(
   }
   // `int()` over the captured groups, which folds the Unicode digits `%Y` and `[1-2]\d` allow.
   // The space-padded day branch leaves a leading ' ', which `int()` strips.
-  return {
-    year: Number(transformDecimalToAscii(match[1])),
-    month: Number(match[2]),
-    day: Number(transformDecimalToAscii(match[3].trim())),
-  };
+  const year = Number(transformDecimalToAscii(match[1]));
+  // The space-padded day branch leaves a leading ASCII space, which `int()` strips. `slice`
+  // rather than `trim()`: this module documents at length that JS `trim()` is not Python's
+  // whitespace set, and reaching for it here -- even where the regex makes it safe -- is how
+  // that distinction erodes.
+  const dayText = match[3].startsWith(' ') ? match[3].slice(1) : match[3];
+  const day = Number(transformDecimalToAscii(dayText));
+  // ⚠️ Defensive, and Minor 8's point: if the class and the fold ever disagree about what a
+  // digit is, the regex admits a character the fold leaves alone and `Number()` yields NaN.
+  // The callers' round-trip check happens to turn that into a 500 (NaN !== NaN), but relying
+  // on it would make this helper's contract weaker than its docblock claims.
+  if (!Number.isFinite(year) || !Number.isFinite(day)) {
+    return null;
+  }
+  return { year, month: Number(match[2]), day };
 }
 
 export function parsePythonIntLiteral(raw: string): bigint | null {

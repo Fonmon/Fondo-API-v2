@@ -89,6 +89,30 @@ export default tseslint.config(
           message:
             'new Date(y, m, d) runs the same MakeFullYear remap as Date.UTC (years 0-99 become 1900+year) AND interprets the parts in the local time zone. Use utcMillisFromParts (B2).',
         },
+        {
+          // ⚠️ Minor 9 — the FIFTH member of the class, and not a spelling of Date.UTC at all:
+          // a separate API with the identical remap. Measured:
+          //   new Date(0).setYear(50) -> getFullYear() === 1950
+          // The commit that added this rule is titled "close the class, not the instance", and
+          // it was still one member short. `getYear` is banned alongside it: it returns
+          // `year - 1900`, the same legacy convention read backwards.
+          selector: "MemberExpression[property.name=/^(setYear|getYear)$/]",
+          message:
+            'Date.prototype.setYear/getYear use the same legacy 1900 base as the Date.UTC remap (new Date(0).setYear(50) is 1950). Use setUTCFullYear / getUTCFullYear, or utcMillisFromParts (B2).',
+        },
+        {
+          // `globalThis.Date.UTC(...)`: the outer MemberExpression's `object` is itself a
+          // MemberExpression, so `object.name` is undefined and the first selector misses it.
+          selector: "MemberExpression[property.name='Date']",
+          message:
+            'Reach Date directly rather than through a namespace object — it routes around the Date.UTC ban (B2).',
+        },
+        {
+          // `let D; D = Date;` is an AssignmentExpression, not a VariableDeclarator.
+          selector: "AssignmentExpression[right.name='Date']",
+          message:
+            'Aliasing Date by assignment defeats the Date.UTC ban (B2). Use utcMillisFromParts.',
+        },
       ],
     },
   },

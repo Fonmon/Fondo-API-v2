@@ -620,8 +620,14 @@ describe('python-obj', () => {
      *
      * ⚠️ **It does NOT stop here, and an earlier version of this docblock said it did.**
      * `_strptime` generates a per-directive pattern and the directives disagree: `%Y` is
-     * `\d\d\d\d` and Unicode-aware, `%m` is ASCII in every branch, `%d` is ASCII in its
-     * first character only. `strptime('٢٠١٨-٠١-٠١')` fails **because of the month** -- one
+     * `\d\d\d\d` and Unicode-aware, `%m` is ASCII in every branch, and `%d` is
+     * **per branch**: `0[1-9]` and `3[0-1]` are ASCII in BOTH characters, only `[1-2]\d`'s
+     * second character is Unicode-aware, and there is a space-padded ` [1-9]` branch.
+     * ⚠️ This sentence used to read *"ASCII in its first character only"* — which is exactly
+     * the over-reading a counter-mutant proved passes all 2319 tests while turning
+     * `'2018-01-0٥'` into a 200-with-a-row where v1 raises. Prose arguing for a rule the code
+     * contradicts, with no cell able to arbitrate; `loan.service.spec.ts` now has the two
+     * refusing rows that arbitrate it. `strptime('٢٠١٨-٠١-٠١')` fails **because of the month** -- one
      * measurement of one string, generalised into a rule that was wrong for seven other
      * inputs. See {@link parseStrptimeIsoDate} and `loan.service.spec.ts`'s Major 5 matrix.
      */

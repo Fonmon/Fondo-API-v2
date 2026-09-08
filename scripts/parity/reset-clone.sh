@@ -71,8 +71,11 @@ OID_AFTER=$(psql -tAq -d "$DB" -c "SELECT oid FROM pg_type WHERE typname = 'hsto
 # ⚠️ The two reads above only span THIS restore. A `dropdb`/`createdb` done by hand, or by a
 # different script, before this one runs is invisible to them -- and that is the likelier
 # operator error at 2am during a cutover. So the OID is also pinned to a sidecar beside the
-# dump on first use, and checked against it every run: the guard then spans the clone's whole
-# life rather than one restore.
+# dump on first use, and checked against it every run: the guard then spans the clone's life
+# for as long as the dump directory does. ⚠️ It is NOT unconditional -- if that directory is
+# recreated alongside a fresh dump, the sidecar is gone and this silently re-pins rather than
+# failing. Stated rather than glossed, because "spans the clone's whole life" was the earlier
+# wording and it claimed more than the mechanism delivers.
 SIDECAR="$(dirname "$DUMP")/.hstore-oid"
 if [ -f "$SIDECAR" ]; then
   PINNED=$(cat "$SIDECAR")

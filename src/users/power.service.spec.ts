@@ -121,6 +121,60 @@ describe('PowerService (unit)', () => {
         }),
       ).rejects.toThrow(/invalid date format/);
     });
+
+    /**
+     * ## Major 6 — this was a THIRD hand-rolled port of Django's date coercion
+     *
+     * v1: `Power.objects.create(meeting_date = request['meeting_date'])` — the raw body string
+     * into a `DateField`, so `to_python` → `parse_date` → `datetime.date`.
+     *
+     * ⚠️ **The cell above could not see any of this.** `'01/01/2020'` is rejected by both
+     * stacks, so it discriminates against nothing that was actually wrong. B1, B2 and Major 5
+     * all walked past this function because it was never spelled `strptime` and never spelled
+     * `Date.UTC` — Major 5's own write-up claimed *"the two hand-rolled ports of one builtin
+     * are gone"* when there were three. Found by `nestjs-reviewer`.
+     *
+     * Every row measured against the pinned CPython 3.9.25 / Django 2.2.27.
+     */
+    it.each([
+      ['2020-1-1', 2020, 1, 1, 'date_re is \\d{1,2}; the old regex demanded \\d{2}'],
+      ['٢٠٢٠-٠١-٠١', 2020, 1, 1, 'date_re is Unicode-aware and int() folds — D42 axis 4'],
+      ['2020-01-01\n', 2020, 1, 1, "Python's $ also matches before one trailing newline"],
+    ])('Major 6: accepts %j  // %s', async (raw, year, month, day) => {
+      await service.handlePowerRequest(actor(1), {
+        type: 'post',
+        meeting_date: raw,
+        requestee: 2,
+      });
+      const call = prisma.power.create.mock.calls[0] as [{ data: { meeting_date: Date } }];
+      const written = call[0].data.meeting_date;
+      expect(written.toISOString().slice(0, 10)).toBe(
+        `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+      );
+    });
+
+    /**
+     * ⚠️ **The three that mattered most: v2 wrote a row v1 refuses, AND sent the notification
+     * that follows it.** The old body had no calendar check at all — `split('-').map(Number)`
+     * straight into a `Date`, so February 30th rolled into March 1st and month 13 into January
+     * of the next year. Measured: v1 raises `ValueError: day 30 must be in range 1..29 for
+     * month 2 in year 2020` / `month must be in 1..12, not 13` / `year must be in 1..9999`.
+     */
+    it.each([
+      ['2020-02-30', 'rolled to 2020-03-01'],
+      ['2020-13-01', 'rolled to 2021-01-01'],
+      ['0000-01-01', 'wrote year 0 — B2, unguarded on this path'],
+    ])('Major 6: refuses %j and writes NOTHING  // was: %s', async (raw) => {
+      await expect(
+        service.handlePowerRequest(actor(1), {
+          type: 'post',
+          meeting_date: raw,
+          requestee: 2,
+        }),
+      ).rejects.toThrow();
+      // The row AND the notification — v1 reaches neither.
+      expect(prisma.power.create).not.toHaveBeenCalled();
+    });
   });
 
   describe('get', () => {

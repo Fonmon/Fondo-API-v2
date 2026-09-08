@@ -202,6 +202,24 @@ describe('LoanService (unit)', () => {
       ['2018-1٥-01', 'same — a two-digit Unicode month'],
       ['2018-01-٠١', "%d's FIRST character is ASCII in every branch"],
       ['٢٠١٨-١-١', 'month refuses, which is why the fully-Arabic string fails'],
+      // ⚠️ Major 7 — the BOUNDARY of the axis, not just the axis. `%d`'s Unicode-awareness
+      // belongs to `[1-2]\d` ALONE; `0[1-9]` and `3[0-1]` are ASCII in BOTH characters. A
+      // counter-mutant widening the day to `[0-2]<digit>` -- the natural over-reading, and the
+      // one a spec docblock here used to argue for -- passed all 2319 tests before these two
+      // rows existed, while making `'2018-01-0٥'` a 200-with-a-row where v1 raises.
+      ['2018-01-0٥', "0[1-9]'s second char is ASCII too — the fold is [1-2]\\d's alone"],
+      ['2018-01-3١', 'same for 3[0-1]'],
+      // ⚠️ Minor 8 — and read this before trusting it as a control. This row pins the
+      // BEHAVIOUR (a post-UCD-13.0 digit is refused) and does NOT pin the digit class.
+      // Measured: swapping PYTHON_DIGIT_CLASS for `\p{Nd}` leaves it green, and so does
+      // removing the `Number.isFinite` guard as well. Two independent mechanisms close it --
+      // the fold leaves an unknown code point alone so `Number()` yields NaN and the guard
+      // returns null, and the caller's `getUTCFullYear() !== year` round-trip refuses NaN
+      // anyway. So on the `strptime` path the class choice is not behaviourally observable.
+      // The cell that genuinely discriminates on the class lives on the `toDjangoDate` path
+      // in `python-obj.spec.ts`, where the drift IS observable. Kept here as a regression pin,
+      // labelled for what it is: the alternative is a row that looks like a control and is not.
+      ['\u{1E4F0}018-01-01', 'U+1E4F0 NAG MUNDARI ZERO — Nd to Node, unknown to CPython 3.9.25'],
     ])('Major 5: refuses %j  // %s', (raw) => {
       expect(() => strptimeIsoDate(raw)).toThrow(/ValueError/);
     });

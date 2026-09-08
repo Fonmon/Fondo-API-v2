@@ -78,8 +78,13 @@ export function toPlainDate(value: DateLike): PlainDate {
  * `setUTCFullYear` is the documented escape: it sets the year without the remap and leaves
  * month, day and time untouched, so the correction is exact rather than an offset guess.
  *
- * ⚠️ **Every `Date.UTC` in `src/` outside this file is banned by an ESLint
- * `no-restricted-syntax` rule**, added after the first B2 round fixed four sites and left
+ * ⚠️ **Every way of reaching the legacy 1900 base from `src/` outside this file is banned by
+ * ESLint `no-restricted-syntax`** — not just `Date.UTC`. Minor 10: an earlier version of this
+ * sentence named one spelling, which is the same framing error the rule itself was written to
+ * fix. The banned set is `Date.UTC`, `Date['UTC']`, `new Date(y, m, d)` (same remap, plus a
+ * local-time-zone bug, and the *more* idiomatic spelling), `setYear`/`getYear` (a separate API
+ * with the identical 1900 base), and every aliasing form — destructuring, `const D = Date`,
+ * `D = Date`, and `globalThis.Date`. Controlled against all of them, added after the first B2 round fixed four sites and left
  * four more: two reachable (`parseBirthdate`, `strptimeIsoDate` — both v1 200 / v2 500 for a
  * two-digit year) and two latent (`relativedelta.util.ts`). Prose saying "every call must go
  * through here" is exactly the claim that went stale; the lint rule is the same claim in a

@@ -16,7 +16,13 @@ import { MailService } from '../mail/mail.service';
 import { NotificationService } from '../notifications/notification.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { serializePower, type PowerDto } from './dto/user.serializers';
-import { asPythonDict, pyGet, toDjangoSmallInt, PythonTypeError } from '../common/utils/python-obj';
+import {
+  asPythonDict,
+  pyGet,
+  toDjangoDate,
+  toDjangoSmallInt,
+  PythonTypeError,
+} from '../common/utils/python-obj';
 import { UserService } from './user.service';
 
 /** `Power.POWER_STATE`. */
@@ -383,12 +389,35 @@ function pythonPageNumber(value: unknown): number {
 }
 
 /** Django's `DateField.to_python` for the `YYYY-MM-DD` strings this API receives. */
+/**
+ * ⚠️ **Was a THIRD hand-rolled port of Django's date coercion, and the only date site in
+ * `src/` that did not route through {@link toDjangoDate}** — condition **Major 6**.
+ *
+ * v1 does `Power.objects.create(meeting_date = request['meeting_date'])`
+ * (`services/user.py:165-169`): the raw body string straight into a `DateField`, so
+ * `get_prep_value` → `to_python` → `parse_date` (`date_re` is `(\d{4})-(\d{1,2})-(\d{1,2})$`,
+ * Unicode-aware, and Python's `$` also matches before one trailing newline) → `datetime.date`.
+ *
+ * The old body was `/^\d{4}-\d{2}-\d{2}$/` plus `split('-').map(Number)` and no calendar
+ * check. **Six measured divergences, and the last three are the serious ones** — they write a
+ * row v1 would never create **and send the notification that follows it**:
+ *
+ * | `meeting_date` | v1 | v2 before |
+ * |---|---|---|
+ * | `'2020-1-1'` | writes 2020-01-01 | 500 (`\d{2}` vs `\d{1,2}`) |
+ * | `'٢٠٢٠-٠١-٠١'` | writes 2020-01-01 | 500 (D42's fourth axis) |
+ * | `'2020-01-01\n'` | writes 2020-01-01 | 500 (Python `$`) |
+ * | `'2020-02-30'` | **500, no row** | **writes 2020-03-01** + notification |
+ * | `'2020-13-01'` | **500, no row** | **writes 2021-01-01** + notification |
+ * | `'0000-01-01'` | **500, no row** | **writes year 0** (B2) |
+ *
+ * It was missed by B1, B2 and Major 5 because **it was never spelled `strptime`** and never
+ * spelled `Date.UTC` — Major 5's own write-up said *"the two hand-rolled ports of one builtin
+ * are gone"* when there were three. Found by `nestjs-reviewer`.
+ *
+ * `toDjangoDate` already carries all of it: `\d{1,2}`, the Unicode fold, `\n?$`, the calendar
+ * check and the `1..9999` range.
+ */
 function parseDateField(value: unknown, field: string): Date {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    throw new PythonTypeError(
-      `ValidationError: '${String(value)}' value has an invalid date format (${field})`,
-    );
-  }
-  const [year, month, day] = value.split('-').map(Number);
-  return plainDateToUtcDate({ year, month, day });
+  return plainDateToUtcDate(toDjangoDate(value, field));
 }
