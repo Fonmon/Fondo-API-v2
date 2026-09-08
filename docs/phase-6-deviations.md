@@ -283,8 +283,33 @@ refused `PUT` on their *own* CAP (403).
 
 ### P6-F5 — a `value` above 2^53 is a **500** in v2 and a correct JSON number in v1
 
-Pre-declared, **not** a Phase 6 finding: plan §4 rule **5b**, condition **C2**,
-`docs/phase-0-deviations.md` §2.10, which says explicitly *"do not re-litigate per DTO"*.
+⚠️ **CORRECTED 2026-09-08 — this row said one thing and there are three, and it mis-cited its
+own authority.** `nestjs-reviewer` split it. Rule **5b** / condition **C2** /
+`docs/phase-0-deviations.md` §2.10 govern the **render** direction only — `json-bigint.ts`'s
+replacer. **v2 ingests request bodies through plain `JSON.parse`** (`bootstrap.ts` disables
+Nest's parser and nothing bigint-aware sits on the way in), so the *parse* direction is covered
+by none of them, and "pre-declared, do not re-litigate" was wrong for two of the three rows:
+
+| input `value` | v1 | v2 | covered by 5b/C2? |
+|---|---|---|---|
+| 2^53 − 1 | 201, row + GET fine | identical | — |
+| **2^53 + 1** | stores `…993` | **stores `…992`, 201, silently corrupted** | **no — parse side** |
+| **2^63 − 1** | 201, row written | **500, refuses a write v1 performs** | **no — parse side** |
+| stored > 2^53 | renders a number | 500 on render | **yes** |
+
+⚠️ **And the render refusal reaches a route that already passed its gate:** it 500s the ported
+Phase 3 `GET /api/user/<id>` through `total_savingaccounts`, so one bad CAP takes down a Phase 3
+response, written through a different route entirely.
+
+⚠️ **The parse-side divergence was observed once before and registered neither time** —
+`docs/parity-phase-5-delta.md` row **L2**, Phase 5, with the same observation that the docblock
+frames it as a rendering difference. It is now **§5's D41**, owned jointly by Phases 3–6. That
+is the actual finding here: a divergence seen in two phases, written in two documents, and
+absent from the register that governs.
+
+**The render half only** is pre-declared and not a Phase 6 finding: plan §4 rule **5b**,
+condition **C2**, `docs/phase-0-deviations.md` §2.10, which says explicitly *"do not re-litigate
+per DTO"*.
 `bigIntToJsonNumber` throws `BigIntPrecisionError` rather than losing a peso; Python's
 unbounded `int` has no such bound.
 

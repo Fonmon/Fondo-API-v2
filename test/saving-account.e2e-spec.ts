@@ -1301,4 +1301,88 @@ describe('Phase 6 — /api/saving-account (no v1 suite exists; see the file head
       ).toBe(0);
     });
   });
+
+  /**
+   * ## B1 / B2 / B3 at the route — the three defects `manual-tester` and `nestjs-reviewer`
+   * found in Phase 0 helpers, proved closed through a real request
+   *
+   * None of these is a Phase 6 defect. They live in `pythonInt` / `toDjangoInt` /
+   * `toDjangoDate` / `plainDateToUtcDate` / `bogotaWallClockToInstant`, which Phases 3-6 all
+   * consume — but they reproduce on THIS phase's routes, which is why they blocked its gate.
+   * The mutation controls are in the unit specs; these cells prove the fix survives the
+   * controller, the DRF-shaped parser and Prisma.
+   */
+  describe('B1/B2/B3 - Phase 0 helper defects, at the route', () => {
+    it('B1: a full-width digit in ?page is v1 200, not a 500', async () => {
+      // U+FF11. CPython: int('１') === 1. v2 answered 500 before B1 because JS \d is ASCII.
+      await request(server()).get('/api/saving-account?page=１').set(asAdmin()).expect(200);
+    });
+
+    it('B1: an Arabic-Indic digit in ?page is v1 200, not a 500', async () => {
+      await request(server()).get('/api/saving-account?page=١').set(asAdmin()).expect(200);
+    });
+
+    it('B1: a PEP 515 underscore in ?state reaches the range guard, not a 500', async () => {
+      // int('1_0') === 10, so v1 answers the STATE guard's 400 -- not a parse 500.
+      const response = await request(server())
+        .get('/api/saving-account?state=1_0')
+        .set(asAdmin())
+        .expect(400);
+      expect(response.body).toEqual({ message: 'State must be between 0 and 1' });
+    });
+
+    it('B1: a full-width SIGN is still a 500, because CPython does not fold it', async () => {
+      // U+FF0B is Sm, not Nd. `_PyUnicode_TransformDecimalAndSpaceToASCII` leaves it alone and
+      // the literal fails. The over-folding fix (NFKC) would wrongly answer 200 here.
+      await request(server()).get('/api/saving-account?page=＋1').set(asAdmin()).expect(500);
+    });
+
+    it('B2: a two-digit end_date year is stored as itself, not as 1900 + year', async () => {
+      const response = await request(server())
+        .post('/api/saving-account')
+        .set(asAdmin())
+        .send({ end_date: '0050-06-15' })
+        .expect(200);
+      const row = await prisma.savingAccount.findUniqueOrThrow({
+        where: { id: (response.body as { id: number }).id },
+      });
+      // Before B2 this read 1950-06-15, on a request that answered 200 on both stacks with
+      // nothing logged anywhere. The row was the only witness.
+      expect(row.end_date.toISOString()).toBe('0050-06-15T00:00:00.000Z');
+    });
+
+    it('B2: end_date year 0000 is a 500 with NO row written, as datetime.date refuses it', async () => {
+      const before = await prisma.savingAccount.count();
+      await request(server())
+        .post('/api/saving-account')
+        .set(asAdmin())
+        .send({ end_date: '0000-01-01' })
+        .expect(500);
+      // The status is the point: v2 previously answered 200 and CREATED A ROW dated
+      // 1900-01-01 -- a row v1 would never have created.
+      expect(await prisma.savingAccount.count()).toBe(before);
+    });
+
+    it('B3: end_date 0100-01-01 succeeds and writes both the CAP and its close task', async () => {
+      // The reachable path through `zonedTimeToUtcMillis`: the Bogota-local year falls back to
+      // 99, the remap turned that into 1999, and the offset correction became -1900 years,
+      // producing year -1800 -- rejected by the driver with 22009 AFTER the CAP row had already
+      // been committed, leaving a CAP that would never auto-close.
+      const response = await request(server())
+        .post('/api/saving-account')
+        .set(asAdmin())
+        .send({ end_date: '0100-01-01' })
+        .expect(200);
+      const row = await prisma.savingAccount.findUniqueOrThrow({
+        where: { id: (response.body as { id: number }).id },
+      });
+      expect(row.end_date.toISOString()).toBe('0100-01-01T00:00:00.000Z');
+      const tasks = await prisma.$queryRaw<Array<{ count: bigint }>>`
+        SELECT count(*) AS count FROM fondo_api_schedulertask
+        WHERE payload->'saving_account_id' = ${String((response.body as { id: number }).id)}
+      `;
+      // The partial write is what B3 actually cost: no close task, silently.
+      expect(Number(tasks[0].count)).toBe(1);
+    });
+  });
 });

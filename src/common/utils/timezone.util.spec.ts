@@ -139,4 +139,82 @@ describe('auto_now (Django DateTimeField vs DateField)', () => {
     expect(insideTheWindow.getUTCDate()).toBe(31);
     expect(todayForAutoNowDateField(insideTheWindow).day).toBe(30);
   });
+
+  /**
+   * ## B2 / B3 — `Date.UTC` remaps years 0-99, and one site was reachable through the offset pass
+   *
+   * ⚠️ **Enumerate the candidate wrong implementations first, then control against each
+   * separately** (the standing rule C76 taught, sharpened by `nestjs-reviewer` after C76's own
+   * failure turned out to be an incomplete enumeration rather than an absent mutation). There
+   * are **three** distinct wrong implementations here, not one:
+   *
+   * | mutant | what it is | caught only by |
+   * |---|---|---|
+   * | **M-a** `plainDateToUtcDate` back to raw `Date.UTC` | the stored value bug | year-50 / year-1 cells |
+   * | **M-b** `bogotaWallClockToInstant`'s `asUtc` back to raw `Date.UTC` | the task `run_date` bug | year-50 wall-clock cell |
+   * | **M-c** `zonedTimeToUtcMillis` back to raw `Date.UTC` | **B3** | the `0100-01-01` cell **only** |
+   *
+   * **M-c is the reason this block exists in this shape.** A fix to M-a and M-b alone passes
+   * every year-50 cell and still produces year **-1800** for `0100-01-01`, so a round that
+   * tested only the obvious years would have reported green on a live 500. Each cell below
+   * names the mutant it was measured against; do not delete one because another looks similar.
+   */
+  describe('B2/B3 - years 0-99 and the offset-correction pass', () => {
+    it('M-a: a two-digit year survives plainDateToUtcDate instead of gaining 1900', () => {
+      // Raw `Date.UTC(50, 5, 15)` is 1950-06-15. v1 stores 0050-06-15 and answers 200, so the
+      // divergence was silent on both sides -- the tester found it only by reading the row.
+      expect(plainDateToUtcDate({ year: 50, month: 6, day: 15 }).toISOString()).toBe(
+        '0050-06-15T00:00:00.000Z',
+      );
+      expect(plainDateToUtcDate({ year: 1, month: 1, day: 1 }).toISOString()).toBe(
+        '0001-01-01T00:00:00.000Z',
+      );
+      expect(plainDateToUtcDate({ year: 99, month: 12, day: 31 }).toISOString()).toBe(
+        '0099-12-31T00:00:00.000Z',
+      );
+    });
+
+    it('M-a: years at and either side of the remap window are untouched', () => {
+      // The boundary matters in both directions: 100 and 1900 must not be "corrected" either.
+      expect(plainDateToUtcDate({ year: 100, month: 1, day: 1 }).toISOString()).toBe(
+        '0100-01-01T00:00:00.000Z',
+      );
+      expect(plainDateToUtcDate({ year: 1900, month: 1, day: 1 }).toISOString()).toBe(
+        '1900-01-01T00:00:00.000Z',
+      );
+      expect(plainDateToUtcDate({ year: 2026, month: 9, day: 8 }).toISOString()).toBe(
+        '2026-09-08T00:00:00.000Z',
+      );
+    });
+
+    it('M-b: a two-digit year survives the wall-clock conversion', () => {
+      // Bogota ran on LMT (-04:56:16) until 1914, so the expected instant is not a round -05:00
+      // offset. Taken from the conversion itself rather than assumed, then checked for the one
+      // property that matters: the YEAR is 50, not 1950.
+      const instant = bogotaWallClockToInstant({ year: 50, month: 6, day: 15 });
+      expect(instant.getUTCFullYear()).toBe(50);
+      expect(partsInZone(instant, BOGOTA_TIME_ZONE).year).toBe(50);
+    });
+
+    it('M-c (B3): 0100-01-01 does not fall through the offset pass into year -1800', () => {
+      // ⚠️ THE DISCRIMINATING CELL. The input year (100) is OUTSIDE the remap window, so M-a
+      // and M-b are both clean here. What fires is `zonedTimeToUtcMillis`: the Bogota-local
+      // year falls back to 99, the remap turns that into 1999, and the offset correction
+      // becomes -1900 years -- yielding -001800-01-02T04:56:16Z, which PostgreSQL rejects with
+      // 22009 and which the tester misread as "year 100 out of range". It is not; PostgreSQL
+      // stores year 100 fine. Restore raw `Date.UTC` in `zonedTimeToUtcMillis` and only this
+      // cell fails.
+      const instant = bogotaWallClockToInstant({ year: 100, month: 1, day: 1 });
+      expect(instant.getUTCFullYear()).toBe(100);
+      expect(instant.toISOString().startsWith('-')).toBe(false);
+      expect(partsInZone(instant, BOGOTA_TIME_ZONE)).toMatchObject({ year: 100, month: 1, day: 1 });
+    });
+
+    it('M-c: the same fall-back shape one year later, as a control on the cell above', () => {
+      // 0101-01-01's Bogota-local year is 100, which is NOT in the remap window -- so this one
+      // passes even with the bug. It is here to prove the cell above is pinned on the remap and
+      // not on "old years are broken generally".
+      expect(bogotaWallClockToInstant({ year: 101, month: 1, day: 1 }).getUTCFullYear()).toBe(101);
+    });
+  });
 });

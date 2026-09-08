@@ -635,10 +635,15 @@ describe('SchedulerRunner', () => {
    * runner: the `catch` releases the claim and **rethrows before `createRepeatInstance`**. So
    * a throwing executer leaves its row unprocessed *and* writes no successor.
    *
-   * This is the only cell that catches someone later "fixing" the runner to clone before it
-   * runs — a change that would look like a harmless reordering, would keep every other cell
-   * in the file green, and would silently turn D12's retry path into a duplicate-row
-   * generator.
+   * ⚠️ **This cell does NOT catch someone later "fixing" the runner to clone before it runs,
+   * and an earlier version of this docblock claimed it did.** On a `repeat = 0` task the claim
+   * is vacuous: `createRepeatInstance` returns early on `SchedulerRepeat.NONE`, so "writes no
+   * successor" is true under *either* ordering. Measured — a runner mutated to clone before
+   * running **passes the entire 98-cell e2e suite** and fails only two unit cells, neither of
+   * them this one. The cell that catches it is
+   * *"would end a chain if the close task ever carried a non-zero repeat"* below; the false
+   * claim is recorded in `MIGRATION_PLAN.md`'s **C77** row and it was my wording, relayed from
+   * the review into the developer's brief and into this file.
    *
    * It is written against a **`type = 1`** task on purpose: that is D12's shape, and the
    * `repeat: 0` on it is the second half of the reason a throw is cheap here.
@@ -676,6 +681,14 @@ describe('SchedulerRunner', () => {
      * The same task with a **non-zero** `repeat` would be the failure C77 is about: it throws
      * on every pass and therefore never clones its successor, ending the chain. Asserted here
      * so the consequence is visible next to the rule rather than only in prose.
+     *
+     * ⚠️ **DO NOT DELETE — this is the only cell in the repository that catches a runner
+     * "fixed" to clone before it runs.** Measured against exactly that mutant (`dist`-level, by
+     * `manual-tester`, and again at the unit level): with the clone moved ahead of the executer,
+     * the `repeat = 0` sibling above still passes and `createRepeatInstance` **is** called here,
+     * so this assertion fails and nothing else does. It looks redundant beside the `repeat = 0`
+     * cell precisely because the `repeat = 0` cell cannot fail — that is the trap, not a reason
+     * to tidy. `test/saving-account.e2e-spec.ts` points here for the same reason.
      */
     it('would end a chain if the close task ever carried a non-zero repeat', async () => {
       tasks.findDueUnprocessed.mockResolvedValue([{ ...closeTask(), repeat: 4 }]);

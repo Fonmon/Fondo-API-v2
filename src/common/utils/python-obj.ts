@@ -1,5 +1,5 @@
 import { daysInMonth, type PlainDate } from './date.util';
-import { pythonIntStrip, pythonStr } from './python-str';
+import { parsePythonIntLiteral, pythonStr } from './python-str';
 
 /**
  * The CPython behaviours v1's services rely on when they read a parsed request body,
@@ -142,6 +142,12 @@ export function pyGetDict(obj: Record<string, unknown>, key: string): Record<str
  * Accepts what CPython's `int()` accepts from a JSON body: an integral number, a bigint, or a
  * decimal string. A float with a fractional part is **truncated** by `int()`, and anything
  * else raises `ValueError` / `TypeError`, which is a 500 in v1's write paths.
+ *
+ * The string branch is {@link parsePythonIntLiteral} — **the same function {@link pythonInt}
+ * calls**, and the axes it has been validated on are enumerated there. Do not inline a regex
+ * here: **B1** was two copies of `/^[+-]?\d+$/`, and because `toDjangoInt` is the *write*
+ * side, its copy turned `PUT {"value": "1_0"}` from a v1 write of `10` into a v2 500 on every
+ * integer body field in Phases 3–6.
  */
 export function toDjangoInt(value: unknown, field: string): bigint {
   if (typeof value === 'bigint') {
@@ -154,11 +160,12 @@ export function toDjangoInt(value: unknown, field: string): bigint {
     return BigInt(Math.trunc(value));
   }
   if (typeof value === 'string') {
-    // `pythonIntStrip`, not `trim()`: CPython's `int()` skips U+0085 (which `trim()` keeps)
-    // and refuses U+FEFF (which `trim()` strips). C63.
-    const trimmed = pythonIntStrip(value);
-    if (/^[+-]?\d+$/.test(trimmed)) {
-      return BigInt(trimmed);
+    // {@link parsePythonIntLiteral}, never a local regex: the strip set (C63), the
+    // decimal-digit fold and PEP 515's underscores are one grammar and `pythonInt` must
+    // answer identically. B1 — the two copies had drifted from CPython in the same way.
+    const parsed = parsePythonIntLiteral(value);
+    if (parsed !== null) {
+      return parsed;
     }
     throw new PythonTypeError(
       `ValueError: invalid literal for int() with base 10: '${value}' (${field})`,
@@ -297,7 +304,25 @@ export function toDjangoDate(value: unknown, field: string): PlainDate {
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
-  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) {
+  // ⚠️ **The year range is checked, and it was not** — condition **B2**, found by
+  // `nestjs-reviewer` after `manual-tester` found the sibling value bug. `datetime.date`
+  // accepts 1..9999 and refuses anything else:
+  //     >>> datetime.date(0, 1, 1)
+  //     ValueError: year must be in 1..9999, not 0
+  // Django's `parse_date` regex is `(\d{4})-...`, so `'0000-01-01'` reaches `datetime.date`
+  // and the ValueError becomes `ValidationError('invalid_date')` -- the same branch below.
+  // Without this check v2 answered **200 and wrote a row dated 1900-01-01** where v1 answers
+  // **500 and writes nothing: a status divergence on a write path, creating a row v1 would
+  // never have created. Reachable on every date-taking write in Phases 3-6 --
+  // `loan.disbursement_date`, `activity.date`, `userprofile.birthdate`, `power.meeting_date`.
+  if (
+    year < 1 ||
+    year > 9999 ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth(year, month)
+  ) {
     // `datetime.date(...)` raises ValueError -> ValidationError('invalid_date').
     throw new PythonTypeError(
       `ValidationError: '${value}' value has the correct format (YYYY-MM-DD) but it is an invalid date (${field})`,
@@ -470,12 +495,36 @@ export function describeTypeForErrorMessage(value: unknown): string {
  *
  * Deliberately a plain `Error`, not a {@link PythonTypeError}: both render as a bare 500 and
  * the message is the one CPython prints.
+ *
+ * ## What this has actually been validated against — and what it therefore does not claim
+ *
+ * ⚠️ **This function does not "reproduce CPython's `int()`".** It reproduces `int(str)` on the
+ * axes below, each measured differentially against the pinned container (CPython 3.9.25), and
+ * says nothing about the ones under them. The rule is plan §4: *a helper claiming to reproduce
+ * a CPython builtin must enumerate the axes it was validated on, and may not claim the builtin
+ * generally.* It exists because **C63 closed the whitespace axis only** and the docblock then
+ * carried the general claim — which is how the digit and underscore axes below survived a
+ * review, a phase and a parity round as a live 500-for-200 defect (**B1**).
+ *
+ * | axis | closed by | evidence |
+ * |---|---|---|
+ * | leading/trailing whitespace — the set is `int()`'s, not `strip()`'s and not `trim()`'s | C63 | 25 code points measured; `PYTHON_INT_SPACE` |
+ * | non-ASCII decimal digits (`'１'`, `'١'`, `'۱'`) fold to ASCII | **B1** | all 1 114 112 code points; `PYTHON_DECIMAL_DIGIT_RANGES` |
+ * | non-digit non-space characters are **not** folded (`'＋1'` still fails) | **B1** | measured, 7 rows |
+ * | PEP 515 underscores (`'1_0'` is 10; `'_1'`, `'1_'`, `'1__0'` are not) | **B1** | measured, 13 rows |
+ * | sign handling, empty string, bare sign | C63 / B1 | measured |
+ *
+ * Not validated, and therefore not claimed: bases other than 10 (`int(x, 16)` — v1 never calls
+ * one), `bytes` input (unreachable from a query string or `JSON.parse`), and CPython 3.11's
+ * 4300-digit `int_max_str_digits` limit, which 3.9.25 does not have (v1's `int()` accepts a
+ * literal of any length, and so does this).
  */
 export function pythonInt(raw: string): number {
-  // `pythonIntStrip`, not `trim()` — see {@link toDjangoInt}. C63.
-  const trimmed = pythonIntStrip(raw);
-  if (!/^[+-]?\d+$/.test(trimmed)) {
+  // See {@link parsePythonIntLiteral} — shared with {@link toDjangoInt}, because a second copy
+  // of this grammar is a second, silently diverging error contract (B1).
+  const parsed = parsePythonIntLiteral(raw);
+  if (parsed === null) {
     throw new Error(`ValueError: invalid literal for int() with base 10: '${raw}'`);
   }
-  return Number(trimmed);
+  return Number(parsed);
 }

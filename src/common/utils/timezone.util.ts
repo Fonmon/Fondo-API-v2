@@ -1,4 +1,4 @@
-import type { PlainDate } from './date.util';
+import { utcMillisFromParts, type PlainDate } from './date.util';
 
 /**
  * `America/Bogota` calendar helpers, reproducing Django's `USE_TZ = True` +
@@ -103,7 +103,18 @@ export function partsInZone(instant: Date, timeZone: string = BOGOTA_TIME_ZONE):
     if (part === undefined) {
       throw new Error(`Intl did not produce a "${type}" part for time zone ${timeZone}`);
     }
-    return Number(part.value);
+    const numeric = Number(part.value);
+    // ⚠️ An era guard, per `nestjs-reviewer`: `formatToParts` renders a BC year as a positive
+    // number plus a separate `era` part, so a bare `Number(part.value)` would read 1 BC as
+    // `1` and silently hand back an AD date. Unreachable today (`toDjangoDate` refuses any
+    // year outside 1..9999 -- B2), and cheap to make impossible rather than merely unlikely.
+    if (type === 'year') {
+      const era = parts.find((candidate) => candidate.type === 'era');
+      if (era !== undefined && era.value !== 'AD' && era.value !== 'CE') {
+        throw new Error(`Refusing a non-AD year from Intl for time zone ${timeZone}: ${era.value}`);
+      }
+    }
+    return numeric;
   };
   return {
     year: read('year'),
@@ -203,7 +214,9 @@ export function todayForAutoNowDateColumn(now: Date = new Date()): Date {
  * server time zone.
  */
 export function plainDateToUtcDate(date: PlainDate): Date {
-  return new Date(Date.UTC(date.year, date.month - 1, date.day));
+  // {@link utcMillisFromParts}, never raw `Date.UTC` — B2. A year in `[0, 99]` would be stored
+  // as `1900 + year`, silently, on a path that answers 200.
+  return new Date(utcMillisFromParts(date.year, date.month - 1, date.day));
 }
 
 /**
@@ -218,7 +231,7 @@ export function bogotaWallClockToInstant(
   timeZone: string = BOGOTA_TIME_ZONE,
 ): Date {
   const { year, month, day, hour = 0, minute = 0, second = 0 } = parts;
-  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  const asUtc = utcMillisFromParts(year, month - 1, day, hour, minute, second);
   // Resolve the offset at that instant, then correct. One correction pass is enough for a
   // zone with no sub-hour DST edge cases; Bogota has had a fixed -05:00 offset since 1993.
   const firstGuess = new Date(asUtc);
@@ -226,7 +239,33 @@ export function bogotaWallClockToInstant(
   return new Date(asUtc + offsetMs);
 }
 
+/**
+ * ⚠️ **This site is the one that actually produced B3**, and it is reachable through a path the
+ * other two cannot produce. `manual-tester` reported `POST {"end_date": "0100-01-01"}` as a v2
+ * 500 from PostgreSQL `22009` and read it as "year 100 is out of range"; PostgreSQL stores year
+ * 100 without complaint. `nestjs-reviewer` traced the real path:
+ *
+ * ```
+ * bogotaWallClockToInstant({year: 100, month: 1, day: 1})
+ *   asUtc                   -> 0100-01-01T00:00:00Z          (correct)
+ *   partsInZone(firstGuess) -> year 99, 12-31 19:03:44       (Bogota's pre-1914 LMT offset)
+ *   Date.UTC(99, 11, 31, ...) -> 1999-12-31                  <- the remap fires HERE
+ *   offsetMs = 0100-01-01 - 1999-12-31 = -1900 years
+ *   result   = -001800-01-02T04:56:16.000Z                   <- what the driver rejects
+ * ```
+ *
+ * So the input year is in range and it is the *Bogota-local* year falling back to 99 that trips
+ * the remap. Fixing the other two sites alone leaves B3 live **and the round looks green**,
+ * which is why `0100-01-01` has its own cell.
+ */
 function zonedTimeToUtcMillis(instant: Date, timeZone: string): number {
   const parts = partsInZone(instant, timeZone);
-  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return utcMillisFromParts(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+  );
 }

@@ -66,9 +66,56 @@ export function toPlainDate(value: DateLike): PlainDate {
   return fromDateColumn(value);
 }
 
-/** Number of days in the given month. `month` is 1-12. */
+/**
+ * `Date.UTC`, minus the two-digit-year trap.
+ *
+ * ⚠️ **ECMAScript maps a `year` argument in `[0, 99]` to `1900 + year`** (`MakeFullYear`), and
+ * `datetime.date` does not. Every `Date.UTC` call in this codebase that can see a
+ * caller-supplied year must go through here. Condition **B2**, found by `manual-tester` on
+ * `POST /api/saving-account {"end_date": "0050-06-15"}` — **200 on both stacks**, storing
+ * `0050-06-15` in v1 and **`1950-06-15`** in v2, with nothing logged on either side.
+ *
+ * `setUTCFullYear` is the documented escape: it sets the year without the remap and leaves
+ * month, day and time untouched, so the correction is exact rather than an offset guess.
+ *
+ * ⚠️ **The guard is `year >= 0 && year <= 99`, not `year < 100`** — a negative year is a real
+ * (if unreachable) BC date and `Date.UTC` does not remap it, so narrowing it here would
+ * introduce the bug this function exists to remove.
+ *
+ * The `monthIndex`/`day` parameters keep `Date.UTC`'s own raw semantics — 0-based month, and
+ * day `0` meaning "last day of the previous month" — so this is a drop-in replacement at every
+ * call site rather than a second convention to remember.
+ */
+export function utcMillisFromParts(
+  year: number,
+  monthIndex: number,
+  day: number,
+  hour = 0,
+  minute = 0,
+  second = 0,
+): number {
+  const millis = Date.UTC(year, monthIndex, day, hour, minute, second);
+  if (year >= 0 && year <= 99) {
+    const corrected = new Date(millis);
+    corrected.setUTCFullYear(year);
+    return corrected.getTime();
+  }
+  return millis;
+}
+
+/**
+ * Number of days in the given month. `month` is 1-12.
+ *
+ * Routed through {@link utcMillisFromParts} for uniformity rather than necessity: once
+ * `toDjangoDate` enforces `1 <= year <= 9999` (**B2**), this function is *provably* safe under
+ * the raw `Date.UTC` too — for `y` in `[1, 99]`, `y % 100 !== 0` and `(y + 1900) % 4 === y % 4`,
+ * so the Gregorian leap-year answer is the same for `y` and `y + 1900`. Only year **0**
+ * disagrees (proleptic year 0 is a leap year, 1900 is not), and the range check excludes it.
+ * Verified rather than assumed. Uniformity still wins: the next reader should not have to
+ * re-derive that argument to know this line is safe.
+ */
 export function daysInMonth(year: number, month: number): number {
-  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return new Date(utcMillisFromParts(year, month, 0)).getUTCDate();
 }
 
 /** Port of `isLastDay(date)`. */

@@ -91,9 +91,10 @@ export class SavingAccountController {
    *    *presence* switches it from the default `True` to `== 'true'`, so `?paginate=` (empty)
    *    means **false** and a bare absent key means true.
    *  * ⚠️ **`int()` runs unguarded on both `state` and `page`**, so `?page=` and `?state=abc`
-   *    are **500**s, not 400s. {@link pythonInt} reproduces CPython's `int()` including its
-   *    whitespace set, which is neither `str.strip()`'s nor JavaScript's `trim()`
-   *    (condition **C63**) — `Number()` would accept and reject different strings.
+   *    are **500**s, not 400s. {@link pythonInt} reproduces `int(str)` **on the axes its own
+   *    docblock enumerates** — the whitespace set (**C63**), the non-ASCII decimal-digit fold
+   *    and PEP 515's underscores (**B1**) — and deliberately claims no more than that;
+   *    `Number()` would accept and reject different strings on all three.
    *  * ⚠️ **The defaults are Python `int`s, not strings** — `get('state', 0)`, `get('page', 1)`
    *    — where `LoanView.get` writes `get('page', '1')`. `int(0)` and `int('0')` agree, so
    *    the two spellings are observably identical; noted because the difference invites a

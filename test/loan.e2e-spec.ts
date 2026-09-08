@@ -1825,4 +1825,35 @@ describe('Phase 4 — /api/loan (port of test_loan_views.py)', () => {
         .expect(401);
     });
   });
+
+  /**
+   * ## B1 on an ALREADY-GATED route — the cross-phase half of the finding
+   *
+   * `pythonInt` is a Phase 0 helper and `/api/loan` is Phase 4's, closed and approved weeks
+   * before Phase 6 existed. `manual-tester` found the defect on `/api/saving-account` and then
+   * reproduced it here, which is what turned it from "a Phase 6 bug" into "a shared-helper bug
+   * that Phase 6 happened to surface".
+   *
+   * ⚠️ **These cells are the reason the fix is not filed under Phase 6.** `nestjs-reviewer`
+   * ruled the earlier gates are NOT impugned — nobody in those rounds tried a full-width digit,
+   * so this is new evidence rather than ignored evidence — but the fix belongs to whichever
+   * phase is open, because deferring it means Phase 8 inherits it. Keep them here: if they only
+   * lived in the Phase 6 suite, a future reader would think only Phase 6 was ever affected.
+   */
+  describe('B1 - CPython int() digit set, on Phase 4 routes', () => {
+    it('accepts a full-width digit in ?page, as v1 does', async () => {
+      // U+FF11. v1: int('１') === 1, so a real (empty or populated) loan page. v2 answered 500.
+      await request(server()).get('/api/loan?page=１').set(asAdmin()).expect(200);
+    });
+
+    it('accepts a PEP 515 underscore in ?page, as v1 does', async () => {
+      // int('1_0') === 10 -> page 10, which is past the last page and therefore a 200 with an
+      // empty list, not a 404. Before B1 this was a 500.
+      await request(server()).get('/api/loan?page=1_0').set(asAdmin()).expect(200);
+    });
+
+    it('still refuses a full-width SIGN, which CPython does not fold', async () => {
+      await request(server()).get('/api/loan?page=＋1').set(asAdmin()).expect(500);
+    });
+  });
 });

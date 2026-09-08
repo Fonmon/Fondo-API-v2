@@ -392,11 +392,28 @@ decorator's `disabled` option cannot read `SCHEDULER_ENABLED`. The guard is the 
   of the constant.
 
 ⚠️ **The failure mode to watch at cutover is the flag being set on *nobody*.** Nothing errors;
-the fund simply stops getting reminders. `SchedulerRunner` logs `Running scheduler` on every
-pass it actually performs, so *absence* of that line twice a day is the check —
-`grep -c 'Running scheduler'` on a day's log should be **2**, and a `0` is the alarm. (Rule
-**C67**: the check has to be able to report something other than "nothing found", which is why
-it counts a line rather than looking for an error.)
+the fund simply stops getting reminders — **and, since Phase 6, CAPs silently stop closing too**
+(D12 inherits this wholesale).
+
+⚠️ **CORRECTED 2026-09-08 — the check this section originally gave was one that could not
+fail.** It said: *`SchedulerRunner` logs `Running scheduler` on every pass it actually performs,
+so absence of that line twice a day is the check — `grep -c 'Running scheduler'` should be 2.*
+**That line is emitted before any work happens**, so it returns **2** whether the pass processed
+110 rows or died on the very next statement. That is condition **C68**, and it is this document's
+own rule **C67** failing on the document that introduced it. The replacement counts lines emitted
+only at the **end** of a pass, and pairs the positive count with a negative one:
+
+```bash
+grep -c 'Scheduler pass finished' <log>   # expect 2 — a pass that STARTED AND FINISHED, twice
+grep -c 'Scheduler pass failed'  <log>   # expect 0
+```
+
+⚠️ **This was the third of three sites, and it was missed for a day** — `MIGRATION_PLAN.md`'s two
+were corrected on 2026-09-07 and the changelog then asserted *"both runbook sites corrected"*.
+There were three, and `docs/phase-6-deviations.md` §7.1 **had named this one explicitly**. It is
+the site that mattered most: **this is the document an operator has open during a cutover.**
+Recorded rather than quietly fixed, because "I corrected the sites I found" is not the same claim
+as "I corrected the sites that exist", and only the second one is worth writing down.
 
 ### 5.5 Two modules, not one, and why
 

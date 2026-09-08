@@ -19,9 +19,12 @@ Three tables come out of it, and the second and third are the ones that make the
 3. `PYTHON_NONPRINTABLE_RANGES` — `str.isprintable()` captured from the pinned interpreter's
    Unicode database (UCD 13.0.0). Node ships a much newer UCD, so `\\p{Cn}` disagrees with v1
    on 15 933 code points; see the module docblock.
+4. `PYTHON_DECIMAL_DIGIT_RANGES` — the code points `int()` folds onto an ASCII digit, from the
+   same UCD, for the same reason: `\\p{Nd}` is 650 code points here and 770 on Node 24.
 """
 import json
 import sys
+import unicodedata
 from django.db.models import TextField  # noqa: E402
 
 # Bodies where v1 and v2 agree. A row here is a regression detector.
@@ -100,6 +103,41 @@ def nonprintable_ranges():
     return out
 
 
+def decimal_digit_ranges():
+    """The code points CPython's `int()` reads as a decimal digit, as [start, end] runs.
+
+    `int()` does not test a category: `PyLong_FromUnicodeObject` first runs
+    `_PyUnicode_TransformDecimalAndSpaceToASCII`, which maps every code point whose
+    `Py_UNICODE_TODECIMAL` is non-negative onto the matching ASCII digit. Measured over all
+    1 114 112 code points on this interpreter, that set is **exactly** general category `Nd`
+    and the digit value is always `(cp - run_start) % 10` — asserted below rather than assumed,
+    so a future UCD that breaks either property fails the generator instead of the fixture.
+
+    ⚠️ Captured rather than asked of Node for the same reason `nonprintable_ranges` is: `Nd`
+    moves. This interpreter (UCD 13.0.0) has 650 such code points; Node 24 (UCD 17.0) has 770.
+    """
+    nd = [cp for cp in range(0x110000)
+          if unicodedata.category(chr(cp)) == 'Nd']
+    accepted = set()
+    for cp in nd:
+        try:
+            int(chr(cp))
+        except ValueError:
+            continue
+        accepted.add(cp)
+    assert accepted == set(nd), 'int() and category Nd disagree on this interpreter'
+    out = []
+    for cp in nd:
+        if out and out[-1][1] == cp - 1:
+            out[-1][1] = cp
+        else:
+            out.append([cp, cp])
+    for start, end in out:
+        for cp in range(start, end + 1):
+            assert unicodedata.digit(chr(cp)) == (cp - start) % 10, hex(cp)
+    return out
+
+
 out = []
 out.append('/* eslint-disable */')
 out.append('// GENERATED — do not edit by hand. See `scripts/gen-python-str-fixture.py`.')
@@ -124,13 +162,24 @@ for body in DIVERGENT_BODIES:
 out.append('];')
 out.append('')
 out.append("// `str.isprintable()` from the pinned interpreter's Unicode database (UCD %s),"
-           % __import__('unicodedata').unidata_version)
+           % unicodedata.unidata_version)
 out.append('// as [start, end] ranges of code points that are NOT printable — i.e. the ones')
 out.append("// CPython's `repr()` escapes. Flat pairs, ascending, non-overlapping.")
 out.append('export const PYTHON_NONPRINTABLE_RANGES: ReadonlyArray<number> = [')
 ranges = nonprintable_ranges()
 for i in range(0, len(ranges), 8):
     chunk = ranges[i:i + 8]
+    out.append('  ' + ' '.join('0x%x, 0x%x,' % (a, b) for a, b in chunk))
+out.append('];')
+out.append('')
+out.append("// The code points CPython's `int()` accepts as decimal digits, from the pinned")
+out.append('// interpreter\'s Unicode database (UCD %s), as [start, end] runs of code points.'
+           % unicodedata.unidata_version)
+out.append('// The digit value of a code point is `(cp - start) % 10`. Flat pairs, ascending.')
+out.append('export const PYTHON_DECIMAL_DIGIT_RANGES: ReadonlyArray<number> = [')
+digit_ranges = decimal_digit_ranges()
+for i in range(0, len(digit_ranges), 8):
+    chunk = digit_ranges[i:i + 8]
     out.append('  ' + ' '.join('0x%x, 0x%x,' % (a, b) for a, b in chunk))
 out.append('];')
 out.append('')

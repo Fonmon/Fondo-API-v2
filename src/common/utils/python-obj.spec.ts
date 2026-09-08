@@ -497,4 +497,110 @@ describe('python-obj', () => {
       }
     });
   });
+
+  /**
+   * ## B1 - `int()`'s digit set and PEP 515, neither of which C63 closed
+   *
+   * Every expectation here was measured on the pinned interpreter (CPython 3.9.25), not
+   * reasoned about. The defect these close was live through a review, a phase and a parity
+   * round because the docblock claimed `pythonInt` "reproduces CPython's `int()`" when C63 had
+   * closed the whitespace axis ONLY -- false-green #20's family, turned inward. The whitespace
+   * cells live above under C63; these are the two axes nobody had checked.
+   *
+   * WARNING: `pythonInt` and `toDjangoInt` are asserted TOGETHER on every row. They had two
+   * copies of the same regex, and the copies are what let the write side diverge unnoticed:
+   * `pythonInt` guards query strings (a v1 200 against a v2 500) but `toDjangoInt` guards
+   * request bodies, so `PUT {"value": "1_0"}` was a v1 WRITE OF 10 against a v2 500, on every
+   * integer body field in Phases 3-6. One grammar, two callers, one set of cells.
+   */
+  describe('B1 - non-ASCII decimal digits and PEP 515 underscores', () => {
+    const accepted: ReadonlyArray<readonly [string, number, string]> = [
+      ['１', 1, 'U+FF11 FULLWIDTH DIGIT ONE - Nd, folded'],
+      ['١', 1, 'U+0661 ARABIC-INDIC DIGIT ONE'],
+      ['۱', 1, 'U+06F1 EXTENDED ARABIC-INDIC DIGIT ONE'],
+      ['１２３', 123, 'folded digit by digit'],
+      ['1１', 11, 'mixed scripts - CPython has no "same script" rule'],
+      ['1_0', 10, 'PEP 515'],
+      ['1_0_0', 100, 'PEP 515, repeated'],
+      ['+1_0', 10, 'sign then underscore'],
+      ['-1_0', -10, 'negative'],
+      [' 1_0 ', 10, 'the strip happens around the literal'],
+      ['１_０', 10, 'the fold runs first, so underscores mix with any script'],
+    ];
+
+    it.each(accepted)('int(%j) === %i  // %s', (raw, expected) => {
+      expect(pythonInt(raw)).toBe(expected);
+      expect(toDjangoInt(raw, 'f')).toBe(BigInt(expected));
+    });
+
+    // The refusals are the half a naive fix breaks. "Normalise the string" (NFKC, say) would
+    // accept the fullwidth SIGNS, which v1 answers with a 500 -- so a mutant that over-folds
+    // is caught here rather than in production.
+    const refused: ReadonlyArray<readonly [string, string]> = [
+      ['＋1', 'U+FF0B FULLWIDTH PLUS - Sm, NOT folded; the sign must be ASCII'],
+      ['－1', 'U+FF0D FULLWIDTH HYPHEN-MINUS - Pd, NOT folded'],
+      ['_1', 'leading underscore'],
+      ['1_', 'trailing underscore'],
+      ['1__0', 'doubled underscore'],
+      ['_', 'bare underscore'],
+      ['1_ 0', 'space inside the literal'],
+      ['1 _0', 'space inside the literal'],
+    ];
+
+    it.each(refused)('int(%j) raises  // %s', (raw) => {
+      expect(() => pythonInt(raw)).toThrow(/invalid literal for int\(\) with base 10/);
+      expect(() => toDjangoInt(raw, 'f')).toThrow(PythonTypeError);
+    });
+
+    /**
+     * The reason this is a captured table and not a Unicode-property regex. CPython 3.9.25 is
+     * on UCD 13.0.0; Node 24 is on UCD 17.0, so Node's Nd property accepts ~120 code points v1
+     * refuses -- every digit block assigned since 2020 -- turning a v1 ValueError (a 500) into
+     * a v2 success. These are Nd to Node and unknown to the pinned interpreter: they MUST raise.
+     */
+    it.each([
+      ['\u{11F50}', 'U+11F50 KAWI DIGIT ZERO - Nd since UCD 15.0'],
+      ['\u{1E4F0}', 'U+1E4F0 NAG MUNDARI DIGIT ZERO - UCD 15.0'],
+      ['\u{116D0}', 'U+116D0 MYANMAR PAO DIGIT ZERO - UCD 16.0'],
+    ])('refuses %j, added to Nd after UCD 13.0  // %s', (raw) => {
+      expect(() => pythonInt(raw)).toThrow(/invalid literal for int\(\) with base 10/);
+    });
+  });
+
+  /**
+   * ## B2 - `toDjangoDate` never validated the year
+   *
+   * Found by `nestjs-reviewer` after `manual-tester` found the sibling value bug. Django's
+   * `parse_date` regex takes four digits, so '0000-01-01' matches and reaches
+   * `datetime.date(0, 1, 1)`, which raises `ValueError: year must be in 1..9999, not 0`;
+   * `DateField.to_python` turns that into `ValidationError('invalid_date')`.
+   *
+   * WARNING: this one is a STATUS divergence on a write path, not a value divergence. v2
+   * answered 200 and wrote a row dated 1900-01-01 where v1 answers 500 and writes nothing --
+   * it creates a row v1 would never have created, on every date-taking write in Phases 3-6.
+   */
+  describe('B2 - toDjangoDate year range', () => {
+    it('refuses year 0000, which JS Date.UTC would have mapped to 1900', () => {
+      expect(() => toDjangoDate('0000-01-01', 'end_date')).toThrow(PythonTypeError);
+      expect(() => toDjangoDate('0000-12-31', 'end_date')).toThrow(
+        /correct format \(YYYY-MM-DD\) but it is an invalid date/,
+      );
+    });
+
+    it('accepts the boundary years datetime.date accepts', () => {
+      expect(toDjangoDate('0001-01-01', 'end_date')).toEqual({ year: 1, month: 1, day: 1 });
+      expect(toDjangoDate('9999-12-31', 'end_date')).toEqual({ year: 9999, month: 12, day: 31 });
+      // Inside the Date.UTC remap window, and a real date to datetime.date.
+      expect(toDjangoDate('0050-06-15', 'end_date')).toEqual({ year: 50, month: 6, day: 15 });
+    });
+
+    it('leap-year arithmetic is not confused by the remap window', () => {
+      // Year 4 is a leap year and so is 1904, so this cell alone would NOT catch a raw
+      // Date.UTC inside daysInMonth -- it documents that rather than disproving it. The
+      // reviewer's proof is the real guarantee: for y in [1,99], (y+1900)%4 === y%4 and
+      // y%100 !== 0, so the answers coincide for every year the range check now admits.
+      expect(toDjangoDate('0004-02-29', 'end_date')).toEqual({ year: 4, month: 2, day: 29 });
+      expect(() => toDjangoDate('0100-02-29', 'end_date')).toThrow(PythonTypeError);
+    });
+  });
 });
