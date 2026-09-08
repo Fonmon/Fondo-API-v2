@@ -140,6 +140,46 @@ describe('LoanService (unit)', () => {
   // strptime
   // ==========================================================================
   describe('strptimeIsoDate — datetime.strptime(value, "%Y-%m-%d")', () => {
+    /**
+     * ## B2, second round — this function was still live when the first round said it was fixed
+     *
+     * The first B2 round routed four `Date.UTC` sites through `utcMillisFromParts` and wrote
+     * "every `Date.UTC` call in this codebase must go through here" into a docblock. **Four
+     * more were live at that moment**, two of them reachable, and this was one.
+     *
+     * The round-trip check below (`probe.getUTCFullYear() !== year`) is what made it reachable:
+     * `Date.UTC` remapped a year in [0,99] to 1900+year, the comparison failed, and this threw.
+     * Measured on the pinned CPython 3.9.25:
+     *     strptime('0050-06-15', '%Y-%m-%d') -> 0050-06-15
+     *     strptime('0000-06-15', '%Y-%m-%d') -> ValueError: year 0 is out of range
+     * so `POST /api/loan` refinance and the projection route were **v1 200 / v2 500**.
+     *
+     * An ESLint `no-restricted-syntax` rule now bans `Date.UTC` outside `date.util.ts`, because
+     * the prose invariant was false the day it was written and nothing could tell us.
+     */
+    it('B2: accepts a two-digit year, which Date.UTC would have remapped to 1900 + year', () => {
+      expect(strptimeIsoDate('0050-06-15')).toEqual({ year: 50, month: 6, day: 15 });
+      expect(strptimeIsoDate('0001-01-01')).toEqual({ year: 1, month: 1, day: 1 });
+      expect(strptimeIsoDate('0099-12-31')).toEqual({ year: 99, month: 12, day: 31 });
+    });
+
+    it('B2: refuses year 0, as strptime does', () => {
+      expect(() => strptimeIsoDate('0000-06-15')).toThrow(/ValueError/);
+    });
+
+    /**
+     * ⚠️ The Unicode-digit fold belongs to `toDjangoDate` and NOT here, and the difference was
+     * measured rather than assumed. `nestjs-reviewer` reported all three date parsers as one
+     * finding; the pinned interpreter splits them:
+     *     date_re.match('٢٠١٨-٠١-٠١')                -> matches, int() folds -> date(2018,1,1)
+     *     strptime('٢٠١٨-٠١-٠١', '%Y-%m-%d')          -> ValueError
+     * Django's `date_re` is Unicode-aware; `_strptime`'s generated pattern is not. So refusing
+     * here is correct parity, and folding here would have been a new divergence.
+     */
+    it('B2/D42: refuses Arabic-Indic digits, because strptime does', () => {
+      expect(() => strptimeIsoDate('٢٠١٨-٠١-٠١')).toThrow(/ValueError/);
+    });
+
     it('accepts an unpadded month and day, as %m/%d do', () => {
       expect(strptimeIsoDate('2017-12-9')).toEqual({ year: 2017, month: 12, day: 9 });
       expect(strptimeIsoDate('2018-1-1')).toEqual({ year: 2018, month: 1, day: 1 });

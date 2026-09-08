@@ -1,5 +1,5 @@
 import { daysInMonth, type PlainDate } from './date.util';
-import { parsePythonIntLiteral, pythonStr } from './python-str';
+import { parsePythonIntLiteral, pythonStr, transformDecimalToAscii } from './python-str';
 
 /**
  * The CPython behaviours v1's services rely on when they read a parsed request body,
@@ -294,8 +294,23 @@ export function toDjangoDate(value: unknown, field: string): PlainDate {
       `TypeError: expected string or bytes-like object (${field}), got '${describeTypeForErrorMessage(value)}'`,
     );
   }
+  // ⚠️ **Fold Unicode decimal digits first — Django's `date_re` is Unicode-aware and JS `\d`
+  // is not.** `dateparse.date_re` is compiled from a `str` pattern with no `re.ASCII`, so its
+  // `\d` matches any `Nd` code point, and `parse_date` then runs `int()` over the groups --
+  // which folds them. Measured on the pinned CPython 3.9.25:
+  //     date_re.match('٢٠١٨-٠١-٠١').groupdict() -> {'year': '٢٠١٨', ...}  -> date(2018, 1, 1)
+  // so v1 **accepts and writes** where v2's ASCII `\d` refused. Same root cause as **B1**
+  // (JS `\d` is ASCII-only with or without the `u` flag), one function over; registered as a
+  // fourth axis on **D42** rather than a new row.
+  //
+  // ⚠️ **This does NOT apply to the two `strptime` ports** (`parseBirthdate`,
+  // `strptimeIsoDate`). Measured on the same interpreter, `strptime` **refuses** them:
+  //     strptime('٢٠١٨-٠١-٠١', '%Y-%m-%d') -> ValueError: time data ... does not match format
+  // so their ASCII-only `\d` is correct parity. `nestjs-reviewer` reported all three as one
+  // finding; the measurement splits them.
+  const folded = transformDecimalToAscii(value);
   // `re.match` + Python's `$`, which also matches immediately before one trailing '\n'.
-  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})\n?$/.exec(value);
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})\n?$/.exec(folded);
   if (match === null) {
     throw new PythonTypeError(
       `ValidationError: '${value}' value has an invalid date format. It must be in YYYY-MM-DD format (${field})`,

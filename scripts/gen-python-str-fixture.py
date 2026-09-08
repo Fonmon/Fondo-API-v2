@@ -108,7 +108,17 @@ def decimal_digit_ranges():
 
     `int()` does not test a category: `PyLong_FromUnicodeObject` first runs
     `_PyUnicode_TransformDecimalAndSpaceToASCII`, which maps every code point whose
-    `Py_UNICODE_TODECIMAL` is non-negative onto the matching ASCII digit. Measured over all
+    `Py_UNICODE_TODECIMAL` is non-negative onto the matching ASCII digit.
+
+    NOTE ON WHAT THE ASSERT BELOW PROVES, which is less than an earlier wording claimed:
+    `accepted` is built by iterating `nd`, so `accepted == set(nd)` can only show that every
+    `Nd` code point is accepted -- never that nothing OUTSIDE `Nd` is. The stronger direction
+    holds by Unicode's own definition (`Numeric_Type=Decimal` implies `Gc=Nd`), so this is a
+    wording gap rather than a defect; flagged by `nestjs-reviewer` because the module earns the
+    phrase "asserted rather than assumed" elsewhere and should not spend it here. Sweeping all
+    0x110000 code points through `int(chr(cp))` would close it if the claim is ever needed.
+
+    Measured over all
     1 114 112 code points on this interpreter, that set is **exactly** general category `Nd`
     and the digit value is always `(cp - run_start) % 10` — asserted below rather than assumed,
     so a future UCD that breaks either property fails the generator instead of the fixture.

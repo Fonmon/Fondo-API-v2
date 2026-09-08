@@ -2536,4 +2536,72 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
       expect(row.auth_user.is_active).toBe(false);
     });
   });
+
+  /**
+   * ## B2, second round — `parseBirthdate` at the route
+   *
+   * The first B2 round fixed four `Date.UTC` sites and declared the invariant repo-wide. This
+   * function was one of four still live, and it is REACHABLE: the round-trip check
+   * (`asDate.getUTCFullYear() !== parsed.year`) fired for every year in [0,99] because
+   * `Date.UTC` had remapped it to 1900+year, so v2 raised where v1 writes.
+   *
+   * Measured on the pinned CPython 3.9.25:
+   *     strptime('0050-06-15', '%Y-%m-%d') -> 0050-06-15
+   *     strptime('2018-1-1',   '%Y-%m-%d') -> 2018-01-01   (%m/%d take one OR two digits)
+   *     strptime('٢٠١٨-٠١-٠١', '%Y-%m-%d') -> ValueError   (unlike Django's date_re)
+   */
+  describe('B2 - parseBirthdate at the route', () => {
+    // ⚠️ The payload is NESTED: v1 reads `obj['personal']`, not the top level
+    // (`services/user.py:11` -> `__update_user_personal(id, obj['personal'])`). My first draft
+    // of these cells put `birthdate` at the top level, so the route answered 200 and wrote
+    // nothing -- a cell that would have passed for the wrong reason once the assertion was
+    // relaxed. Caught because the assertion read the ROW rather than the status.
+    const withBirthdate = (birthdate: string): Record<string, unknown> => {
+      const body = userUpdate();
+      return {
+        ...body,
+        type: 'personal',
+        personal: { ...(body.personal as Record<string, unknown>), birthdate },
+      };
+    };
+
+    it('accepts a two-digit birthdate year that Date.UTC would have remapped', async () => {
+      await request(app.getHttpServer())
+        .patch(`/api/user/${admin.id}`)
+        .set(asAdmin())
+        .send(withBirthdate('0050-06-15'))
+        .expect(200);
+
+      const row = await prisma.userProfile.findUniqueOrThrow({
+        where: { user_ptr_id: admin.id },
+      });
+      // Before the fix this route answered 500. v1 answers 200 and stores year 50.
+      expect(row.birthdate?.toISOString().slice(0, 11)).toBe('0050-06-15T');
+    });
+
+    it('accepts a one-digit month and day, as %m/%d do', async () => {
+      await request(app.getHttpServer())
+        .patch(`/api/user/${admin.id}`)
+        .set(asAdmin())
+        .send(withBirthdate('2018-1-1'))
+        .expect(200);
+    });
+
+    it('refuses year 0000, as strptime does', async () => {
+      await request(app.getHttpServer())
+        .patch(`/api/user/${admin.id}`)
+        .set(asAdmin())
+        .send(withBirthdate('0000-06-15'))
+        .expect(500);
+    });
+
+    it('refuses Arabic-Indic digits, because strptime does (unlike Django date_re)', async () => {
+      // ⚠️ The opposite of `toDjangoDate`, deliberately. Folding here would be a NEW divergence.
+      await request(app.getHttpServer())
+        .patch(`/api/user/${admin.id}`)
+        .set(asAdmin())
+        .send(withBirthdate('٢٠١٨-٠١-٠١'))
+        .expect(500);
+    });
+  });
 });

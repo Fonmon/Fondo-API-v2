@@ -1,4 +1,5 @@
 import { pythonStrip } from '../common/utils/python-str';
+import { utcMillisFromParts } from '../common/utils/date.util';
 import { randomBytes } from 'node:crypto';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { DjangoPasswordService } from '../auth/password/django-password.service';
@@ -1260,14 +1261,24 @@ function parseBirthdate(value: unknown): PlainDate {
       `TypeError: strptime() argument 1 must be str, not ${value === null ? 'NoneType' : typeof value}`,
     );
   }
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  // ⚠️ `\d{1,2}`, not `\d{2}` — CPython's `%m`/`%d` accept one or two digits:
+  // `strptime('2018-1-1', '%Y-%m-%d')` is `2018-01-01` (measured, pinned 3.9.25), so the
+  // stricter form was a v1 200 against a v2 500. `strptimeIsoDate` in `loan.service.ts` --
+  // the sibling port of the same builtin -- already had it right; the two disagreeing with
+  // each other is the shape B1 was.
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(value);
   if (match === null) {
     throw new PythonTypeError(`ValueError: time data '${value}' does not match format '%Y-%m-%d'`);
   }
   const [, year, month, day] = match;
   const parsed = { year: Number(year), month: Number(month), day: Number(day) };
-  const asDate = new Date(Date.UTC(parsed.year, parsed.month - 1, parsed.day));
+  // ⚠️ `utcMillisFromParts`, never raw `Date.UTC` — **B2, second round**. See
+  // `strptimeIsoDate`: the round-trip check below fired for every year in [0,99].
+  const asDate = new Date(utcMillisFromParts(parsed.year, parsed.month - 1, parsed.day));
   if (
+    // `strptime` raises `ValueError: year 0 is out of range` outside 1..9999 (measured).
+    parsed.year < 1 ||
+    parsed.year > 9999 ||
     asDate.getUTCFullYear() !== parsed.year ||
     asDate.getUTCMonth() + 1 !== parsed.month ||
     asDate.getUTCDate() !== parsed.day

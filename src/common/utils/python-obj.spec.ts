@@ -564,6 +564,12 @@ describe('python-obj', () => {
       ['\u{116D0}', 'U+116D0 MYANMAR PAO DIGIT ZERO - UCD 16.0'],
     ])('refuses %j, added to Nd after UCD 13.0  // %s', (raw) => {
       expect(() => pythonInt(raw)).toThrow(/invalid literal for int\(\) with base 10/);
+      // ⚠️ The write side too, per this block's own rule -- `nestjs-reviewer` caught that
+      // these three cells asserted `pythonInt` only. A `\p{Nd}` regression would have let
+      // `PUT {"value": "<post-UCD-13 digit>"}` WRITE where v1 answers 500, and no cell would
+      // have seen it. This is the direction that matters most, and it took the control from
+      // 3 failures to 6.
+      expect(() => toDjangoInt(raw, 'f')).toThrow(PythonTypeError);
     });
   });
 
@@ -601,6 +607,31 @@ describe('python-obj', () => {
       // y%100 !== 0, so the answers coincide for every year the range check now admits.
       expect(toDjangoDate('0004-02-29', 'end_date')).toEqual({ year: 4, month: 2, day: 29 });
       expect(() => toDjangoDate('0100-02-29', 'end_date')).toThrow(PythonTypeError);
+    });
+
+    /**
+     * ## D42, fourth axis — Django's `date_re` is Unicode-aware and JS `\d` is not
+     *
+     * Same root cause as B1, one function over: `dateparse.date_re` is compiled from a `str`
+     * pattern with no `re.ASCII`, so its `\d` matches any `Nd` code point, and `parse_date`
+     * then runs `int()` over the groups -- which folds them. Measured on the pinned CPython
+     * 3.9.25:
+     *     date_re.match('٢٠١٨-٠١-٠١').groupdict() -> {'year': '٢٠١٨', ...} -> date(2018, 1, 1)
+     *
+     * ⚠️ **And it stops here.** `strptime` REFUSES the same string on the same interpreter, so
+     * `parseBirthdate` and `strptimeIsoDate` must keep their ASCII-only `\d`.
+     * `nestjs-reviewer` reported all three parsers as one finding; the measurement splits them,
+     * and folding in the other two would have created a divergence rather than closed one.
+     */
+    it('D42: folds Unicode decimal digits, because Django date_re + int() does', () => {
+      expect(toDjangoDate('٢٠١٨-٠١-٠١', 'end_date')).toEqual({ year: 2018, month: 1, day: 1 });
+      expect(toDjangoDate('２０１８-01-01', 'end_date')).toEqual({ year: 2018, month: 1, day: 1 });
+    });
+
+    it('D42: still refuses a post-UCD-13.0 digit here too', () => {
+      // The fold uses the pinned interpreter's table, so the drift guard holds on this path
+      // as well -- v1's `int()` would raise, so the row must not be written.
+      expect(() => toDjangoDate('\u{1E4F0}018-01-01', 'end_date')).toThrow(PythonTypeError);
     });
   });
 });

@@ -13,7 +13,7 @@ import {
   type UnpaginatedEnvelope,
 } from '../common/http/pagination';
 import { formatDateEs } from '../common/i18n/spanish-format';
-import { fromDateColumn, type PlainDate } from '../common/utils/date.util';
+import { utcMillisFromParts, fromDateColumn, type PlainDate } from '../common/utils/date.util';
 import {
   asPythonDict,
   pyGet,
@@ -1258,8 +1258,16 @@ export function strptimeIsoDate(value: unknown): PlainDate {
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
-  const probe = new Date(Date.UTC(year, month - 1, day));
+  // ⚠️ `utcMillisFromParts`, never raw `Date.UTC` — **B2, second round**. The round-trip
+  // comparison below is what made this reachable: `Date.UTC` remaps a year in [0,99] to
+  // 1900+year, so `probe.getUTCFullYear() !== year` fired for every such year and this threw.
+  // Measured on the pinned CPython 3.9.25: `strptime('0050-06-15', '%Y-%m-%d')` is
+  // `0050-06-15`, so v1 answered 200 where v2 answered 500.
+  const probe = new Date(utcMillisFromParts(year, month - 1, day));
   if (
+    // `strptime` raises `ValueError: year 0 is out of range` outside 1..9999 (measured).
+    year < 1 ||
+    year > 9999 ||
     month < 1 ||
     month > 12 ||
     day < 1 ||

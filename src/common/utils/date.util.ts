@@ -78,6 +78,13 @@ export function toPlainDate(value: DateLike): PlainDate {
  * `setUTCFullYear` is the documented escape: it sets the year without the remap and leaves
  * month, day and time untouched, so the correction is exact rather than an offset guess.
  *
+ * ⚠️ **Every `Date.UTC` in `src/` outside this file is banned by an ESLint
+ * `no-restricted-syntax` rule**, added after the first B2 round fixed four sites and left
+ * four more: two reachable (`parseBirthdate`, `strptimeIsoDate` — both v1 200 / v2 500 for a
+ * two-digit year) and two latent (`relativedelta.util.ts`). Prose saying "every call must go
+ * through here" is exactly the claim that went stale; the lint rule is the same claim in a
+ * form that cannot.
+ *
  * ⚠️ **The guard is `year >= 0 && year <= 99`, not `year < 100`** — a negative year is a real
  * (if unreachable) BC date and `Date.UTC` does not remap it, so narrowing it here would
  * introduce the bug this function exists to remove.
@@ -93,8 +100,9 @@ export function utcMillisFromParts(
   hour = 0,
   minute = 0,
   second = 0,
+  millisecond = 0,
 ): number {
-  const millis = Date.UTC(year, monthIndex, day, hour, minute, second);
+  const millis = Date.UTC(year, monthIndex, day, hour, minute, second, millisecond);
   if (year >= 0 && year <= 99) {
     const corrected = new Date(millis);
     corrected.setUTCFullYear(year);
@@ -111,7 +119,13 @@ export function utcMillisFromParts(
  * the raw `Date.UTC` too — for `y` in `[1, 99]`, `y % 100 !== 0` and `(y + 1900) % 4 === y % 4`,
  * so the Gregorian leap-year answer is the same for `y` and `y + 1900`. Only year **0**
  * disagrees (proleptic year 0 is a leap year, 1900 is not), and the range check excludes it.
- * Verified rather than assumed. Uniformity still wins: the next reader should not have to
+ * Verified rather than assumed.
+ *
+ * ⚠️ **Routing bought uniformity here, not correctness at year 0**: the day-`0` trick resolves
+ * the last day of the previous month *before* `setUTCFullYear` corrects the year, so
+ * `daysInMonth(0, 2)` is still **28** where proleptic year 0 wants 29. Unreachable — every
+ * caller-supplied year now passes a `1 <= year <= 9999` check first — but do not read the
+ * routing as having fixed it. Uniformity still wins: the next reader should not have to
  * re-derive that argument to know this line is safe.
  */
 export function daysInMonth(year: number, month: number): number {

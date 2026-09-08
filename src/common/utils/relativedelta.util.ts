@@ -1,4 +1,4 @@
-import { daysInMonth, fromDateColumn, type PlainDate } from './date.util';
+import { daysInMonth, fromDateColumn, utcMillisFromParts, type PlainDate } from './date.util';
 
 /**
  * Port of the subset of `dateutil.relativedelta` v1 uses — **month-end arithmetic in
@@ -87,8 +87,11 @@ export function addRelativeDelta(date: PlainDate, delta: RelativeDelta): PlainDa
 
   // `+ timedelta(days=...)`, applied after the replace. UTC midnight keeps this immune to
   // the host time zone.
+  // `utcMillisFromParts`, never raw `Date.UTC` (B2). Latent rather than reachable today, but
+  // it would go live the moment a `run_date` in years 1-99 is stored -- and Phase 6's own B3
+  // cell proves a year-100 `run_date` is reachable through `POST /api/saving-account`.
   const shifted = new Date(
-    Date.UTC(year, month - 1, clampedDay) + totalDays * MILLISECONDS_PER_DAY,
+    utcMillisFromParts(year, month - 1, clampedDay) + totalDays * MILLISECONDS_PER_DAY,
   );
   return fromDateColumn(shifted);
 }
@@ -104,8 +107,9 @@ export function addRelativeDelta(date: PlainDate, delta: RelativeDelta): PlainDa
  */
 export function addRelativeDeltaToInstant(instant: Date, delta: RelativeDelta): Date {
   const date = addRelativeDelta(fromDateColumn(instant), delta);
+  // `utcMillisFromParts`, never raw `Date.UTC` (B2). Same latency argument as above.
   return new Date(
-    Date.UTC(
+    utcMillisFromParts(
       date.year,
       date.month - 1,
       date.day,
