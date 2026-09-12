@@ -179,7 +179,11 @@ merged (plan §4 rule **12c**). So a handler must reach for the file explicitly.
       `src/common/http/django-multipart.ts`. **Do not re-implement it**, and do not import it
       out of a feature module — that is how the second copy, and with it the merge, gets
       written (condition **C36**).
-- [ ] A missing part is v1's `KeyError` → **500**, not a 400. Keep it.
+- [ ] For `UserView.patch` and `LoanView.patch`, a missing part is v1's `KeyError` → **500**, not a 400. Keep it.
+      ⚠️ **`FileView.post` differs:** v1 checks `"file" in request.data` first, so a missing part is a **400** — and that check
+      reads the *merged* `request.data`; use `src/common/http/drf-request-data.ts` there (Phase 8, measurement 2).
+- [ ] Two parts with the same name resolve to the **last** (`MultiValueDict.__getitem__`); `readUploadedFile` does this since
+      Phase 8 (P8-F5). Before that it took the first, and a passing cell asserted it.
 - [ ] Parse the file with `src/common/http/django-tsv.ts` — `djangoFileLines`, `requireColumn`,
       `parseMoneyColumn`. `parseMoneyColumn` is `int(round(float(x), 0))` with CPython's
       **half-even** rounding; two copies of it is how the user file and the loan file silently
@@ -189,9 +193,14 @@ merged (plan §4 rule **12c**). So a handler must reach for the file explicitly.
       for function-based views and `APIView.dispatch` reads `self.parser_classes` from the
       *class*. `UserView.patch` (P3), **`LoanView.patch` (`views/loan.py:49`, P4)** and
       **`FileView.post` (`views/file.py:15`, P8)** therefore all accept the **default** parser
-      list, JSON included, and then 500 inside the handler. Measured on live v1:
+      list, JSON included. Measured on live v1 **for `UserView.patch` (Phase 3)**:
       `application/json` → **500**, `application/x-www-form-urlencoded` → **500**, multipart
       with no `file` part → **500**, `text/plain` → **415** (outside the default list too).
+      ⚠️ **Not the same on `FileView.post`** (measured, Phase 8): `request.data` is read inside the
+      view's `try`, so `text/plain` and malformed JSON are **500**, not 415/400; a multipart body with
+      no `file` part is **400** (the presence check); JSON or form with all three keys is **500** on
+      `.content_type` (P8-F7). An earlier version of this checklist stated the `UserView.patch`
+      table as holding for all three handlers.
       An earlier Phase 3 controller carried `@DrfParsers(MULTIPART)` and answered 415 for JSON;
       that was wrong in the direction a client can observe. **This must not be "restored" as a
       narrowing in Phase 4 or Phase 8.**
