@@ -73,9 +73,8 @@ export default tseslint.config(
       // The previous version of this comment said the negation below banned "every lexical
       // Date except a short allowlist". It did not: it matched `Date` by parent node rather than
       // by role, so `new Proxy(Date, {})`, `new Box(Date)` and `Date.bind(null)` were lint-clean,
-      // and the proxied constructor returns 1950. Five review passes have each found forms the
-      // previous selectors missed; expect a sixth. The rule raises the cost of the accident; it
-      // does not make the remap unreachable.
+      // and the proxied constructor returns 1950. Expect further bypass forms. The rule raises
+      // the cost of the accident; it does not make the remap unreachable.
       //
       // `new Date(y, m, d)` is the important one: it runs the same `MakeFullYear`
       // (measured: `new Date(50,0,1).getFullYear() === 1950`), it is the MORE idiomatic
