@@ -18,6 +18,10 @@
 #   DB=fondo_api_test ./fixture-check.sh > /tmp/control.txt
 #   diff -q /tmp/before.txt /tmp/control.txt && echo 'CONTROL FAILED — probe is blind'
 #
+# ⚠️ Phase 8 added `fondo_api_file` (count, maxid, xmin). Until then this script had no row for
+# that table, so a Phase 8 write would have been invisible to it except through its sequence.
+# The baseline saved before that change has no file rows; diff against the one saved with it.
+#
 # `xmin` cardinality is the part that catches a write-then-restore: a table whose rows were
 # all inserted by one transaction reads 1, and any later UPDATE or INSERT raises it, even if
 # the row count comes back to where it started.
@@ -49,6 +53,9 @@ UNION ALL SELECT 'xmin','fondo_api_userprofile', count(DISTINCT xmin::text) FROM
 UNION ALL SELECT 'xmin','fondo_api_activity', count(DISTINCT xmin::text) FROM fondo_api_activity
 UNION ALL SELECT 'xmin','fondo_api_activityuser', count(DISTINCT xmin::text) FROM fondo_api_activityuser
 UNION ALL SELECT 'xmin','fondo_api_power', count(DISTINCT xmin::text) FROM fondo_api_power
+UNION ALL SELECT 'count','fondo_api_file', count(*) FROM fondo_api_file
+UNION ALL SELECT 'maxid','fondo_api_file', max(id) FROM fondo_api_file
+UNION ALL SELECT 'xmin','fondo_api_file', count(DISTINCT xmin::text) FROM fondo_api_file
 ORDER BY 1,2;
 SQL
 
