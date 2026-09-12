@@ -315,13 +315,17 @@ describe('django.http.multipartparser.MultiPartParser', () => {
       );
     });
 
-    it('takes the FIRST part when a field name repeats', () => {
+    it('takes the LAST part when a field name repeats — MultiValueDict.__getitem__', () => {
+      // ⚠️ Through Phase 7 this cell asserted 'first', and it was green against a v2 that
+      // disagreed with v1. Phase 8 measured the pinned v1 (`POST /api/file`, parts FIRST then
+      // SECOND: SECOND was uploaded) and changed the subject. See docs/phase-8-deviations.md.
       const request = {};
       setUploadedFiles(request, [
         { fieldname: 'file', originalname: 'a', mimetype: '', buffer: Buffer.from('first') },
         { fieldname: 'file', originalname: 'b', mimetype: '', buffer: Buffer.from('second') },
+        { fieldname: 'other', originalname: 'c', mimetype: '', buffer: Buffer.from('other') },
       ]);
-      expect(readUploadedFile(request, 'file').toString()).toBe('first');
+      expect(readUploadedFile(request, 'file').toString()).toBe('second');
     });
 
     it('raises KeyError — a 500, not a 400 — when the part is missing', () => {

@@ -245,8 +245,13 @@ function readRawBody(request: Request, done: (error: Error | null, body: Buffer)
  * ⚠️ One documented gap: DRF's `request.data` is `POST.copy()` **updated with** `FILES`, so a
  * name present in both resolves to the *file*. `readUploadedFile` looks only at
  * `request.files` and the DTOs look only at `request.body`, so v2 answers as if both existed
- * separately. No v1 client sends a field and a file under one name, and no v1 handler reads
- * a name it does not itself write.
+ * separately.
+ *
+ * ⚠️ That gap **is** observable on one route, measured in Phase 8: `FileView.post` checks
+ * presence against the merged dict, so a `file` sent as a plain field, or a `name`/`type` sent
+ * as a file part, is a 500 in v1. `common/http/drf-request-data.ts` reproduces the precedence
+ * for that handler **without** merging values; no other handler calls it (grep at Phase 8's
+ * commit: one caller).
  */
 function applyDjangoMultipart(request: Request, body: Buffer): void {
   const result = parseDjangoMultipart(request.headers['content-type'] ?? '', body);

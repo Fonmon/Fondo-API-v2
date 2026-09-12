@@ -2,6 +2,7 @@ import { Module, type MiddlewareConsumer, type NestModule } from '@nestjs/common
 import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ActivityModule } from './activities/activity.module';
+import { AdminModule } from './admin/admin.module';
 import { AppConfigModule } from './config/config.module';
 import { AuthModule } from './auth/auth.module';
 import { ApiExceptionFilter } from './common/filters/api-exception.filter';
@@ -14,6 +15,7 @@ import { DjangoUrlResolverMiddleware } from './common/http/django-url-resolver.m
 import { DrfContentNegotiationMiddleware } from './common/http/drf-content-negotiation.middleware';
 import { DrfParserInterceptor } from './common/http/drf-parser.interceptor';
 import { DrfRequestParsingMiddleware } from './common/http/drf-request-parsing.middleware';
+import { FileModule } from './files/file.module';
 import { GunicornHttpEdge } from './common/http/gunicorn-http-edge';
 import { JsonBigIntSetup } from './common/http/json-bigint';
 import { HealthModule } from './health/health.module';
@@ -58,7 +60,9 @@ import { UserModule } from './users/user.module';
  * with **D12**, the CAP auto-close, whose executer is registered on
  * {@link SchedulerRunnerModule} because that is the module that runs tasks.
  *
- * Files arrive in Phase 8.
+ * Phase 8 adds {@link FileModule} — `GET|POST /api/file`, `GET /api/file/<id>`, with the GCS
+ * client behind `FILE_STORAGE` — and {@link AdminModule} — `GET /api/admin`, the self-test of
+ * the mail and push channels.
  */
 @Module({
   imports: [
@@ -71,6 +75,8 @@ import { UserModule } from './users/user.module';
     LoanModule,
     ActivityModule,
     SavingAccountModule,
+    FileModule,
+    AdminModule,
     PasswordResetModule,
     ScheduleModule.forRoot(),
     // Phase 7b: the `celery beat` replacement. Declares the 10:00/14:00 America/Bogota cron

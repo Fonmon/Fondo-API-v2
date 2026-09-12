@@ -500,14 +500,34 @@ export function getUploadedFiles(request: object): readonly DjangoUploadedFile[]
  * smoothed over in a later phase; it is the measured status for `PATCH /api/user` with a JSON
  * body, with a form body, and with a multipart body carrying no `file` part.
  *
+ * ⚠️ **Two parts with the same name: the LAST one**, because `MultiValueDict.__getitem__`
+ * returns `list[-1]`. Measured on the pinned v1 on 2026-09-12 (`POST /api/file` with parts
+ * `FIRST` then `SECOND`: `SECOND` was uploaded). Through Phase 7 this function took the
+ * *first*; the fix is registered in `docs/phase-8-deviations.md` because it changes the
+ * Phase 3 and Phase 4 bulk uploads for that request shape too.
+ *
  * ⚠️ Do **not** pair this with a narrowed parser list. `@parser_classes((MultiPartParser,))`
  * on an `APIView` *method* is a no-op in v1 (plan §4 rule 12b) — all three handlers accept the
  * default parser list, JSON included, and then 500 here.
  */
 export function readUploadedFile(request: object, field: string): Buffer {
-  const match = getUploadedFiles(request).find((file) => file.fieldname === field);
+  const match = lastUploadedFile(request, field);
   if (match === undefined) {
     throw new PythonKeyError(field);
   }
   return match.buffer;
+}
+
+/**
+ * `request.FILES.get(field)` — the last part named `field`, or `undefined`. See
+ * {@link readUploadedFile} for why it is the last.
+ */
+export function lastUploadedFile(request: object, field: string): DjangoUploadedFile | undefined {
+  const files = getUploadedFiles(request);
+  for (let index = files.length - 1; index >= 0; index -= 1) {
+    if (files[index].fieldname === field) {
+      return files[index];
+    }
+  }
+  return undefined;
 }

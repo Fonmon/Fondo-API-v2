@@ -28,16 +28,22 @@ describe('Phase 0 application boot', () => {
     expect(response.body).toEqual({ status: 'ok', database: 'up' });
   });
 
-  it('ships no Phase 7-8 business endpoints yet', async () => {
-    // Files and admin are Phases 8 and 7's `AdminView`.
-    // ⚠️ `/api/loan` moved to the *guarded* list below when Phase 4 landed, the three
-    // `/api/activity` routes when Phase 5 did, and **`/api/saving-account` when Phase 6
-    // did**. A route that does not exist 404s at `DjangoUrlResolverMiddleware`; one that
-    // exists but is unauthenticated 401s at the guard. Keeping the two lists apart is what
-    // makes this assertion mean something — an empty list would pass for either reason.
-    for (const path of ['/api/file', '/api/admin']) {
-      await request(app.getHttpServer()).get(path).expect(404);
-    }
+  it('exposes the Phase 8 file and admin routes, guarded', async () => {
+    // ⚠️ Until Phase 8 this cell asserted **404** for `/api/file` and `/api/admin` ("ships no
+    // Phase 7-8 business endpoints yet"). It changed subject rather than being deleted, the way
+    // `/api/loan`, `/api/activity` and `/api/saving-account` moved before: a route that does
+    // not exist 404s at `DjangoUrlResolverMiddleware`; one that exists but is unauthenticated
+    // 401s at the guard, and the 404 cells beyond each pattern keep that split meaningful.
+    await request(app.getHttpServer()).get('/api/file').expect(401);
+    await request(app.getHttpServer()).get('/api/file/').expect(401);
+    await request(app.getHttpServer()).post('/api/file').expect(401);
+    await request(app.getHttpServer()).get('/api/file/1').expect(401);
+    await request(app.getHttpServer()).get('/api/admin').expect(401);
+    await request(app.getHttpServer()).get('/api/admin/').expect(401);
+    // `^api/file/(?P<id>[0-9]+)$` has no trailing `/?`, and nothing extends `^api/admin/?$`.
+    await request(app.getHttpServer()).get('/api/file/1/').expect(404);
+    await request(app.getHttpServer()).get('/api/file/abc').expect(404);
+    await request(app.getHttpServer()).get('/api/admin/email').expect(404);
   });
 
   it('exposes the Phase 6 saving-account route, guarded', async () => {

@@ -70,7 +70,10 @@ export async function resetDatabase(prisma: PrismaService): Promise<void> {
       'fondo_api_schedulertask, fondo_api_power, fondo_api_savingaccount, ' +
       'fondo_api_loandetail, fondo_api_loan, ' +
       'fondo_api_activityuser, fondo_api_activity, fondo_api_activityyear, ' +
-      'fondo_api_userfinance, fondo_api_userpreference, fondo_api_userprofile, auth_user ' +
+      'fondo_api_userfinance, fondo_api_userpreference, fondo_api_userprofile, auth_user, ' +
+      // Phase 8. No FK in either direction; listed so a file suite starts from zero rows and
+      // `RESTART IDENTITY` makes its ids predictable.
+      'fondo_api_file ' +
       'RESTART IDENTITY CASCADE',
   );
 }
