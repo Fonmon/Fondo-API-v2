@@ -174,7 +174,7 @@ out.append('')
 out.append("// `str.isprintable()` from the pinned interpreter's Unicode database (UCD %s),"
            % unicodedata.unidata_version)
 out.append('// as [start, end] ranges of code points that are NOT printable — i.e. the ones')
-out.append("// CPython's `repr()` escapes. Flat pairs, ascending, non-overlapping.")
+out.append("// CPython's `repr()` escapes. Flat pairs, ascending, non-overlapping; shape enforced by python-str.fixture.spec.ts.")
 out.append('export const PYTHON_NONPRINTABLE_RANGES: ReadonlyArray<number> = [')
 ranges = nonprintable_ranges()
 for i in range(0, len(ranges), 8):
@@ -185,7 +185,7 @@ out.append('')
 out.append("// The code points CPython's `int()` accepts as decimal digits, from the pinned")
 out.append('// interpreter\'s Unicode database (UCD %s), as [start, end] runs of code points.'
            % unicodedata.unidata_version)
-out.append('// The digit value of a code point is `(cp - start) % 10`. Flat pairs, ascending.')
+out.append('// The digit value of a code point is `(cp - start) % 10`. Flat pairs, ascending; shape enforced by python-str.fixture.spec.ts.')
 out.append('export const PYTHON_DECIMAL_DIGIT_RANGES: ReadonlyArray<number> = [')
 digit_ranges = decimal_digit_ranges()
 for i in range(0, len(digit_ranges), 8):

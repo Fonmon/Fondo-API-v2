@@ -83,7 +83,7 @@ export const DJANGO_TEXT_PREP_DIVERGENCES: ReadonlyArray<readonly [string, strin
 
 // `str.isprintable()` from the pinned interpreter's Unicode database (UCD 13.0.0),
 // as [start, end] ranges of code points that are NOT printable — i.e. the ones
-// CPython's `repr()` escapes. Flat pairs, ascending, non-overlapping.
+// CPython's `repr()` escapes. Flat pairs, ascending, non-overlapping; shape enforced by python-str.fixture.spec.ts.
 export const PYTHON_NONPRINTABLE_RANGES: ReadonlyArray<number> = [
   0x0, 0x1f, 0x7f, 0xa0, 0xad, 0xad, 0x378, 0x379, 0x380, 0x383, 0x38b, 0x38b, 0x38d, 0x38d, 0x3a2, 0x3a2,
   0x530, 0x530, 0x557, 0x558, 0x58b, 0x58c, 0x590, 0x590, 0x5c8, 0x5cf, 0x5eb, 0x5ee, 0x5f5, 0x605, 0x61c, 0x61d,
@@ -174,7 +174,7 @@ export const PYTHON_NONPRINTABLE_RANGES: ReadonlyArray<number> = [
 
 // The code points CPython's `int()` accepts as decimal digits, from the pinned
 // interpreter's Unicode database (UCD 13.0.0), as [start, end] runs of code points.
-// The digit value of a code point is `(cp - start) % 10`. Flat pairs, ascending.
+// The digit value of a code point is `(cp - start) % 10`. Flat pairs, ascending; shape enforced by python-str.fixture.spec.ts.
 export const PYTHON_DECIMAL_DIGIT_RANGES: ReadonlyArray<number> = [
   0x30, 0x39, 0x660, 0x669, 0x6f0, 0x6f9, 0x7c0, 0x7c9, 0x966, 0x96f, 0x9e6, 0x9ef, 0xa66, 0xa6f, 0xae6, 0xaef,
   0xb66, 0xb6f, 0xbe6, 0xbef, 0xc66, 0xc6f, 0xce6, 0xcef, 0xd66, 0xd6f, 0xde6, 0xdef, 0xe50, 0xe59, 0xed0, 0xed9,

@@ -165,17 +165,14 @@ describe('PowerService (unit)', () => {
       ['2020-13-01', 'rolled to 2021-01-01'],
       ['0000-01-01', 'wrote year 0 — B2, unguarded on this path'],
     ])('Major 6: refuses %j and writes NOTHING  // was: %s', async (raw) => {
+      // Nit 4: pins the `invalid_date` branch (calendar miss), not `invalid` (format miss) —
+      // a bare `.toThrow()` would pass if the regex rejected these for the wrong reason.
       await expect(
         service.handlePowerRequest(actor(1), {
           type: 'post',
           meeting_date: raw,
           requestee: 2,
         }),
-        // ⚠️ Nit 4 — pins WHICH ValidationError branch fired. v1 distinguishes `invalid`
-        // ("has an invalid date format", a regex miss) from `invalid_date` ("has the correct
-        // format (YYYY-MM-DD) but it is an invalid date", a calendar miss). All three rows
-        // here are calendar/range misses, so a bare `.toThrow()` would also have passed if the
-        // regex had rejected them for the wrong reason.
       ).rejects.toThrow(/but it is an invalid date/);
       // ⚠️ Minor 13 — the docblock said "the row AND the notification"; the cell asserted only
       // the row. Prose claiming more than the cell arbitrates, in the commit that fixed exactly

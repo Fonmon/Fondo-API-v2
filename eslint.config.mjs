@@ -63,14 +63,14 @@ export default tseslint.config(
       // C67 one level up: a control that exercises only the case you already thought of.
       // `nestjs-reviewer` planted five bypass forms and four of them passed clean.
       //
-      // ⚠️ WHAT THIS RULE DOES AND DOES NOT CLOSE. It is closure over a PLANT SET, not over
-      // the class -- three review passes have each found forms the previous set missed (4, then
-      // 3, then 8 more). AST selectors cannot close **value-flow aliasing**: once `Date` is
-      // bound to a parameter, a field, or a computed expression, no syntactic pattern reaches
-      // it, and `(Date as any)['U'+'TC']` survives every selector below. That boundary is the
-      // honest statement of the guarantee, and it is worth more than a ninth selector: this
-      // rule raises the cost of the accident, it does not make the remap unreachable. The
-      // measured plant set is in `MIGRATION_PLAN.md` D43.
+      // ⚠️ SCOPE, stated as measured rather than claimed. Each of four review passes found
+      // forms the previous selectors missed. Escape sites for `Date` are syntactically
+      // enumerable, and the negation selector at the end of this list bans every lexical
+      // `Date` except a short allowlist of legitimate positions. What no AST selector reaches
+      // is the name never being spelled: `(globalThis as any)['Da' + 'te'].UTC(50, 0, 1)`.
+      // An earlier version of this comment named `(Date as any)['U'+'TC']` as the survivor;
+      // it is not one — the negation selector catches it. The rule raises the cost of the
+      // accident; it does not make the remap unreachable.
       //
       // `new Date(y, m, d)` is the important one: it runs the same `MakeFullYear`
       // (measured: `new Date(50,0,1).getFullYear() === 1950`), it is the MORE idiomatic
@@ -134,6 +134,20 @@ export default tseslint.config(
         { selector: "ReturnStatement > Identifier[name='Date']", message: 'Returning Date routes around the ban (B2).' },
         { selector: "Property[shorthand=true][value.name='Date']", message: 'Shorthand-property capture of Date routes around the ban (B2).' },
         { selector: "NewExpression[callee.name='Date'] > SpreadElement", message: 'new Date(...args) hides the argument count; the multi-argument form carries the MakeFullYear remap (B2).' },
+        // Major 10 (re-check #5). Enumerating escape sites one spelling at a time is why each pass
+        // found more; this bans them by negation instead. Allowed positions: `new Date(...)`,
+        // `Date.x`, type positions, and `instanceof Date`.
+        {
+          selector:
+            "Identifier[name='Date']:not(NewExpression > Identifier):not(MemberExpression > Identifier):not(TSTypeReference > Identifier):not(TSTypeQuery > Identifier):not(TSQualifiedName > Identifier):not(BinaryExpression[operator='instanceof'] > Identifier)",
+          message: 'Date used as a value escapes the Date.UTC ban (B2). Inject a clock returning a number, or use utcMillisFromParts.',
+        },
+        {
+          // `new (Date satisfies DateConstructor)(1950, 0, 1)` produced no lint error of any kind.
+          selector:
+            "NewExpression[arguments.length>=2] > :matches(TSAsExpression, TSNonNullExpression, TSSatisfiesExpression) Identifier[name='Date']",
+          message: 'A wrapped Date constructor with multiple arguments still runs the MakeFullYear remap (B2). Use utcMillisFromParts.',
+        },
       ],
     },
   },

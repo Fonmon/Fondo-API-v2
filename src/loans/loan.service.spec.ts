@@ -209,22 +209,10 @@ describe('LoanService (unit)', () => {
       // rows existed, while making `'2018-01-0٥'` a 200-with-a-row where v1 raises.
       ['2018-01-0٥', "0[1-9]'s second char is ASCII too — the fold is [1-2]\\d's alone"],
       ['2018-01-3١', 'same for 3[0-1]'],
-      // ⚠️ Minor 8 / Major 8 — THIS ROW IS A CONTROL. Do not delete it, and do not
-      // "simplify" PYTHON_DIGIT_CLASS to a Unicode-property test (D42 forbids that in bold).
-      //
-      // An earlier version of this comment said the opposite -- that the row only pins
-      // behaviour, because the class choice was not observable here. That was wrong, and it
-      // was wrong because the mutant behind it is one the code makes IMPOSSIBLE: swapping the
-      // class for a property test desynchronises the class from the fold, and both derive from
-      // the same PYTHON_DECIMAL_DIGIT_RANGES array, so they cannot disagree (verified
-      // exhaustively over all 1,114,112 code points: 0 in either direction).
-      //
-      // The mutations that ARE reachable, each measured:
-      //   * narrowing the class (-> '0-9')            -> 5 failures, the accept rows above
-      //   * the pinned table going stale, which widens
-      //     class and fold TOGETHER                    -> 3 failures, THIS ROW among them
-      //   * widening the class alone                   -> unreachable by construction
-      // Marking a working control inert is how it gets deleted.
+      // Control for UCD drift (Major 8): adding a post-13.0 run to the pinned table fails this
+      // row (measured at 2811b56, 3 failures repo-wide). Table order and class/fold agreement
+      // are enforced by `python-str.fixture.spec.ts`. Keep the class captured from CPython,
+      // not a Unicode property test (D42).
       ['\u{1E4F0}018-01-01', 'U+1E4F0 NAG MUNDARI ZERO — Nd to Node, unknown to CPython 3.9.25'],
     ])('Major 5: refuses %j  // %s', (raw) => {
       expect(() => strptimeIsoDate(raw)).toThrow(/ValueError/);
