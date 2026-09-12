@@ -63,14 +63,19 @@ export default tseslint.config(
       // C67 one level up: a control that exercises only the case you already thought of.
       // `nestjs-reviewer` planted five bypass forms and four of them passed clean.
       //
-      // ⚠️ SCOPE, stated as measured rather than claimed. Each of four review passes found
-      // forms the previous selectors missed. Escape sites for `Date` are syntactically
-      // enumerable, and the negation selector at the end of this list bans every lexical
-      // `Date` except a short allowlist of legitimate positions. What no AST selector reaches
-      // is the name never being spelled: `(globalThis as any)['Da' + 'te'].UTC(50, 0, 1)`.
-      // An earlier version of this comment named `(Date as any)['U'+'TC']` as the survivor;
-      // it is not one — the negation selector catches it. The rule raises the cost of the
-      // accident; it does not make the remap unreachable.
+      // ⚠️ SCOPE — a measurement, not a guarantee (plan §4 rule 15). Measured when this comment
+      // was written, on a one-plant-per-line probe: 17 planted escapes caught, 0 missed; 6
+      // legitimate forms clean (`new Date()`, `new Date(ms)`, `Date.now()`, `d: Date`,
+      // `typeof Date`, `x instanceof Date`); repo lint clean. One named survivor, which no AST
+      // selector can see because the name is never spelled:
+      // `(globalThis as any)['Da' + 'te'].UTC(50, 0, 1)`.
+      //
+      // The previous version of this comment said the negation below banned "every lexical
+      // Date except a short allowlist". It did not: it matched `Date` by parent node rather than
+      // by role, so `new Proxy(Date, {})`, `new Box(Date)` and `Date.bind(null)` were lint-clean,
+      // and the proxied constructor returns 1950. Five review passes have each found forms the
+      // previous selectors missed; expect a sixth. The rule raises the cost of the accident; it
+      // does not make the remap unreachable.
       //
       // `new Date(y, m, d)` is the important one: it runs the same `MakeFullYear`
       // (measured: `new Date(50,0,1).getFullYear() === 1950`), it is the MORE idiomatic
@@ -139,8 +144,15 @@ export default tseslint.config(
         // `Date.x`, type positions, and `instanceof Date`.
         {
           selector:
-            "Identifier[name='Date']:not(NewExpression > Identifier):not(MemberExpression > Identifier):not(TSTypeReference > Identifier):not(TSTypeQuery > Identifier):not(TSQualifiedName > Identifier):not(BinaryExpression[operator='instanceof'] > Identifier)",
+            "Identifier[name='Date']:not(NewExpression > Identifier.callee):not(MemberExpression > Identifier.object):not(TSTypeReference > Identifier):not(TSTypeQuery > Identifier):not(TSQualifiedName > Identifier):not(BinaryExpression[operator='instanceof'] > Identifier.right)",
           message: 'Date used as a value escapes the Date.UTC ban (B2). Inject a clock returning a number, or use utcMillisFromParts.',
+        },
+        {
+          // Re-check #6: with `Date` exempted whenever it is a member-expression object, `Date.bind`,
+          // `Date.call`, `Date.apply` and `Date.prototype` hand the constructor out lint-clean. The
+          // members production code uses are allow-listed instead; repo lint measures the list.
+          selector: "MemberExpression[object.name='Date']:not([property.name='now'])",
+          message: 'Only Date.now may be read off Date in production code; other members (bind, call, apply, prototype, UTC) hand out or run the MakeFullYear remap (B2).',
         },
         {
           // `new (Date satisfies DateConstructor)(1950, 0, 1)` produced no lint error of any kind.
