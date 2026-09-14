@@ -145,14 +145,27 @@ describe('Phase 8 — /api/file', () => {
   };
 
   /**
-   * An exception that escaped the view: no `Allow`, and `Vary` is exactly `Origin` — no `Accept`.
-   * ⚠️ On the init-time multipart 500s, v1's gunicorn page has **no `Vary` header at all**, so
-   * this asserts v2's measured header, not parity (P8-D4, plan §7 C85; same class as D24).
+   * An exception that escaped the view: no `Allow`, `Vary` is exactly `Origin` (no `Accept`), and
+   * `X-Frame-Options: SAMEORIGIN`. What that pins depends on the caller:
+   *
+   * - **The three init-time multipart boundary rows** (empty, quoted trailing space, non-ASCII):
+   *   ⚠️ `Vary: Origin` and `X-Frame-Options` are **registered differences, not parity**. v1's
+   *   gunicorn double-fault page sends neither header (P8-D4; plan §7 C85 for `Vary`, C86 for
+   *   `X-Frame-Options`; same class as D24). `X-Frame-Options` was measured on the empty and
+   *   non-ASCII boundaries only (`~/.fondo-parity-harness/p8r/out/c79-v2-8948f79.jsonl`). The
+   *   quoted trailing-space row takes the same init-time path, but its `X-Frame-Options` was not
+   *   measured.
+   * - **The four `G-type-*` GET rows:** `Vary: Origin` is **measured parity**. Both stacks record
+   *   `vary: 'Origin'` in `~/.fondo-parity-harness/p8r/out/ro.jsonl`. `X-Frame-Options` there is
+   *   parity **inferred from code, not measured**. v1's Django-built 500 passes through
+   *   `XFrameOptionsMiddleware` (`Fondo-API/api/settings/base.py:45`), but `ro.jsonl` keeps no
+   *   full header record.
    */
   const expectUncaught500 = (response: request.Response): void => {
     expect(response.status).toBe(500);
     expect(response.headers.allow).toBeUndefined();
     expect(response.headers.vary).toBe('Origin');
+    expect(response.headers['x-frame-options']).toBe('SAMEORIGIN');
   };
 
   // ==========================================================================
