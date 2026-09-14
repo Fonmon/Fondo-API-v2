@@ -42,7 +42,7 @@ from arithmetic, and their sums reproduce both totals exactly:
 |---|---|---|---|---|
 | `python-lower.spec.ts` | — | **58** | +58 | new — 53 CPython context rows, two "the fixture still separates W1/W3 on this Node" cells, the all-code-point sweep, lone surrogate, both tables used |
 | `python-lower.fixture.spec.ts` | — | **8** | +8 | new — rule 15b shape of the four pinned tables + the capture sizes |
-| `drf-request-data.spec.ts` | — | **28** | +28 | new — `in` / `[]` over merged precedence, init-time and D22 classification |
+| `drf-request-data.spec.ts` | — | **28** | +28 | new — `in` / `[]` over merged precedence, init-time and D22 classification. ⚠️ This row was recorded before the review fix round. **Now 24**, with no D22 classification since `8948f79` (see "Gate for the review fix round") |
 | `file.service.spec.ts` | — | **42** | +42 | new — call sequences per v1 case, partial writes, `int()`, `lower()`, list, signed URL |
 | `file-storage.spec.ts` | — | **12** | +12 | new — the GCS adapter offline, and the `ENVIRONMENT` provider |
 | `admin.service.spec.ts` | — | **3** | +3 | new |
@@ -143,9 +143,11 @@ is in this change's diff.
   `expectUncaught500` boundary table.
 * Titles only, same assertions: the 24 `%i` titles (n4), and the boundary table's title, now
   `… → 500 without Allow, Vary: Origin only (v1: no Vary, P8-D4) …`.
-* `expectUncaught500` now asserts `vary === 'Origin'` (m1). Its other callers, the four `G-type-*`
-  uncaught GET 500s, pass under it. v1's `Vary` on those GET pages was not measured in this round,
-  so the helper claims no parity for them.
+* `expectUncaught500` now asserts `vary === 'Origin'` (m1). Its other callers are the four
+  `G-type-*` uncaught GET 500s, and they pass under it. For those four cells the `Vary: Origin` pin
+  **is parity**. `~/.fondo-parity-harness/p8r/out/ro.jsonl` records `vary: 'Origin'` and no
+  `Allow` on **both** stacks for `G-type-empty`, `G-type-bare`, `G-type-abc` and `G-type-1.0`, all
+  status 500. v1 sends no `Vary` only on the init-time multipart 500s (P8-D4, C85).
 
 ---
 
