@@ -269,8 +269,12 @@ Exception`, so v1 answers every invalid boundary with a **500** — and measured
 is the **141-byte double-fault page** with no `Allow`/`Vary` (the exception is raised in
 `MultiPartParser.__init__`, the view returns its 500, and Django's response handling re-reads
 `request.POST` and faults again). So on this route D22 produces **v1 500 / v2 400** for a
-non-ASCII boundary while an **empty** or **trailing-space** boundary — not D22's subject — is
-ported as **v1 500 / v2 500** (unmarked, no `Allow`/`Vary`). Either D22's row should say that on
+non-ASCII boundary while an **empty** or **quoted** trailing-space boundary — not D22's subject — is
+ported as **v1 500 / v2 500** (unmarked, no `Allow`; ⚠️ v1 sends no `Vary` and v2 sends `Vary: Origin`,
+measured by `manual-tester`). An **unquoted** trailing space never reaches the multipart parser on
+either stack — gunicorn and Node both strip it from the header — so that request succeeds **201 / 201**.
+An earlier version of this paragraph did not distinguish the two, having been measured through Django's
+test client, which keeps the space. Either D22's row should say that on
 `POST /api/file` its pair is 500/400, or the operator may prefer 500 here for consistency with
 the route's other invalid boundaries. I did not guess; §7.2.
 
@@ -579,7 +583,7 @@ catching a mutant.
 | # | what to expect |
 |---|---|
 | 1 | P8-D1: tied `created_at` rows may come back in a different relative order |
-| 2 | P8-D4: uncaught 500s are zero bytes in v2, HTML in v1; status and headers match |
+| 2 | P8-D4: uncaught 500s are zero bytes in v2, HTML in v1; status matches. ⚠️ **Headers do not all match** (measured by `manual-tester`, `docs/parity-phase-8.md` §2.4): on an init-time multipart 500, such as an empty boundary, v1 serves gunicorn's page with **no `Vary`** while v2 sends **`Vary: Origin`**. An earlier version of this row said the headers matched. |
 | 3 | §3: a **non-ASCII boundary** on `POST /api/file` is **400** in v2, **500** in v1 (D22, flagged) |
 | 4 | P8-F4: a name containing U+2028/U+2029 renders raw in v2, escaped in v1 |
 | 5 | P8-F5: two `file` parts on `PATCH /api/user` / `PATCH /api/loan` — v2 now matches v1 (the **second** part); a Phase 3/4 baseline recorded before this commit will differ |
