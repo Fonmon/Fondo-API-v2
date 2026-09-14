@@ -9,10 +9,13 @@ import { EmailTemplate } from '../mail/email-template';
 import type { MailService } from '../mail/mail.service';
 import type { NotificationService } from '../notifications/notification.service';
 import { DjangoPasswordService } from '../auth/password/django-password.service';
+import { SystemClock } from '../common/clock/clock';
 import { Prisma } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
+import * as activeMembers from './active-members.query';
 import {
   birthdayInYear,
+  nextBirthdayRunDate,
   normalizeEmail,
   normalizeUsername,
   resolveDetailUserId,
@@ -45,6 +48,147 @@ describe('UserService (unit)', () => {
     it('normalises compatibility characters', () => {
       // U+FF41 FULLWIDTH LATIN SMALL LETTER A -> 'a'
       expect(normalizeUsername('ａ@mail.com')).toBe('a@mail.com');
+    });
+  });
+
+  /**
+   * **D48 (Q47, C71)** — `nextBirthdayRunDate`. Every instant is written in UTC with its Bogota
+   * wall clock beside it; Bogota is UTC−05:00 with no DST. The harness host zone is UTC
+   * (`jest.config.ts`), so a host-zone read gives a different answer from a Bogota read at
+   * 10:00–13:59 Bogota and during 19:00–23:59 Bogota.
+   */
+  describe('nextBirthdayRunDate — deviation D48', () => {
+    const date = (iso: string): PlainDate => {
+      const [year, month, day] = iso.split('-').map(Number);
+      return { year, month, day };
+    };
+    const run = (birthdate: string, nowIso: string): PlainDate =>
+      nextBirthdayRunDate(date(birthdate), new Date(nowIso));
+
+    describe('birthday today, 2026-09-14', () => {
+      it.each([
+        ['before the 10:00 pass', '2026-09-14T13:00:00.000Z', '08:00', '2026-09-14'],
+        ['at the 10:00 pass', '2026-09-14T15:00:00.000Z', '10:00:00.000', '2026-09-14'],
+        ['between the two passes', '2026-09-14T17:30:00.000Z', '12:30', '2026-09-14'],
+        ['one millisecond before 14:00', '2026-09-14T18:59:59.999Z', '13:59:59.999', '2026-09-14'],
+        ['at the 14:00 pass', '2026-09-14T19:00:00.000Z', '14:00:00.000', '2027-09-14'],
+        ['after 14:00', '2026-09-14T22:00:00.000Z', '17:00', '2027-09-14'],
+        [
+          'at 23:59:59.999, when UTC is already the 15th',
+          '2026-09-15T04:59:59.999Z',
+          '23:59:59.999',
+          '2027-09-14',
+        ],
+        [
+          'at 00:00, the first instant of the day',
+          '2026-09-14T05:00:00.000Z',
+          '00:00',
+          '2026-09-14',
+        ],
+      ])('%s (%s = %s Bogota) → %s', (_label, nowIso, _wall, expected) => {
+        expect(run('1990-09-14', nowIso)).toEqual(date(expected));
+      });
+    });
+
+    it('birthday yesterday → next year', () => {
+      expect(run('1990-09-13', '2026-09-14T15:00:00.000Z')).toEqual(date('2027-09-13'));
+    });
+
+    it('birthday yesterday, read at 00:30 Bogota, before either pass → next year', () => {
+      // 2026-09-14 00:30 Bogota = 2026-09-14T05:30Z. Passes still to run today do not revive
+      // yesterday's birthday.
+      expect(run('1990-09-13', '2026-09-14T05:30:00.000Z')).toEqual(date('2027-09-13'));
+    });
+
+    it('birthday tomorrow → this year', () => {
+      expect(run('1990-09-15', '2026-09-14T22:00:00.000Z')).toEqual(date('2026-09-15'));
+    });
+
+    it('birthday tomorrow, read at 23:30 Bogota when it is already tomorrow in UTC → this year', () => {
+      expect(run('1990-09-15', '2026-09-15T04:30:00.000Z')).toEqual(date('2026-09-15'));
+    });
+
+    describe('31 December → 1 January in Bogota, while UTC is already the next day', () => {
+      /** 2026-12-31 20:00 Bogota = 2027-01-01T01:00Z. */
+      const NEW_YEARS_EVE_EVENING = '2027-01-01T01:00:00.000Z';
+
+      it('a 31 December birthday, after the 14:00 pass → 2027-12-31', () => {
+        expect(run('1990-12-31', NEW_YEARS_EVE_EVENING)).toEqual(date('2027-12-31'));
+      });
+
+      it('a 1 January birthday → 2027-01-01: tomorrow in Bogota, not "today after 14:00" in UTC', () => {
+        expect(run('1990-01-01', NEW_YEARS_EVE_EVENING)).toEqual(date('2027-01-01'));
+      });
+
+      it('a 31 December birthday, at 13:59:59.999 on the 31st → 2026-12-31', () => {
+        expect(run('1990-12-31', '2026-12-31T18:59:59.999Z')).toEqual(date('2026-12-31'));
+      });
+
+      it('a 1 January birthday at 00:00 Bogota on 1 January → 2027-01-01, today with both passes ahead', () => {
+        expect(run('1990-01-01', '2027-01-01T05:00:00.000Z')).toEqual(date('2027-01-01'));
+      });
+    });
+
+    describe('29 February (D19 applies to the chosen year)', () => {
+      it('chosen year is a leap year: 2027-06-01 → 2028-02-29 (the next-year branch)', () => {
+        expect(run('2000-02-29', '2027-06-01T17:00:00.000Z')).toEqual(date('2028-02-29'));
+      });
+
+      it('chosen year is not a leap year: 2026-06-01 → 2027-02-28 (the next-year branch)', () => {
+        expect(run('2000-02-29', '2026-06-01T17:00:00.000Z')).toEqual(date('2027-02-28'));
+      });
+
+      it('chosen year is a leap year: 2028-01-10 → 2028-02-29 (the this-year branch)', () => {
+        expect(run('2000-02-29', '2028-01-10T17:00:00.000Z')).toEqual(date('2028-02-29'));
+      });
+
+      it('chosen year is not a leap year: 2026-01-10 → 2026-02-28 (the this-year branch)', () => {
+        expect(run('2000-02-29', '2026-01-10T17:00:00.000Z')).toEqual(date('2026-02-28'));
+      });
+
+      it('on 28 February of a non-leap year before 14:00 it is the birthday today → 2027-02-28', () => {
+        expect(run('2000-02-29', '2027-02-28T18:00:00.000Z')).toEqual(date('2027-02-28'));
+      });
+
+      it('on 28 February of a non-leap year after 14:00 it has been missed → 2028-02-29', () => {
+        expect(run('2000-02-29', '2027-02-28T20:00:00.000Z')).toEqual(date('2028-02-29'));
+      });
+    });
+
+    it('Q36 — Ainhoa, 2020-08-05, saved on 2026-09-14 → 2027-08-05', () => {
+      expect(run('2020-08-05', '2026-09-14T17:00:00.000Z')).toEqual(date('2027-08-05'));
+    });
+
+    it('honours an explicit time zone instead of reading any other', () => {
+      // 2026-09-14T18:30Z is 13:30 in Bogota and 14:30 in UTC.
+      expect(nextBirthdayRunDate(date('1990-09-14'), new Date('2026-09-14T18:30:00.000Z'))).toEqual(
+        date('2026-09-14'),
+      );
+      expect(
+        nextBirthdayRunDate(date('1990-09-14'), new Date('2026-09-14T18:30:00.000Z'), 'UTC'),
+      ).toEqual(date('2027-09-14'));
+    });
+  });
+
+  describe('getUserIds — the active-member query shared with D49', () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('goes through findActiveMemberIds, the query MemberDirectory also uses', async () => {
+      const shared = jest.spyOn(activeMembers, 'findActiveMemberIds').mockResolvedValue([4]);
+      const prisma = {};
+      const service = new UserService(
+        prisma as unknown as PrismaService,
+        {} as MailService,
+        {} as NotificationService,
+        new DjangoPasswordService(),
+        {} as AppConfigService,
+        new SystemClock(),
+      );
+
+      await expect(service.getUserIds([1, 2])).resolves.toEqual([4]);
+      expect(shared).toHaveBeenCalledWith(prisma, [1, 2]);
     });
   });
 
@@ -139,6 +283,7 @@ describe('UserService (unit)', () => {
         notifications as unknown as NotificationService,
         new DjangoPasswordService(),
         config,
+        new SystemClock(),
       );
     });
 
@@ -244,6 +389,7 @@ describe('UserService (unit)', () => {
         {} as NotificationService,
         new DjangoPasswordService(),
         {} as AppConfigService,
+        new SystemClock(),
       );
     };
 
@@ -291,6 +437,7 @@ describe('UserService (unit)', () => {
         {} as NotificationService,
         new DjangoPasswordService(),
         {} as AppConfigService,
+        new SystemClock(),
       );
       void service.getUserByEmail('shared@mail.com');
       expect(prisma.authUser.findMany).toHaveBeenCalledWith(
@@ -383,6 +530,7 @@ describe('UserService (unit)', () => {
           {} as NotificationService,
           new DjangoPasswordService(),
           {} as AppConfigService,
+          new SystemClock(),
         ),
       };
     };
@@ -445,11 +593,15 @@ describe('UserService (unit)', () => {
       profile: { role: Role.MEMBER, identification: 1n },
     };
 
+    /**
+     * Phase 8b: the instant reaches `UserService` through its injected `Clock`, not through
+     * `jest.useFakeTimers()`. A global fake clock would also have fed `SystemClock`; this way
+     * the cell fails if the service stops asking its clock.
+     */
     const scheduleFor = async (
       nowIso: string,
     ): Promise<{ year: number; month: number; day: number }> => {
-      jest.useFakeTimers().setSystemTime(new Date(nowIso));
-      try {
+      {
         const notifications = {
           removeSchNotifications: jest.fn().mockResolvedValue(0),
           scheduleNotification: jest.fn().mockResolvedValue(undefined),
@@ -479,6 +631,7 @@ describe('UserService (unit)', () => {
           notifications as unknown as NotificationService,
           new DjangoPasswordService(),
           {} as AppConfigService,
+          { now: () => new Date(nowIso) },
         );
 
         await service.updateUser(member, 5, {
@@ -495,14 +648,24 @@ describe('UserService (unit)', () => {
 
         expect(notifications.scheduleNotification).toHaveBeenCalledTimes(1);
         return (notifications.scheduleNotification.mock.calls[0] as [PlainDate])[0];
-      } finally {
-        jest.useRealTimers();
       }
     };
 
-    it('schedules in 2025 at 2026-01-01T02:00Z — still 31 December in Bogota', async () => {
+    /**
+     * ⚠️ **D48 re-pin (Phase 8b).** Until `11b8c5a` this cell expected **2025**-11-07: v1's
+     * `replace(year=today_year)` with Bogota's year, 2025, although 7 November 2025 had already
+     * passed on 31 December 2025. Under D48 that date is missed, so the row is 2026-11-07.
+     *
+     * ⚠️ Under the harness's `TZ=UTC` this cell no longer discriminates a host-zone year (C28).
+     * At 21:00 on 31 December in Bogota every anniversary in the Bogota year has passed, so D48
+     * picks year + 1, which is also what a UTC host reads. That agreement is not equivalence: a
+     * host more than ten hours ahead of Bogota disagrees before 14:00 on 31 December. The cell that
+     * catches it runs in a child process under such a zone,
+     * `birthday-run-date.host-zone.spec.ts` (mutant M3, `docs/phase-8b-deviations.md` §5.3).
+     */
+    it('schedules 2026-11-07 at 2026-01-01T02:00Z — 31 December 2025 in Bogota, 7 November already passed (D48 re-pin)', async () => {
       await expect(scheduleFor('2026-01-01T02:00:00.000Z')).resolves.toEqual({
-        year: 2025,
+        year: 2026,
         month: 11,
         day: 7,
       });
@@ -545,6 +708,7 @@ describe('UserService (unit)', () => {
         {} as NotificationService,
         new DjangoPasswordService(),
         {} as AppConfigService,
+        new SystemClock(),
       );
 
     it('403s a declared finance write before any lookup, so ids cannot be enumerated', async () => {

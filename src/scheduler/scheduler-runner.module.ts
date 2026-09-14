@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
 import { AppConfigModule } from '../config/config.module';
 import { NotificationModule } from '../notifications/notification.module';
+import { PrismaModule } from '../prisma/prisma.module';
 import { SavingAccountModule } from '../saving-accounts/saving-account.module';
+import { MemberDirectory } from './member-directory';
 import { ExecuterFactory } from './executers/executer.factory';
 import { NotificationExecuter } from './executers/notification.executer';
 import { SavingAccountCloseExecuter } from './executers/saving-account-close.executer';
@@ -36,8 +38,21 @@ import { SchedulerRunner } from './scheduler.runner';
  * the beat container". See `env.schema.ts`.
  */
 @Module({
-  imports: [AppConfigModule, SchedulerModule, NotificationModule, SavingAccountModule],
-  providers: [NotificationExecuter, SavingAccountCloseExecuter, ExecuterFactory, SchedulerRunner],
+  imports: [
+    AppConfigModule,
+    PrismaModule,
+    SchedulerModule,
+    NotificationModule,
+    SavingAccountModule,
+  ],
+  providers: [
+    NotificationExecuter,
+    SavingAccountCloseExecuter,
+    ExecuterFactory,
+    SchedulerRunner,
+    // Phase 8b: D39's owner check and D49's send-time recipients.
+    MemberDirectory,
+  ],
   exports: [SchedulerRunner, ExecuterFactory],
 })
 export class SchedulerRunnerModule {}

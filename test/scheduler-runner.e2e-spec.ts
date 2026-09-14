@@ -297,13 +297,20 @@ describe('Phase 7b — scheduler runner', () => {
       expect(body.startsWith('{"subscriptions": [{"keys": {"p256dh": ')).toBe(true);
     });
 
+    /**
+     * ⚠️ **Re-subjected in Phase 8b (D39, D49).** Until `11b8c5a` this used a *birthday* payload
+     * with `owner_id` 5, a user this suite never seeds. Under D39 that owner is `missing` and
+     * nothing is sent; under D49 a birthday's stored list no longer picks the audience. The
+     * property the cell pins — stored ids resolve to every device of every listed member — is
+     * v1's path, which payment reminders still take, so it now uses one.
+     */
     it('resolves user_ids to every subscribed device of every listed member', async () => {
       await insertRawSubscription(prisma, member.id, REAL_FCM_ROW);
       await insertRawSubscription(prisma, other.id, REAL_APPLE_ROW);
       await insertTask({
         runDateIso: '2026-09-07T05:00:00.000Z',
         payload:
-          '"type"=>"birthdate", "target"=>"/", "message"=>"Hoy está cumpliendo años X", ' +
+          '"type"=>"payment_reminder", "target"=>"/loan/5", "message"=>"X", ' +
           `"owner_id"=>"5", "user_ids"=>"[${member.id}, ${other.id}]"`,
       });
 
@@ -672,6 +679,215 @@ describe('Phase 7b — scheduler runner', () => {
 
       expect(sqs.send).toHaveBeenCalledTimes(1);
       expect((await allTasks())[0].processed).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 8b — D39 and D49, against real auth_user rows
+  // -------------------------------------------------------------------------
+
+  describe('Phase 8b — a birthday task at send time (D39, D49)', () => {
+    let owner: SeededUser;
+    let joiner: SeededUser;
+    let leaver: SeededUser;
+    /** Each member's one device, tagged so a body can be read back as a set of members. */
+    let tags: Map<number, string>;
+
+    const BIRTHDAY = '2026-09-07T05:00:00.000Z';
+    /** 2027-09-07 10:00 Bogota — the clone's own day, a year on. */
+    const NEXT_YEAR = new Date('2027-09-07T15:00:00.000Z');
+
+    function birthdayPayload(ownerId: number | string, stored: readonly number[]): string {
+      return (
+        '"type"=>"birthdate", "target"=>"/", ' +
+        '"message"=>"Hoy está cumpliendo años Cumple Añero", ' +
+        `"owner_id"=>"${ownerId}", "user_ids"=>"[${stored.join(', ')}]"`
+      );
+    }
+
+    /** The tags whose devices a published body carries, sorted. */
+    function recipientsOf(body: string): string[] {
+      return [...tags.values()].filter((tag) => body.includes(`/fcm/send/${tag}`)).sort();
+    }
+
+    function tagsOf(...users: SeededUser[]): string[] {
+      return users.map((user) => tags.get(user.id) as string).sort();
+    }
+
+    beforeAll(async () => {
+      owner = await seedUser(prisma, {
+        email: 'owner-8b@mail.com',
+        identification: 8001n,
+        role: Role.MEMBER,
+        firstName: 'Cumple',
+        lastName: 'Añero',
+      });
+      joiner = await seedUser(prisma, {
+        email: 'joiner-8b@mail.com',
+        identification: 8002n,
+        role: Role.MEMBER,
+      });
+      leaver = await seedUser(prisma, {
+        email: 'leaver-8b@mail.com',
+        identification: 8003n,
+        role: Role.MEMBER,
+      });
+      tags = new Map([
+        [member.id, 'MEMBER8B'],
+        [other.id, 'OTHER8B'],
+        [owner.id, 'OWNER8B'],
+        [joiner.id, 'JOINER8B'],
+        [leaver.id, 'LEAVER8B'],
+      ]);
+    });
+
+    beforeEach(async () => {
+      await prisma.authUser.updateMany({ data: { is_active: true } });
+      for (const [userId, tag] of tags) {
+        await insertRawSubscription(
+          prisma,
+          userId,
+          REAL_FCM_ROW.replace('/fcm/send/', `/fcm/send/${tag}`),
+        );
+      }
+    });
+
+    afterAll(async () => {
+      await prisma.authUser.updateMany({ data: { is_active: true } });
+    });
+
+    const setActive = (user: SeededUser, isActive: boolean): Promise<unknown> =>
+      prisma.authUser.update({ where: { id: user.id }, data: { is_active: isActive } });
+
+    it('D39 — inactive owner: nothing sent, row processed, successor cloned with the same payload', async () => {
+      await setActive(owner, false);
+      const payload = birthdayPayload(owner.id, [member.id, other.id, joiner.id, leaver.id]);
+      const id = await insertTask({ runDateIso: BIRTHDAY, payload, repeat: 4 });
+
+      const summary = await runner.run(TODAY);
+
+      expect(sqs.send).not.toHaveBeenCalled();
+      expect(summary).toEqual({
+        loaded: 1,
+        processed: 1,
+        failedDelivery: 0,
+        skippedClaimed: 0,
+        errored: 0,
+        cloned: 1,
+      });
+      const rows = await allTasks();
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({ id, type: 0, repeat: 4, processed: true });
+      expect(rows[1]).toMatchObject({ type: 0, repeat: 4, processed: false });
+      expect(rows[1].run_date.toISOString()).toBe('2027-09-07T05:00:00.000Z');
+      expect(rows[1].payload).toBe(payload);
+    });
+
+    it('D39 / Q48 — reactivated owner: next year’s greeting goes out with no other action', async () => {
+      await setActive(owner, false);
+      await insertTask({
+        runDateIso: BIRTHDAY,
+        payload: birthdayPayload(owner.id, [member.id, other.id]),
+        repeat: 4,
+      });
+      await runner.run(TODAY);
+      expect(sqs.send).not.toHaveBeenCalled();
+
+      await setActive(owner, true);
+      const summary = await runner.run(NEXT_YEAR);
+
+      expect(summary).toMatchObject({ loaded: 1, processed: 1, failedDelivery: 0, cloned: 1 });
+      expect(sqs.send).toHaveBeenCalledTimes(1);
+      expect(recipientsOf(sentBodies()[0])).toEqual(tagsOf(member, other, joiner, leaver));
+      const rows = await allTasks();
+      expect(rows.map((row) => [row.run_date.toISOString(), row.processed])).toEqual([
+        ['2026-09-07T05:00:00.000Z', true],
+        ['2027-09-07T05:00:00.000Z', true],
+        ['2028-09-07T05:00:00.000Z', false],
+      ]);
+    });
+
+    it('D39 — active owner: announced, processed and cloned as before', async () => {
+      await insertTask({
+        runDateIso: BIRTHDAY,
+        payload: birthdayPayload(owner.id, [member.id, other.id]),
+        repeat: 4,
+      });
+
+      const summary = await runner.run(TODAY);
+
+      expect(summary).toMatchObject({ processed: 1, failedDelivery: 0, errored: 0, cloned: 1 });
+      expect(sqs.send).toHaveBeenCalledTimes(1);
+      // CPython `json.dumps` escaping (rule 5d) is unchanged on this path.
+      expect(sentBodies()[0]).toContain(
+        '"message": {"body": "Hoy est\\u00e1 cumpliendo a\\u00f1os Cumple A\\u00f1ero", "target": "/"}',
+      );
+    });
+
+    it('D49 — a member who joined after the chain was written receives the greeting', async () => {
+      await insertTask({
+        runDateIso: BIRTHDAY,
+        // Written before `joiner` existed: the stored list does not name them.
+        payload: birthdayPayload(owner.id, [member.id, other.id]),
+        repeat: 4,
+      });
+
+      await runner.run(TODAY);
+
+      expect(recipientsOf(sentBodies()[0])).toContain('JOINER8B');
+    });
+
+    it('D49 — a member who has left does not, although the stored list names them', async () => {
+      await setActive(leaver, false);
+      await insertTask({
+        runDateIso: BIRTHDAY,
+        payload: birthdayPayload(owner.id, [member.id, other.id, leaver.id]),
+        repeat: 4,
+      });
+
+      await runner.run(TODAY);
+
+      expect(recipientsOf(sentBodies()[0])).toEqual(tagsOf(member, other, joiner));
+    });
+
+    it('D49 — the owner is excluded, even from a hand-written list that names them', async () => {
+      await insertTask({
+        runDateIso: BIRTHDAY,
+        payload: birthdayPayload(owner.id, [owner.id, member.id]),
+        repeat: 4,
+      });
+
+      await runner.run(TODAY);
+
+      expect(recipientsOf(sentBodies()[0])).toEqual(tagsOf(member, other, joiner, leaver));
+    });
+
+    it('D39/D49 do not touch a payment reminder: stored list, no activity filter, no owner check', async () => {
+      await setActive(leaver, false);
+      // owner_id 412 is a loan id with no auth_user row; `leaver` is inactive.
+      await insertTask({
+        runDateIso: BIRTHDAY,
+        payload: reminderPayload(412, leaver.id, '12 sep. 2026'),
+      });
+
+      const summary = await runner.run(TODAY);
+
+      expect(summary).toMatchObject({ processed: 1, failedDelivery: 0 });
+      expect(sqs.send).toHaveBeenCalledTimes(1);
+      expect(recipientsOf(sentBodies()[0])).toEqual(['LEAVER8B']);
+    });
+
+    it('§2.2 — owner with no auth_user row: nothing sent, processed, cloned, counted as failed', async () => {
+      const payload = birthdayPayload(999999, [member.id, other.id]);
+      await insertTask({ runDateIso: BIRTHDAY, payload, repeat: 4 });
+
+      const summary = await runner.run(TODAY);
+
+      expect(sqs.send).not.toHaveBeenCalled();
+      expect(summary).toMatchObject({ processed: 1, failedDelivery: 1, errored: 0, cloned: 1 });
+      const rows = await allTasks();
+      expect(rows[0].processed).toBe(true);
+      expect(rows[1].payload).toBe(payload);
     });
   });
 });

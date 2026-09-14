@@ -1,6 +1,7 @@
 import type { AppConfigService } from '../config/app-config.service';
 import { BOGOTA_TIME_ZONE } from '../common/utils/timezone.util';
 import type { ExecuterFactory } from './executers/executer.factory';
+import { LAST_SCHEDULER_PASS_HOUR, SCHEDULER_PASS_HOURS } from './scheduler-passes';
 import type { DueSchedulerTask, SchedulerTaskRepository } from './scheduler-task.repository';
 import { SCHEDULER_CRON_EXPRESSION, SCHEDULER_CRON_JOB, SchedulerRunner } from './scheduler.runner';
 
@@ -109,6 +110,19 @@ describe('SchedulerRunner', () => {
 
     it('exports the expression it registers', () => {
       expect(SCHEDULER_CRON_EXPRESSION).toBe('0 10,14 * * *');
+    });
+
+    /**
+     * **Phase 8b / D48.** `nextBirthdayRunDate` decides "a pass is still to run today" from
+     * `SCHEDULER_PASS_HOURS`, not from the cron text. This cell is the check that the two agree.
+     */
+    it('agrees with SCHEDULER_PASS_HOURS, which D48 reads', () => {
+      const [minute, hour, ...rest] = SCHEDULER_CRON_EXPRESSION.split(' ');
+
+      expect(minute).toBe('0');
+      expect(hour.split(',').map(Number)).toEqual(SCHEDULER_PASS_HOURS);
+      expect(rest).toEqual(['*', '*', '*']);
+      expect(LAST_SCHEDULER_PASS_HOUR).toBe(14);
     });
   });
 

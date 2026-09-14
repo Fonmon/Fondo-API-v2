@@ -5,11 +5,15 @@ import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { Role } from '../src/auth/permissions/roles';
 import { NEST_APPLICATION_OPTIONS } from '../src/bootstrap';
+import { Clock } from '../src/common/clock/clock';
 import { ApiExceptionFilter } from '../src/common/filters/api-exception.filter';
 import { EmailTemplate } from '../src/mail/email-template';
 import { MailService } from '../src/mail/mail.service';
 import { NotificationService } from '../src/notifications/notification.service';
+import { SQS_CLIENT } from '../src/notifications/sqs.client';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { SchedulerRunner } from '../src/scheduler/scheduler.runner';
+import { REAL_FCM_ROW } from './support/push-subscription.fixture';
 import {
   authHeader,
   obtainToken,
@@ -55,6 +59,14 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
   let missingId: number;
 
   const sendMail = jest.fn<Promise<boolean>, unknown[]>();
+
+  /**
+   * **Phase 8b / D48.** `UserService`'s clock. `undefined` is the real clock, which every cell
+   * written before Phase 8b uses; a cell that pins a birthday `run_date` sets an instant, and
+   * `beforeEach` puts it back.
+   */
+  let clockNow: Date | undefined;
+  const clock: Clock = { now: (): Date => clockNow ?? new Date() };
 
   // `setUp`'s JSON fixtures, transcribed from `test_user_views.py:23-113`.
   const objectJson = {
@@ -150,6 +162,8 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
     })
       .overrideProvider(MailService)
       .useValue({ sendMail })
+      .overrideProvider(Clock)
+      .useValue(clock)
       .compile();
 
     app = moduleFixture.createNestApplication(NEST_APPLICATION_OPTIONS);
@@ -168,6 +182,7 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
   beforeEach(async () => {
     sendMail.mockReset();
     sendMail.mockResolvedValue(true);
+    clockNow = undefined;
     await resetDatabase(prisma);
 
     // `AbstractTest.create_user()` — one ADMIN, identification 99999.
@@ -1116,7 +1131,14 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
       expect(parsed).not.toContain(members[0].id);
     });
 
+    /**
+     * ⚠️ **D48 re-pin (Phase 8b).** Until `11b8c5a` this ran on the real clock and pinned only
+     * the month and day (`'01-02'`), and the row it checked was `<this year>-01-02` — a date that
+     * had already passed on every day after 2 January. The clock is now fixed and the whole
+     * instant is pinned: 2 January has passed on 2026-09-14, so the row is **2027**-01-02.
+     */
     it('replaces the task when the birthdate changes, rather than accumulating', async () => {
+      clockNow = new Date('2026-09-14T17:00:00.000Z');
       await patchBirthdate(members[0].id, '1995-11-07').expect(200);
       await patchBirthdate(members[0].id, '1990-01-02').expect(200);
 
@@ -1124,7 +1146,7 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
       const [row] = await prisma.$queryRaw<{ run_date: Date }[]>`
         SELECT run_date FROM fondo_api_schedulertask
       `;
-      expect(row.run_date.toISOString().slice(5, 10)).toBe('01-02');
+      expect(row.run_date.toISOString()).toBe('2027-01-02T05:00:00.000Z');
     });
 
     /**
@@ -1155,15 +1177,152 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
      * 500s and rolls the edit back. v2 clamps to 28 February — where `relativedelta(years=+1)`
      * puts it, so the first task agrees with every yearly clone of itself.
      */
+    /**
+     * ⚠️ **D48 re-pin (Phase 8b).** Until `11b8c5a` this cell computed its expectation from
+     * `new Date().getFullYear()` — the *host* zone's current year — and pinned only the month
+     * and day. Under D48 the chosen year is not the current year once 29 February has passed, so
+     * that expectation is wrong in every September before a leap year (in September 2027 the
+     * row is 2028-02-29, and the old cell expected 02-28). The clock is fixed and the instant
+     * pinned. The chosen year, 2027, is not the year the clock reads.
+     */
     it('D19: a 29 February birthdate saves, and schedules 28 February in a non-leap year', async () => {
+      clockNow = new Date('2026-09-14T17:00:00.000Z');
       await patchBirthdate(members[2].id, '2000-02-29').expect(200);
 
       const [row] = await prisma.$queryRaw<{ run_date: Date }[]>`
         SELECT run_date FROM fondo_api_schedulertask
       `;
-      const year = new Date().getFullYear();
-      const isLeap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-      expect(row.run_date.toISOString().slice(5, 10)).toBe(isLeap ? '02-29' : '02-28');
+      expect(row.run_date.toISOString()).toBe('2027-02-28T05:00:00.000Z');
+    });
+
+    it('D19 × D48: a 29 February birthdate keeps 29 February when the chosen year is a leap year', async () => {
+      clockNow = new Date('2027-09-14T17:00:00.000Z');
+      await patchBirthdate(members[2].id, '2000-02-29').expect(200);
+
+      const [row] = await prisma.$queryRaw<{ run_date: Date }[]>`
+        SELECT run_date FROM fondo_api_schedulertask
+      `;
+      expect(row.run_date.toISOString()).toBe('2028-02-29T05:00:00.000Z');
+    });
+
+    describe('D48 — the next birthday not yet missed (Q47, C71)', () => {
+      const runDateAfterSaving = async (nowIso: string, birthdate: string): Promise<string> => {
+        clockNow = new Date(nowIso);
+        await patchBirthdate(members[5].id, birthdate).expect(200);
+        const rows = await prisma.$queryRaw<{ run_date: Date }[]>`
+          SELECT run_date FROM fondo_api_schedulertask
+        `;
+        expect(rows).toHaveLength(1);
+        return rows[0].run_date.toISOString();
+      };
+
+      it('birthday today, saved at 13:59:59.999 Bogota: the 14:00 pass is still to run, so today', async () => {
+        await expect(runDateAfterSaving('2026-09-14T18:59:59.999Z', '1990-09-14')).resolves.toBe(
+          '2026-09-14T05:00:00.000Z',
+        );
+      });
+
+      it('birthday today, saved at 14:00:00.000 Bogota: the last pass has started, so next year', async () => {
+        await expect(runDateAfterSaving('2026-09-14T19:00:00.000Z', '1990-09-14')).resolves.toBe(
+          '2027-09-14T05:00:00.000Z',
+        );
+      });
+
+      it('birthday yesterday: next year, never a past date', async () => {
+        await expect(runDateAfterSaving('2026-09-14T17:00:00.000Z', '1990-09-13')).resolves.toBe(
+          '2027-09-13T05:00:00.000Z',
+        );
+      });
+
+      /**
+       * **Q36 — Ainhoa (user 14, birthdate 2020-08-05).** Her chain was never created; the
+       * operator chose to start it by fixing C71 instead of a one-off insert. Saving her profile
+       * after 5 August writes next year's task, the 2027-08-05 shape, and nothing else.
+       */
+      it('Q36: saving a birthdate whose anniversary already passed writes next year’s run_date, with no manual insert', async () => {
+        await expect(prisma.schedulerTask.count()).resolves.toBe(0);
+
+        await expect(runDateAfterSaving('2026-09-14T17:00:00.000Z', '2020-08-05')).resolves.toBe(
+          '2027-08-05T05:00:00.000Z',
+        );
+        const [row] = await prisma.$queryRaw<
+          { payload: string; repeat: number; processed: boolean }[]
+        >`
+          SELECT payload::text AS payload, repeat, processed FROM fondo_api_schedulertask
+        `;
+        expect(row).toMatchObject({ repeat: 4, processed: false });
+        expect(row.payload).toContain(`"owner_id"=>"${members[5].id}"`);
+      });
+
+      /**
+       * **Runner e2e, end to end on `fondo_api_test`.** The row the PATCH wrote is the row the
+       * scheduler runs: D48 picks the day, and on that day D49 picks the audience from the
+       * members active *then* — one has left and one has joined since the save.
+       */
+      it('Phase 8b end to end: the task PATCH writes is run on the birthday, to the members active then', async () => {
+        const owner = members[5];
+        await expect(runDateAfterSaving('2026-09-14T17:00:00.000Z', '1990-10-01')).resolves.toBe(
+          '2026-10-01T05:00:00.000Z',
+        );
+
+        await prisma.authUser.update({ where: { id: members[6].id }, data: { is_active: false } });
+        const joiner = await seedUser(prisma, {
+          email: 'joiner-8b@mail.com',
+          identification: 808080n,
+          role: Role.MEMBER,
+        });
+        const tagged: [number, string][] = [
+          [owner.id, 'OWNER8B'],
+          [members[6].id, 'LEAVER8B'],
+          [members[7].id, 'STAYER8B'],
+          [joiner.id, 'JOINER8B'],
+        ];
+        for (const [userId, tag] of tagged) {
+          await prisma.$executeRawUnsafe(
+            'INSERT INTO fondo_api_notificationsubscriptions (user_id, subscription) ' +
+              'VALUES ($1, $2::hstore)',
+            userId,
+            REAL_FCM_ROW.replace('/fcm/send/', `/fcm/send/${tag}`),
+          );
+        }
+
+        // ⚠️ No real SQS: the one client this cell's pass can reach is stubbed for the cell.
+        const sqs = app.get<{ send: (...args: unknown[]) => Promise<unknown> }>(SQS_CLIENT);
+        const send = jest.spyOn(sqs, 'send').mockResolvedValue({ MessageId: 'msg-8b' });
+        let summary;
+        let calls: unknown[][];
+        try {
+          // 2026-10-01 10:00 Bogota — the birthday's first pass.
+          summary = await app.get(SchedulerRunner).run(new Date('2026-10-01T15:00:00.000Z'));
+        } finally {
+          // `mockRestore` clears `mock.calls`, so the calls are copied out first.
+          calls = [...send.mock.calls];
+          send.mockRestore();
+        }
+
+        expect(summary).toEqual({
+          loaded: 1,
+          processed: 1,
+          failedDelivery: 0,
+          skippedClaimed: 0,
+          errored: 0,
+          cloned: 1,
+        });
+        expect(calls).toHaveLength(1);
+        const body = (calls[0][0] as { input: { MessageBody: string } }).input.MessageBody;
+        const received = tagged
+          .map(([, tag]) => tag)
+          .filter((tag) => body.includes(`/send/${tag}`));
+        expect(received.sort()).toEqual(['JOINER8B', 'STAYER8B']);
+
+        const rows = await prisma.$queryRaw<{ run_date: Date; processed: boolean }[]>`
+          SELECT run_date, processed FROM fondo_api_schedulertask ORDER BY id
+        `;
+        expect(rows.map((row) => [row.run_date.toISOString(), row.processed])).toEqual([
+          ['2026-10-01T05:00:00.000Z', true],
+          ['2027-10-01T05:00:00.000Z', false],
+        ]);
+      });
     });
 
     it('a personal update without a birthdate key writes no task at all', async () => {

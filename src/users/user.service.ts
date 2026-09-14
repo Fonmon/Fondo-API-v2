@@ -27,8 +27,10 @@ import {
   nowInstant,
   plainDateToUtcDate,
   todayForAutoNowDateColumn,
-  todayInBogota,
 } from '../common/utils/timezone.util';
+import { Clock } from '../common/clock/clock';
+import { nextBirthdayRunDate } from './birthday-run-date';
+import { findActiveMemberIds, type UserProfileReader } from './active-members.query';
 import { AppConfigService } from '../config/app-config.service';
 import { EmailTemplate } from '../mail/email-template';
 import { MailService } from '../mail/mail.service';
@@ -119,6 +121,8 @@ export class UserService {
     private readonly notifications: NotificationService,
     private readonly passwords: DjangoPasswordService,
     private readonly config: AppConfigService,
+    /** Phase 8b / D48: the birthday task's run date depends on the Bogotá wall clock. */
+    private readonly clock: Clock,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -420,14 +424,8 @@ export class UserService {
     roles?: readonly number[],
     client: UserProfileReader = this.prisma,
   ): Promise<number[]> {
-    const users = await client.userProfile.findMany({
-      where: {
-        auth_user: { is_active: true },
-        ...(roles === undefined ? {} : { role: { in: [...roles] } }),
-      },
-      select: { user_ptr_id: true },
-    });
-    return users.map((user) => user.user_ptr_id);
+    // Phase 8b: one definition of "active member", shared with D49's send-time recipients.
+    return findActiveMemberIds(client, roles);
   }
 
   /** `get_users_attr('email', roles)`. */
@@ -774,13 +772,10 @@ export class UserService {
     user: { id: number; firstName: string | null; lastName: string | null; birthdate: PlainDate },
     tx: Prisma.TransactionClient,
   ): Promise<void> {
-    // ⚠️ Bogota, never the host zone (plan §4 rule 5, review C28). `datetime.now()` in v1 is
-    // process-local and Django pins the process zone to `TIME_ZONE = 'America/Bogota'`
-    // (`django/conf/__init__.py::Settings.__init__`), so between 00:00 and 05:00 UTC a
-    // `new Date().getFullYear()` on a UTC host is a year AHEAD of v1 — on 1 January it writes
-    // the birthday task a full year out, and `repeat = 4` clones that error forward.
-    const thisYear = todayInBogota().year;
-    const runDate = birthdayInYear(user.birthdate, thisYear);
+    // ⚠️ D48 (Q47): the next anniversary not yet missed, in Bogota, never the host zone
+    // (plan §4 rule 5, review C28). v1 writes `replace(year=today_year)` even when that date
+    // has already passed. See {@link nextBirthdayRunDate}.
+    const runDate = nextBirthdayRunDate(user.birthdate, this.clock.now());
 
     // Read through the transaction client: v1 runs this inside `transaction.atomic()`, so it
     // must see the same snapshot as the write that follows it.
@@ -1196,10 +1191,6 @@ export class UserService {
 type UserSqlClient =
   Pick<PrismaService, 'userFinance'> | Pick<Prisma.TransactionClient, 'userFinance'>;
 
-/** Same reasoning as {@link UserSqlClient}, for the `user_ids` read inside the atomic block. */
-type UserProfileReader =
-  Pick<PrismaService, 'userProfile'> | Pick<Prisma.TransactionClient, 'userProfile'>;
-
 /** Internal marker so the bare-except port does not log a legitimate 404 as a failure. */
 class PreferencesNotFound extends Error {}
 
@@ -1290,24 +1281,6 @@ function parseBirthdate(value: unknown): PlainDate {
 }
 
 /**
- * `birthdate.replace(year=today_year)` with **D19**'s clamp.
- *
- * 29 February exists only in a leap year; `.replace` raises `ValueError` in every other one.
- * v2 moves the notification to **28 February**, which is where `relativedelta(years=+1)` —
- * and therefore Phase 7's own yearly clone of this very task — puts it.
- */
-export function birthdayInYear(birthdate: PlainDate, year: number): PlainDate {
-  if (birthdate.month === 2 && birthdate.day === 29 && !isLeapYear(year)) {
-    return { year, month: 2, day: 28 };
-  }
-  return { year, month: birthdate.month, day: birthdate.day };
-}
-
-function isLeapYear(year: number): boolean {
-  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-}
-
-/**
  * v1's `-1 == me`, applied **per verb** — deviation **D14**.
  *
  * ```python
@@ -1336,3 +1309,6 @@ export function resolveDetailUserId(
   }
   return requestedId;
 }
+
+/** Phase 8b: moved to `birthday-run-date.ts`; re-exported so existing imports keep working. */
+export { birthdayInYear, nextBirthdayRunDate } from './birthday-run-date';

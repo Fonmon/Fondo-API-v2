@@ -1,10 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
   decodeSchedulerPayload,
   type HstoreMap,
   type HstoreValue,
 } from '../../common/utils/hstore.codec';
 import { NotificationService } from '../../notifications/notification.service';
+import { MemberDirectory } from '../member-directory';
 import type { SchedulerExecuter, SchedulerExecuterOutcome } from './scheduler-executer';
 
 /**
@@ -39,20 +40,96 @@ import type { SchedulerExecuter, SchedulerExecuterOutcome } from './scheduler-ex
  */
 @Injectable()
 export class NotificationExecuter implements SchedulerExecuter {
-  constructor(private readonly notifications: NotificationService) {}
+  private readonly logger = new Logger(NotificationExecuter.name);
 
+  constructor(
+    private readonly notifications: NotificationService,
+    private readonly members: MemberDirectory,
+  ) {}
+
+  /**
+   * ## Phase 8b — birthday tasks only (`payload.type === 'birthdate'`)
+   *
+   * | step | v1 | v2 | register |
+   * |---|---|---|---|
+   * | `user_ids`, `message`, `target` read | yes, in that order | **unchanged**, same order and same failures (C23, P7-D4) | §2.3 |
+   * | owner departed (`is_active = false`) | announced | **nothing sent**, `ok: true`, `owner-inactive`; row processed, successor cloned | **D39** |
+   * | owner row absent | announced | **nothing sent**, `ok: false`, `owner-missing`; row processed, successor cloned | §2.2 |
+   * | recipients | stored `user_ids` | **every active member except the owner, read now** | **D49** |
+   *
+   * The stored `user_ids` is still parsed, so a row v1 would fail on still fails here, but it
+   * no longer chooses who receives a birthday greeting (§2.3). Payment reminders and every
+   * other `type` go down v1's path unchanged.
+   *
+   * The skip is a *return*, never a *throw*: a throw releases the claim and clones no
+   * successor (`scheduler-executer.ts`, C77), which would end the yearly chain. Q48 requires the
+   * chain to keep rolling, so a member who returns is greeted again with no action.
+   */
   async run(payload: HstoreMap): Promise<SchedulerExecuterOutcome> {
     // `json.loads(payload["user_ids"])`. Raises for an absent key (C23) and for a NULL value.
     const decoded = decodeSchedulerPayload(payload);
     const message = requireText(payload, 'message');
     const target = requireText(payload, 'target');
 
-    const delivery = await this.notifications.sendNotification(decoded.user_ids, message, target);
+    if (payload.type !== BIRTHDATE_PAYLOAD_TYPE) {
+      return this.deliver(decoded.user_ids, message, target);
+    }
+
+    const ownerId = parseOwnerId(payload);
+    const owner = await this.members.ownerStatus(ownerId);
+    if (owner === 'inactive') {
+      // D39 (Q35, Q48).
+      this.logger.log(`Birthday of inactive member ${ownerId} not announced (D39).`);
+      return { ok: true, detail: 'owner-inactive' };
+    }
+    if (owner === 'missing') {
+      // §2.2: a hard-deleted or hand-written owner. No announcement, but it is not the expected
+      // case, so `ok: false` puts a WARN naming the task in the runner's log.
+      return { ok: false, detail: 'owner-missing' };
+    }
+
+    // D49 (Q49): the stored list is ignored for the audience.
+    const recipients = await this.members.activeMemberIdsExcept(ownerId);
+    return this.deliver(recipients, message, target);
+  }
+
+  private async deliver(
+    userIds: readonly number[],
+    message: string,
+    target: string,
+  ): Promise<SchedulerExecuterOutcome> {
+    const delivery = await this.notifications.sendNotification(userIds, message, target);
     // `no-subscriptions` is v1's `if len(...) == 0: return` — the member granted no browser
     // permission, so there is nothing to publish and nothing went wrong (Q7: push only, no
     // email fallback). `failed` is a swallowed publish error, which v1 cannot distinguish.
     return { ok: delivery !== 'failed', detail: delivery };
   }
+}
+
+/** The `type` both birthday writers store (`services/user.py:273`). */
+export const BIRTHDATE_PAYLOAD_TYPE = 'birthdate';
+
+/** `auth_user.id` is `integer`; a larger id cannot name any row. */
+const MAX_INT4 = 2147483647;
+
+/**
+ * `payload["owner_id"]` as a member id, for D39/D49. v1's executer never reads this key.
+ *
+ *  * absent → `KeyError: 'owner_id'`, thrown: the row stays unprocessed and is logged, like
+ *    every other missing key (C23). Both writers always set it (`services/user.py:271`), so only
+ *    a hand-written row reaches this.
+ *  * NULL → `TypeError`, as for `message`/`target` (P7-D4).
+ *  * not ASCII decimal digits → `ValueError`, thrown.
+ *  * digits beyond `integer` → no row can match, so the caller gets `MAX_INT4 + 1` and the
+ *    lookup answers `missing` without sending an out-of-range bind to PostgreSQL.
+ */
+function parseOwnerId(payload: HstoreMap): number {
+  const text = requireText(payload, 'owner_id');
+  if (!/^[0-9]+$/.test(text)) {
+    throw new Error(`ValueError: invalid owner_id in scheduler payload: '${text}'`);
+  }
+  const id = Number(text);
+  return id > MAX_INT4 ? MAX_INT4 + 1 : id;
 }
 
 /**

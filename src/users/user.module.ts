@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { ClockModule } from '../common/clock/clock';
 import { AppConfigModule } from '../config/config.module';
 import { MailModule } from '../mail/mail.module';
 import { NotificationModule } from '../notifications/notification.module';
@@ -24,7 +25,7 @@ import { UserService } from './user.service';
  * **C20**'s guard remains as the check that they agree.
  */
 @Module({
-  imports: [AppConfigModule, PrismaModule, AuthModule, MailModule, NotificationModule],
+  imports: [AppConfigModule, PrismaModule, AuthModule, MailModule, NotificationModule, ClockModule],
   controllers: [UserController, UserAppsController, UserDetailController, UserActivateController],
   providers: [UserService, PowerService],
   exports: [UserService, PowerService],
