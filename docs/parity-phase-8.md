@@ -5,6 +5,12 @@
 and `git status --short` printed 0 lines before and after the round. v1 is `~/Projects/Fondo-API` at `5bef585`,
 mounted read-only, with 0 lines of `git status --short` at the end.
 
+**Narrow re-measure after the review fix round (§1.5).** v2 **`8948f79`** (C79 implemented: D22 removed from `POST /api/file`), `dist/`
+rebuilt from that commit (`npm run build` exit 0, 12:01; `grep -rl isNonAsciiBoundaryFailure dist` → 0 files). Only
+`E-mp-nonascii-boundary` and its control `E-mp-empty-boundary` were re-run, 12:02, into `out/c79-v2-8948f79.jsonl`. HEAD moved to
+`935f3fb` during the run; `git diff --stat 8948f79 935f3fb` changes only `docs/phase-8-deviations.md`, so the code measured is `8948f79`.
+All other rows below are the `5f58b11` round and were not re-run.
+
 Routes: `GET|POST /api/file`, `GET /api/file/<id>`, `GET /api/admin`. Out of scope: C71, D39.
 
 ## Verdict
@@ -12,11 +18,11 @@ Routes: `GET|POST /api/file`, `GET /api/file/<id>`, `GET /api/admin`. Out of sco
 | route | verdict |
 |---|---|
 | `GET /api/file` | **PASS**. 23 of 23 `GET` cases (plus 5 other-method and 4 role-denied `POST` cases) match on status, `Allow`, `Vary`, storage calls and sends. The byte diffs are P8-D4 (4 cases) and D21 (1). D45 and P8-D1 appear as expected. |
-| `POST /api/file` | **PASS with expected deviations**. 83 cases were run in isolated passes. 36 match on every field. All 47 diffs are classified, and **none is unexpected**. D46 and D47 conform to the spec. One wording discrepancy is flagged (§2.4). |
+| `POST /api/file` | **PASS with expected deviations**. 83 cases were run in isolated passes. 36 match on every field. All 47 diffs are classified, and **none is unexpected**. D46 and D47 conform to the spec. One wording discrepancy is flagged (§2.4). **Re-measured at `8948f79` (§1.5):** the non-ASCII boundary is now v1 500 / v2 500, same shape as the empty boundary (P8-D4 / C85); C79 is implemented as ruled. |
 | `GET /api/file/<id>` | **PASS**. 16 of 16 cases match on status, `Allow`, `Vary`, storage calls and sends. The diffs are D13 (3) and D21 (1). The signed-URL structure conforms (§6). |
 | `GET /api/admin` | **PASS**. 20 of 20 cases match on status, `Allow`, `Vary` and normalised sends. The diffs are D21 (2). |
 | C81 (`PATCH /api/user`, `PATCH /api/loan`) | **PASS**. Both stacks process the **same content**, and all 10 row snapshots are equal (§4). |
-| **Phase 8** | **PASS.** No unexpected diff. There are two documentation corrections for the reviewer (§2.4, §3.3). |
+| **Phase 8** | **PASS** at `5f58b11`, **and PASS for the C79 re-measure at `8948f79`** (§1.5). No unexpected diff. There are two documentation corrections for the reviewer (§2.4, §3.3), and one header note from the re-measure (§2.4: `X-Frame-Options`). |
 
 ---
 
@@ -48,6 +54,7 @@ script exits 6 if the hstore OID moves. The printed OID was `3417907`, the same 
 
 Raw outputs are in `out/`: `ro.jsonl`, `ro2.jsonl`, `w-v1.jsonl`, `w-v2.jsonl`, `cmp-w.txt`, `c81-v1.jsonl`, `c81-v2.jsonl`, `e2.jsonl`,
 `race-v2.jsonl`, `control-*.jsonl`, `fixture-end.txt`, `lower-drift-set.json`, and `../out-sign-structure.jsonl`.
+Re-measure at `8948f79`: `out/c79-v2-8948f79.jsonl` (runner `c79.py`, which wraps `cell.run_case` and adds `clen_hdr` and the full header list).
 
 ---
 
@@ -65,7 +72,7 @@ Raw outputs are in `out/`: `ro.jsonl`, `ro2.jsonl`, `w-v1.jsonl`, `w-v2.jsonl`, 
 | `POST-role-president/treasurer/member` | 403 | 403 | 0 calls, count unchanged | PASS |
 | `POST-unauth` | 401 | 401 | 0 calls | PASS |
 | `F-options`, `F-put`, `F-delete`, `F-patch` | 403, 63 B | 403, 63 B | — | PASS |
-| `G-type-empty`, `G-type-bare`, `G-type-abc`, `G-type-1.0` | 500, 27 B `text/html`, no `Allow`/`Vary` | 500, 0 B, no `Content-Type`, no `Allow`/`Vary` | none | **expected: §6.1 row 2 (P8-D4)** |
+| `G-type-empty`, `G-type-bare`, `G-type-abc`, `G-type-1.0` | 500, 27 B `text/html`, no `Allow`, `Vary: Origin` | 500, 0 B, no `Content-Type`, no `Allow`, `Vary: Origin` | none | **expected: §6.1 row 2 (P8-D4)**. `Vary` read from `out/ro.jsonl`: `vary: "Origin"`, `allow: null` on both stacks for all 4 cells |
 | `F-head-list`, `D-head`, `A-head-email`, `A-head-notifications` | 403, `Content-Length: 63`, 63 body bytes sent | 403, `Content-Length: 63`, 0 body bytes | **0 sends on both** | **expected: D21** (`Content-Length` measured equal with `curl -I` on all 3 URLs, both stacks) |
 | `D-hit`, `D-hit-37`, `D-leading-zero`, `D-member`, `D-president`, `D-treasurer` | 200 `{"url":"signed://…"}`; calls `get_bucket, blob, sign(v4, 300, GET)` | identical | — | PASS |
 | `D-miss0`, `D-miss-16` (a real id gap), `D-miss-huge` | 404, 0 B, 0 calls | same | — | PASS |
@@ -125,7 +132,7 @@ upload on both; object stored; no row).
 | g | `D46-live-cross` (`Resultados 2012` as type 0, live data) | 500 after upload, orphan `proceeding/resultados 2012` | 409, 0 calls | **row 7** |
 | h | `Q44-dupx-t1-refused` | **201**, overwrites `presentations/dup x` (DUP X's object), no row | 409, 0 calls | **row 7** (Q44) |
 | i | `Z-json-cross-type-name` | 500 after `get_bucket, blob, exists` | 409, 0 calls | **row 7** ("a JSON body naming such a file") |
-| j | `E-mp-nonascii-boundary` | 500, gunicorn 141 B `text/html`, no `Allow`, no `Vary` | **400** `{"detail":"Multipart form parse error - Invalid boundary in multipart: zzé"}` (77 B), `Allow` + `Vary: Accept, Origin` | **row 3 (D22, C79)** |
+| j | `E-mp-nonascii-boundary` | 500, gunicorn 141 B `text/html`, no `Allow`, no `Vary` | **at `8948f79`: 500, 0 B, no `Content-Type`, no `Allow`, `Vary: Origin`, 0 calls, rows unchanged** (`out/c79-v2-8948f79.jsonl`, §1.5). Superseded `5f58b11` value: 400 DRF parse error, `Allow` + `Vary: Accept, Origin` (`out/w-v2.jsonl`) | **row 2 (P8-D4 / C85)**; D22 no longer applies (C79) |
 | k | `E-mp-empty-boundary` | 500, 141 B `text/html`, no `Allow`, **no `Vary`** | 500, 0 B, no `Allow`, **`Vary: Origin`** | **row 2 (P8-D4)**; see §2.4 for the header wording |
 | l | `D46-case-variant-other-type`, `D46-trailing-space-other-type`, `Q44-dupx-t0`, `Q44-DUPX-t1`, the 6 `D47-acc-*`, `M7-sigma-dotted-I`, `M7-drift-1C89`, `M7-empty-name`, `CT-absent`, `CT-params` (15) | 201; identical calls, stored objects and `(type,name)` row | same | **ids only**: v1's max id runs 2 ahead from `D46-case-variant-other-type` (53 vs 51), and later more, because v1's doomed INSERTs in e, g, d consumed sequence values that v2 never requests. Expected, as the consequence of rows 7/8 under **D37** (sequence-only diff). |
 | m | `N-nul-name`, `D-after-new-file` (2) | identical status, body, calls and stored objects | same | `file_before/after` differ only through (l); expected |
@@ -143,6 +150,33 @@ This ran v1 then v2 on the same state; see §3.3.
 | `E-mp-quoted-trailing-space-boundary` (`boundary="zzz "`) | 500, 141 B HTML, no `Allow`, no `Vary`, 0 calls | 500, 0 B, no `Allow`, `Vary: Origin`, 0 calls | expected, P8-D4 (same shape as 1.3 k) |
 | `E-mp-empty-boundary-again` | same as 1.3 k | same | expected, P8-D4 |
 | `E-mp-unquoted-trailing-space-boundary-control` | 201, row `utsb` | 500 after upload | **instrument artefact, not a diff**. v2 ran second, on a DB where v1 had already inserted `utsb`, so it took the Q41 path (row exists, object missing in v2's fake). In isolation (1.3, `E-mp-trailing-space-boundary`) the same request is **201/201, identical**. |
+
+
+### 1.5 C79 re-measure at `8948f79` (`out/c79-v2-8948f79.jsonl`)
+
+Setup: `setup.sh` (in-place `reset-clone.sh fondodev_p8`, exit 0, hstore OID `3417907` preserved; tokens pinned; both stacks
+restarted; control group `out/control-120222.jsonl`). Then `python3 c79.py out/c79-v2-8948f79.jsonl`, requests byte-identical to `cell.W`, order
+v1 empty, v2 empty, v1 non-ASCII, v2 non-ASCII, same DB state. Headers listed exclude `Date`.
+
+| case | stack | status | `Allow` | `Vary` | `Content-Type` | `Content-Length` | body | storage calls | `fondo_api_file` before → after | other headers |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `E-mp-empty-boundary` (control) | v1 | 500 | absent | absent | `text/html` | 141 | gunicorn "Internal Server Error" page, 141 B | 0 | `[37,43,1]` → `[37,43,1]`, 0 rows added | `Connection: close` |
+| `E-mp-empty-boundary` (control) | v2 | 500 | absent | `Origin` | absent | 0 | empty | 0 | `[37,43,1]` → `[37,43,1]`, 0 rows added | `Connection: close`, `X-Frame-Options: SAMEORIGIN` |
+| `E-mp-nonascii-boundary` (`boundary=zzé`) | v1 | 500 | absent | absent | `text/html` | 141 | same 141 B page (identical to `w-v1.jsonl`) | 0 | `[37,43,1]` → `[37,43,1]`, 0 rows added | `Connection: close` |
+| `E-mp-nonascii-boundary` (`boundary=zzé`) | v2 | **500** | absent | **`Origin`** | absent | 0 | empty | 0 | `[37,43,1]` → `[37,43,1]`, 0 rows added | `Connection: close`, `X-Frame-Options: SAMEORIGIN` |
+
+`python3 cmp.py out/c79-v2-8948f79.jsonl` → both cases `DIFF vary ctype clen body clen_hdr`, and no other field; the two v2 rows are
+identical to each other on every recorded field except `case` and `ms` (response time), and the two v1 rows on every field except `case`
+(a Python field-by-field pass over the file). v1's body is byte-equal (`body_b64`) to its `w-v1.jsonl` value for both cases. Sends were 0 on all 4.
+**Result: as expected.** The non-ASCII boundary now takes the empty boundary's path on v2: status 500 like v1, no `Allow`, `Vary: Origin`
+(**P8-D4 / C85**, D24's class). Before the fix (`out/w-v2.jsonl`, unchanged, sha256 `9817bff4…`) it was 400 with `Allow` and `Vary: Accept, Origin`.
+
+**Instrument note.** In this session's control run, `CTL-admin-notifications` recorded `sends=0` on both stacks, where every
+earlier control recorded 1. Cause: the restarted capture stubs number files from `00001` again, and `cell.py` counts sends as new
+file *names*; `cap/v1/00003.json` and `cap/v2/00003.json` were rewritten at 12:02:22 and hold that SQS `SendMessage`
+(`/000000000000/fonmon-notifications`, `{"body":"Test Notification","target":"/"}`) on both stacks. The send happened; the counter
+missed it. So the "0 sends" on the §1.5 rows is **not** backed by a working control in this session. It is also not the property
+under test here, since neither boundary case reaches the admin or notification code.
 
 ---
 
@@ -193,9 +227,15 @@ The first attempt of `race.py` crashed in its reporting line (my script bug: `Ke
 ### 2.4 A wording discrepancy, for `nestjs-reviewer` (not a failure)
 
 §6.1 row 2 says of P8-D4 that "status and headers match". On the **init-time multipart failures**, the header sets do not match:
-the empty boundary (1.3 k), the quoted trailing-space boundary and the empty boundary again (1.4). v1 serves gunicorn's page with **no `Vary`
+the empty boundary (1.3 k), the quoted trailing-space boundary and the empty boundary again (1.4), and, at `8948f79`, the non-ASCII
+boundary (1.3 j, §1.5). v1 serves gunicorn's page with **no `Vary`
 header at all**; v2 sends **`Vary: Origin`**. P8-D4's own row words it as "same absence of `Allow` and of `Accept` in `Vary`", and that wording
 is true as measured. §6.1 row 2 is the overstatement. Precedent: D24 registered a header-set difference on the same double-fault shape in P3.
+
+**Added at `8948f79` (§1.5, full header list recorded):** on both init-time multipart 500s measured there, v2 also sends
+**`X-Frame-Options: SAMEORIGIN`**, and v1's gunicorn page does not. C85 and P8-D4 name only `Vary`. This is the same class, where the
+double fault escapes Django before its response middleware runs. It is flagged for the register wording, not as a failure. The `5f58b11` round did not record
+`X-Frame-Options`, so it has no earlier value to compare.
 
 ---
 
@@ -210,11 +250,11 @@ is true as measured. §6.1 row 2 is the overstatement. Precedent: D24 registered
 `M1-new` (`New file` t0) → 201, row. `P8-F2-case-variant-same-type` (`NEW FILE` t0) → **201 on both**, `upload proceeding/new file` with
 `PDFBYTES-3`, **no row**, count unchanged. **PASS** (Q41, ported).
 
-### 3.3 D22 on `POST /api/file` (C79)
+### 3.3 Boundaries on `POST /api/file` (C79 ruled: D22 does not apply; implemented at `8948f79`)
 
 | boundary | expected | measured |
 |---|---|---|
-| non-ASCII `zzé` | v1 500 / v2 400 | **v1 500** (141 B, no `Allow`/`Vary`) / **v2 400** DRF parse-error body | as expected |
+| non-ASCII `zzé` | 500 / 500 (C79) | **at `8948f79`: v1 500** (141 B, no `Allow`, no `Vary`) / **v2 500** (0 B, no `Allow`, `Vary: Origin`), 0 calls, rows unchanged (`out/c79-v2-8948f79.jsonl`, §1.5). Superseded `5f58b11`: v2 400 DRF parse-error body (`out/w-v2.jsonl`) | as expected (P8-D4 / C85) |
 | empty `boundary=` | 500 / 500 | **500 / 500**, 0 calls, twice | as expected (P8-D4 bytes, §2.4 header note) |
 | trailing space | 500 / 500 | **unquoted `boundary=zzz ` → 201 / 201, identical.** The space never reaches the multipart parser on either stack, because both gunicorn and Node strip trailing whitespace from header values. **Quoted `boundary="zzz "` → 500 / 500**, 0 calls | the developer's measurement came from Django's in-process test client, which keeps the space. Over HTTP it is only reachable quoted. **Correction for §3 / §6.1 wording, not a parity failure.** |
 
@@ -333,6 +373,7 @@ All four match the claim at `5f58b11`.
 | both servers boot | `start-v1.sh` / `start-v2.sh` | 7 v1 and 6 v2 boots, `GET /api/file → 401` each. The first v2 boot failed on my launcher's `reflect-metadata` path; fixed before any measurement |
 | known-good control after **every** restart | `cmp.py out/control-*.jsonl` | 5 of 5 runs: **3 same / 0 diff**. `CTL-list` 200 2652 B; `CTL-admin-notifications` 1 SQS on each stack (exercises the hstore cast, false-green #23); `CTL-detail-sign` 3 calls |
 | no scheduler, no worker | `SCHEDULER_ENABLED` unset; no `celery` process was started | — |
+| **re-measure at `8948f79`**: boot, stop, data safety | `setup.sh` exit 0 (v1 and v2 `GET /api/file → 401`); after stopping v2, `fondo-v1-p8r` and both stubs: `ps -C node,python3,gunicorn` → no processes (exit 1), `docker ps` → `fondo_db` only; `fixture-check.sh` on `fondodev` vs baseline → **exit 0** (control `fondo_api_test` exit 1, before the run); `pg_dump --schema-only` `fondodev` vs `fondodev_p8` → **exit 0** (control `fondo_api_test` exit 1); v2 and v1 `git status --short` → 0 lines | — |
 | nothing left running | `ps -C node`, `ps -C python3`, `ps -C gunicorn` → empty; `docker ps` → `fondo_db` only | — |
 | GCS | no credentials on host or in v2's env. v1 had throwaway `authorized_user` creds and proxies on a closed port. Both stacks' `FILE_STORAGE` / `get_bucket` were fakes; evidence is `signed://` bodies and recorded calls on every storage case | **v1's proxy fence itself was not exercised by a control** (stated, not claimed) |
 | SES / SQS | capture stubs only; `start-*.sh` refuse to start without them | — |
@@ -364,5 +405,6 @@ All four match the claim at `5f58b11`.
 - **`nestjs-reviewer`:** this report. There are two wording corrections (neither changes code):
   - **§2.4:** §6.1 row 2 says the headers match on init-time multipart 500s. They do not: v1 has no `Vary`, v2 sends `Vary: Origin`. P8-D4's own wording is accurate.
   - **§3.3:** the trailing-space boundary 500/500 holds only when the boundary is quoted. Unquoted, both HTTP servers strip the space and the request succeeds 201/201.
-  - Rulings still open for you: **C79** (D22 on this route; measured v1 500 / v2 400) and **C80** (D45; measured parsed-equal).
+  - **C79** is ruled and implemented at `8948f79`. Re-measured: non-ASCII boundary v1 500 / v2 500, no `Allow`, v2 `Vary: Origin` (P8-D4 / C85), 0 calls, rows unchanged (§1.5). **C80** was ruled (D45 permanent); measured parsed-equal.
+  - **§2.4 addition:** v2 also sends `X-Frame-Options: SAMEORIGIN` on the init-time multipart 500s, and v1's gunicorn page does not. C85 and P8-D4 name only `Vary`.
 - **`business-analyst`:** no new undocumented rule. **Q45's** window reproduces as described.
