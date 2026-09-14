@@ -92,6 +92,10 @@ describe('Phase 8 — /api/file', () => {
 
   type Part = readonly [name: string, value: string, filename?: string, contentType?: string];
   const FILE_PART: Part = ['file', 'PDFBYTES', 'a.pdf', 'application/pdf'];
+  /** Plan §5 D46's body, as bytes. */
+  const D46_BODY = '{"message":"A file with this name already exists with a different type"}';
+  /** Plan §5 D47's body, as bytes. */
+  const D47_BODY = '{"message":"Type must be 0 or 1"}';
 
   /** The oracle's `mp()`: parts in order, CRLF, boundary `zzz`. */
   const multipart = (parts: readonly Part[], boundary = 'zzz'): Buffer => {
@@ -124,6 +128,18 @@ describe('Phase 8 — /api/file', () => {
   const expectViewResponse = (response: request.Response, status: number): void => {
     expect(response.status).toBe(status);
     expect(response.text).toBe('');
+    expect(response.headers.allow).toBe('GET, POST, HEAD, OPTIONS');
+    expect(response.headers.vary).toContain('Accept');
+  };
+
+  /**
+   * A D46 / D47 refusal: the exact `{"message": ...}` bytes, and the view's DRF headers — it is
+   * rendered like any `Response({...}, status)` from the view, not like an escaped exception.
+   */
+  const expectRefusal = (response: request.Response, status: number, body: string): void => {
+    expect(response.status).toBe(status);
+    expect(response.text).toBe(body);
+    expect(response.headers['content-type']).toMatch(/^application\/json/);
     expect(response.headers.allow).toBe('GET, POST, HEAD, OPTIONS');
     expect(response.headers.vary).toContain('Accept');
   };
@@ -341,14 +357,14 @@ describe('Phase 8 — /api/file', () => {
         [['get_bucket', 'fonmon']],
       ],
       [
-        'M2-type-as-file',
-        [['name', 'm2 type file'], ['type', '0', 't.txt', 'text/plain'], FILE_PART],
-        [],
+        'Z-name-part-FILENAME-is-a-cross-type-name: the part is called `Acta número 1` (a type 0 row) and type is 1 — D46 never reads a file as its filename; still 500',
+        [['type', '1'], ['name', 'n', 'Acta número 1', 'text/plain'], FILE_PART],
+        [['get_bucket', 'fonmon']],
       ],
       [
-        'M2-type-scalar-and-file',
-        [['name', 'm2 type both'], ['type', '0'], ['type', '1', 't.txt', 'text/plain'], FILE_PART],
-        [],
+        'Z-name-file-over-cross-type-name: a `name` part beside a `name` FIELD that exists under the other type — D46 does not read the field; still 500',
+        [['type', '1'], ['name', 'Acta número 1'], ['name', 'n', 'n.txt', 'text/plain'], FILE_PART],
+        [['get_bucket', 'fonmon']],
       ],
     ] as const)(
       '%s: a file where a scalar is read → 500, never the filename as a value',
@@ -356,6 +372,29 @@ describe('Phase 8 — /api/file', () => {
         const response = await postMultipart(parts);
         expectViewResponse(response, 500);
         expect(storage.calls).toEqual(calls);
+        expect(await prisma.file.count()).toBe(25);
+      },
+    );
+
+    it.each([
+      [
+        'M2-type-as-file',
+        [['name', 'm2 type file'], ['type', '0', 't.txt', 'text/plain'], FILE_PART],
+      ],
+      [
+        'M2-type-scalar-and-file',
+        [['name', 'm2 type both'], ['type', '0'], ['type', '1', 't.txt', 'text/plain'], FILE_PART],
+      ],
+      [
+        'Z-type-file-name-cross (v1 500 before storage; the name exists under type 0)',
+        [['name', 'Acta número 1'], ['type', '1', 't.txt', 'text/plain'], FILE_PART],
+      ],
+    ] as const)(
+      '%s: a `type` file part is not the integer 0 or 1 → D47 400 (v1: 500 on int(), before storage)',
+      async (_label, parts) => {
+        const response = await postMultipart(parts);
+        expectRefusal(response, 400, D47_BODY);
+        expect(storage.calls).toEqual([]);
         expect(await prisma.file.count()).toBe(25);
       },
     );
@@ -378,34 +417,94 @@ describe('Phase 8 — /api/file', () => {
   // ==========================================================================
 
   describe('measurement 3 — a name that exists under the other type', () => {
-    it('M3-cross-type: the object is STORED, then the row insert 500s; retry answers 201 with still no row', async () => {
+    it('M3-cross-type → D46: v1 stored the object then 500ed (and a retry 201ed with no row); v2 answers 409 with ZERO storage calls, and so does the retry', async () => {
       await postMultipart([['name', 'New file'], ['type', '0'], FILE_PART]).expect(201);
+      storage.calls.length = 0;
+      const error = jest.spyOn(Logger.prototype, 'error');
+      error.mockClear();
 
       const first = await postMultipart([
         ['name', 'New file'],
         ['type', '1'],
         ['file', 'CROSS', 'c.pdf', 'application/pdf'],
       ]);
-      expectViewResponse(first, 500);
-      expect(storage.objects.get('presentations/new file')?.data).toBe('CROSS');
+      expectRefusal(first, 409, D46_BODY);
+      expect(storage.calls).toEqual([]);
+      expect(storage.objects.has('presentations/new file')).toBe(false);
       expect(await prisma.file.count()).toBe(26);
 
-      // M3-cross-type-retry: the orphan object now exists, so the row is skipped entirely.
+      // M3-cross-type-retry: nothing was stored, so the retry is refused the same way.
       const retry = await postMultipart([
         ['name', 'New file'],
         ['type', '1'],
         ['file', 'CROSS-2', 'c.pdf', 'application/pdf'],
       ]);
-      expectViewResponse(retry, 201);
-      expect(storage.objects.get('presentations/new file')?.data).toBe('CROSS-2');
+      expectRefusal(retry, 409, D46_BODY);
+      expect(storage.calls).toEqual([]);
       expect(await prisma.file.count()).toBe(26);
-      const presentations = await request(server()).get('/api/file?type=1').set(asAdmin());
-      expect(
-        (presentations.body as { display_name: string }[]).map((f) => f.display_name),
-      ).not.toContain('New file');
+      // A refusal is not v1's "Exception saving file".
+      expect(error).not.toHaveBeenCalled();
     });
 
-    it('M3-existing-row-no-blob: a row whose object is missing — upload, then the unique violation', async () => {
+    it.each([
+      ['a seeded type 0 row, request type 1', 'Acta número 1', '1'],
+      ['a seeded type 1 row, request type 0', 'Resultados 2012', '0'],
+    ])('D46 %s: 409, zero storage calls, rows unchanged', async (_label, name, type) => {
+      const response = await postMultipart([['name', name], ['type', type], FILE_PART]);
+      expectRefusal(response, 409, D46_BODY);
+      expect(storage.calls).toEqual([]);
+      expect(storage.objects.size).toBe(0);
+      expect(await prisma.file.count()).toBe(25);
+    });
+
+    it('a MEMBER is refused by the role guard (403) before D46 runs — no 409 leaks which names exist', async () => {
+      const response = await postMultipart(
+        [['name', 'Acta número 1'], ['type', '1'], FILE_PART],
+        authHeader(memberToken),
+      );
+      expect(response.status).toBe(403);
+      expect(storage.calls).toEqual([]);
+    });
+
+    it('D46 neighbour — a case variant under the other type is NOT refused: `ACTA NÚMERO 1` as type 1 → 201 and a new row (v1)', async () => {
+      const response = await postMultipart([['name', 'ACTA NÚMERO 1'], ['type', '1'], FILE_PART]);
+      expectViewResponse(response, 201);
+      expect(storage.calls).toEqual([
+        ['get_bucket', 'fonmon'],
+        ['blob', 'presentations/acta número 1'],
+        ['exists', 'presentations/acta número 1'],
+        ['upload', 'presentations/acta número 1', 'application/pdf'],
+      ]);
+      expect((await rows()).slice(25)).toEqual([
+        { id: 26, type: 1, display_name: 'ACTA NÚMERO 1' },
+      ]);
+    });
+
+    it('D46 neighbour — trailing space is a different name: `Acta número 1 ` as type 1 → 201 (exact, not trimmed)', async () => {
+      const response = await postMultipart([['name', 'Acta número 1 '], ['type', '1'], FILE_PART]);
+      expectViewResponse(response, 201);
+      expect(await prisma.file.count()).toBe(26);
+    });
+
+    it("X-exact-t1-over-casevariant: v1 overwrote `DUP X`'s object and answered 201 with no orphan; D46's exact predicate refuses it (409) — as decided, registered", async () => {
+      await postMultipart([['name', 'Dup X'], ['type', '0'], FILE_PART]).expect(201);
+      await postMultipart([
+        ['name', 'DUP X'],
+        ['type', '1'],
+        ['file', 'CV', 'c.pdf', 'application/pdf'],
+      ]).expect(201);
+      storage.calls.length = 0;
+      const response = await postMultipart([
+        ['name', 'Dup X'],
+        ['type', '1'],
+        ['file', 'EXACT', 'e.pdf', 'application/pdf'],
+      ]);
+      expectRefusal(response, 409, D46_BODY);
+      expect(storage.calls).toEqual([]);
+      expect(storage.objects.get('presentations/dup x')?.data).toBe('CV');
+    });
+
+    it('M3-existing-row-no-blob (Q41, not refused): a row whose object is missing — upload, then the unique violation', async () => {
       const response = await postMultipart([['name', 'Acta número 1'], ['type', '0'], FILE_PART]);
       expectViewResponse(response, 500);
       expect(storage.objects.has('proceeding/acta número 1')).toBe(true);
@@ -417,42 +516,49 @@ describe('Phase 8 — /api/file', () => {
   // Measurement 5 — int() on `type`, in the body and in the query
   // ==========================================================================
 
-  describe('measurement 5 — int()', () => {
+  describe('measurement 5 — int(), and D47 on top of it', () => {
     it.each([
-      ['M5-type-abc', 'abc'],
-      ['M5-type-1.0', '1.0'],
-    ])('%s: 500 before any storage call', async (_label, type) => {
+      ['M5-type-abc (v1 500 before storage)', 'abc'],
+      ['M5-type-1.0 (v1 500 before storage)', '1.0'],
+      ['M5-type-arabic3 (v1 stored `3/m5`, 201)', ' ٣ '],
+      ['M5-type-neg1 (v1 stored `-1/m5`, 201)', '-1'],
+      ['M5-type-int4-overflow (v1 stored the object, then 500)', '2147483648'],
+      ['I-underscore10 (v1 stored `10/…`, 201: `1_0` is 10)', '1_0'],
+      ['I-fullwidth-plus1 (v1 500: not an int() literal)', '＋1'],
+      ['I-fs1 (v1 500: U+001C is not int() whitespace)', '\u001c1'],
+      ['type 2', '2'],
+      ['int4 min - 1', '-2147483649'],
+      ['an empty `type` — PRESENT, so past the presence check', ''],
+    ])('D47 %s → 400, zero storage calls, no row', async (_label, type) => {
       const response = await postMultipart([['name', 'm5'], ['type', type], FILE_PART]);
-      expectViewResponse(response, 500);
+      expectRefusal(response, 400, D47_BODY);
       expect(storage.calls).toEqual([]);
-    });
-
-    it.each([
-      ['M5-type-arabic3', ' ٣ ', '3/m5', 3, '3'],
-      ['M5-type-underscore', '0_1', 'presentations/m5', 1, 'presentations'],
-      ['M5-type-neg1', '-1', '-1/m5', -1, '-1'],
-    ])('%s: 201 at %s, row type %i, listed as %s', async (_label, raw, path, type, display) => {
-      await postMultipart([['name', 'm5'], ['type', raw], FILE_PART]).expect(201);
-      expect(storage.calls[1]).toEqual(['blob', path]);
-      const row = (await rows())[25];
-      expect(row.type).toBe(type);
-      const listed = (await request(server()).get('/api/file').set(asAdmin())).body as {
-        id: number;
-        type_display: string;
-      }[];
-      expect(listed.find((file) => file.id === row.id)?.type_display).toBe(display);
-    });
-
-    it('M5-type-int4-overflow: the object is stored, then `integer out of range` → 500, no row', async () => {
-      const response = await postMultipart([
-        ['name', 'm5 overflow'],
-        ['type', '2147483648'],
-        FILE_PART,
-      ]);
-      expectViewResponse(response, 500);
-      expect(storage.objects.has('2147483648/m5 overflow')).toBe(true);
+      expect(storage.objects.size).toBe(0);
       expect(await prisma.file.count()).toBe(25);
     });
+
+    it.each([
+      ['M5-type-underscore', '0_1', 'presentations/m5', 1, 'presentations'],
+      ['I-space1', ' 1 ', 'presentations/m5', 1, 'presentations'],
+      ['I-fullwidth1', '１', 'presentations/m5', 1, 'presentations'],
+      ['I-nbsp1', '\u00a01', 'presentations/m5', 1, 'presentations'],
+      ['I-plus0', '+0', 'proceeding/m5', 0, 'proceeding'],
+      ['I-minus0', '-0', 'proceeding/m5', 0, 'proceeding'],
+    ])(
+      'D47 accepts %s (measured on v1 as 201): type %j at %s, row type %i, listed as %s',
+      async (_label, raw, path, type, display) => {
+        const response = await postMultipart([['name', 'm5'], ['type', raw], FILE_PART]);
+        expectViewResponse(response, 201);
+        expect(storage.calls[1]).toEqual(['blob', path]);
+        const row = (await rows())[25];
+        expect(row.type).toBe(type);
+        const listed = (await request(server()).get('/api/file').set(asAdmin())).body as {
+          id: number;
+          type_display: string;
+        }[];
+        expect(listed.find((file) => file.id === row.id)?.type_display).toBe(display);
+      },
+    );
 
     it.each([
       ['G-type-empty', '/api/file?type='],
@@ -478,6 +584,165 @@ describe('Phase 8 — /api/file', () => {
       const response = await request(server()).get(path).set(asAdmin());
       expect(response.status).toBe(200);
       expect(response.body).toHaveLength(count);
+    });
+  });
+
+  // ==========================================================================
+  // D46 / D47 — order of checks, and how they meet measurement 2 and JSON bodies
+  // ==========================================================================
+
+  describe('D46 / D47 — order of checks and interactions', () => {
+    it.each([
+      ['P-mp-missing-name, with type=abc', [['type', 'abc'], FILE_PART]],
+      [
+        'P-mp-missing-file, with type=5',
+        [
+          ['name', 'x'],
+          ['type', '5'],
+        ],
+      ],
+      [
+        'P-mp-missing-type, with a name that exists under type 0',
+        [['name', 'Acta número 1'], FILE_PART],
+      ],
+    ] as const)(
+      "presence runs first — %s → v1's BODILESS 400, not D47's or D46's body",
+      async (_label, parts) => {
+        const response = await postMultipart(parts);
+        expectViewResponse(response, 400);
+        expect(storage.calls).toEqual([]);
+      },
+    );
+
+    it.each([
+      ['abc', 'abc'],
+      ['5', '5'],
+    ])(
+      'D47 runs before D46 — `Acta número 1` (a type 0 row) with type=%s → 400, not 409',
+      async (_label, type) => {
+        const response = await postMultipart([
+          ['name', 'Acta número 1'],
+          ['type', type],
+          FILE_PART,
+        ]);
+        expectRefusal(response, 400, D47_BODY);
+        expect(storage.calls).toEqual([]);
+      },
+    );
+
+    it.each([
+      ['Z-name-file-type-abc (v1: 500 before storage)', 'abc'],
+      ['Z-name-file-type-5 (v1: 500 after get_bucket)', '5'],
+    ])('%s — a `name` file part with a bad type → D47 400', async (_label, type) => {
+      const response = await postMultipart([
+        ['type', type],
+        ['name', 'n', 'n.txt', 'text/plain'],
+        FILE_PART,
+      ]);
+      expectRefusal(response, 400, D47_BODY);
+      expect(storage.calls).toEqual([]);
+    });
+
+    it.each([
+      ['P-json-type-list (v1 500 before storage)', '{"name": "n", "type": [0], "file": "x"}'],
+      ['Z-json-type-null (v1 500 before storage)', '{"name": "jn", "type": null, "file": "x"}'],
+      ['JSON type 2 (v1 500 after exists)', '{"name": "j2", "type": 2, "file": "x"}'],
+    ])('%s → D47 400', async (_label, body) => {
+      expectRefusal(await postRaw('application/json', body), 400, D47_BODY);
+      expect(storage.calls).toEqual([]);
+    });
+
+    it.each([
+      [
+        'Z-json-type-float (int(1.5) is 1)',
+        '{"name": "jf", "type": 1.5, "file": "x"}',
+        'presentations/jf',
+      ],
+      [
+        'Z-json-type-true (int(True) is 1)',
+        '{"name": "jt", "type": true, "file": "x"}',
+        'presentations/jt',
+      ],
+    ])(
+      "%s passes D47 and keeps v1's 500 at .content_type, after exists — measured",
+      async (_label, body, path) => {
+        expectViewResponse(await postRaw('application/json', body), 500);
+        expect(storage.calls).toEqual([
+          ['get_bucket', 'fonmon'],
+          ['blob', path],
+          ['exists', path],
+        ]);
+      },
+    );
+
+    it('a JSON body naming a cross-type file → D46 409 (v1: 500 after exists — a JSON body can never upload)', async () => {
+      const response = await postRaw(
+        'application/json',
+        '{"name": "Acta número 1", "type": 1, "file": "x"}',
+      );
+      expectRefusal(response, 409, D46_BODY);
+      expect(storage.calls).toEqual([]);
+    });
+
+    it("N-nul-name: D46 does not query a name holding U+0000 (PostgreSQL would raise 22021) — v1's sequence: upload, then the insert fails, the object stays", async () => {
+      const name = 'nul\u0000name';
+      expect(name).toHaveLength(8);
+      const response = await postMultipart([['name', name], ['type', '0'], FILE_PART]);
+      expectViewResponse(response, 500);
+      expect(storage.calls).toEqual([
+        ['get_bucket', 'fonmon'],
+        ['blob', 'proceeding/nul\u0000name'],
+        ['exists', 'proceeding/nul\u0000name'],
+        ['upload', 'proceeding/nul\u0000name', 'application/pdf'],
+      ]);
+      expect(storage.objects.has('proceeding/nul\u0000name')).toBe(true);
+      expect(await prisma.file.count()).toBe(25);
+    });
+
+    it('D46 race — MEASURED: two concurrent uploads of one new name under types 0 and 1 both pass D46; one 201, the other 500s AFTER its upload and leaves an orphan', async () => {
+      // Hold every upload until both requests have reached it, so both D46 checks ran against
+      // an empty table. The timeout releases a lone request so a regression fails, not hangs.
+      let arrived = 0;
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const timeout = setTimeout(() => release(), 5000);
+      storage.beforeUpload = async () => {
+        arrived += 1;
+        if (arrived === 2) {
+          release();
+        }
+        await gate;
+      };
+
+      const [asProceeding, asPresentation] = await Promise.all([
+        postMultipart([['name', 'Race'], ['type', '0'], FILE_PART]),
+        postMultipart([['name', 'Race'], ['type', '1'], FILE_PART]),
+      ]);
+      clearTimeout(timeout);
+
+      // Both passed D46: the check-then-act window exists.
+      expect(arrived).toBe(2);
+      expect([asProceeding.status, asPresentation.status].sort()).toEqual([201, 500]);
+      const raced = (await rows()).filter((row) => row.display_name === 'Race');
+      expect(raced).toHaveLength(1);
+      // The unique index kept the table consistent, but not the bucket: both objects exist.
+      expect(storage.objects.has('proceeding/race')).toBe(true);
+      expect(storage.objects.has('presentations/race')).toBe(true);
+      const winner = raced[0].type === 0 ? asProceeding : asPresentation;
+      expect(winner.status).toBe(201);
+
+      // Positive control: once the winner's row exists, the same upload is refused (D46).
+      storage.beforeUpload = () => Promise.resolve();
+      storage.calls.length = 0;
+      const again = await postMultipart([
+        ['name', 'Race'],
+        ['type', raced[0].type === 0 ? '1' : '0'],
+        FILE_PART,
+      ]);
+      expectRefusal(again, 409, D46_BODY);
+      expect(storage.calls).toEqual([]);
     });
   });
 
@@ -595,7 +860,6 @@ describe('Phase 8 — /api/file', () => {
       ['P-json-null', 'application/json', 'null', 500],
       ['P-json-empty-obj', 'application/json', '{}', 400],
       ['P-json-name-number', 'application/json', '{"name": 5, "type": 0, "file": "x"}', 500],
-      ['P-json-type-list', 'application/json', '{"name": "n", "type": [0], "file": "x"}', 500],
       ["S8 / P-json-malformed (not DRF's 400)", 'application/json', '{', 500],
       ["S3 / P-text-plain (not DRF's 415)", 'text/plain', 'x', 500],
       ['P-form', 'application/x-www-form-urlencoded', 'name=a&file=b&type=0', 500],

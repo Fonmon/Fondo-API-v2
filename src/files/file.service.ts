@@ -1,6 +1,7 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { HttpStatus, Inject, Injectable } from '@nestjs/common';
+import { ApiException } from '../common/http/api.exception';
 import type { DrfRequestDataEntry } from '../common/http/drf-request-data';
-import { PythonAttributeError, PythonTypeError, toDjangoInt } from '../common/utils/python-obj';
+import { PythonAttributeError, toDjangoInt } from '../common/utils/python-obj';
 import { pythonLower } from '../common/utils/python-lower';
 import { nowInstant } from '../common/utils/timezone.util';
 import { AppConfigService } from '../config/app-config.service';
@@ -56,29 +57,30 @@ export class FileService {
    *     file.save()                                                          # 6  WRITE
    * ```
    *
-   * Every statement can raise, and the caller turns any exception into a 500. What a failure
-   * leaves behind is therefore fixed by the order, all of it measured on the pinned v1:
+   * v2 inserts two refusals between the presence check and statement 2 — plan §5 **D47**
+   * (400, in place of statement 1's `int()`) then **D46** (409). Both are raised before any
+   * storage call and flagged `isDeviation`, so the view's blanket 500 does not swallow them.
+   *
+   * Every other statement can raise, and the caller turns any exception into a 500. What a
+   * failure leaves behind is fixed by the order, measured on the pinned v1:
    *
    * | fails at | example | object | row |
    * |---|---|---|---|
-   * | 1 | `type=abc`, `type` sent as a file part | — | — |
+   * | 1 (D47) | `type=abc`, `type=5`, `type` beyond int4, `type` sent as a file part → **400** in v2 | — | — |
+   * | D46 | the exact name exists under the **other** type → **409** in v2 | — | — |
    * | 2 | bucket unreachable | — | — |
    * | 3 | `name` sent as a file part; a JSON `name` that is not a string | — | — |
    * | 4 | `exists()` errors | — | — |
    * | 5 | `file` sent as a plain field (`.content_type`); the upload errors | — | — |
-   * | 6 | ⚠️ the name exists under the **other** type; the row exists but the object did not; `type` beyond int4 | **written** | — |
+   * | 6 | ⚠️ the row exists under the same type but the object did not (Q41, kept); a name containing U+0000; the losing side of two **concurrent** cross-type uploads (D46's window) | **written** | — |
    *
    * ⚠️ **Step 5 always runs**, whether or not the object existed: a second upload under the
    * same lowered path **overwrites** the object and writes no row, so the list keeps showing
-   * the first upload's `display_name` over the second upload's bytes.
-   *
-   * ⚠️ **Row 6 is a partial write, and it is self-perpetuating.** After a cross-type
-   * duplicate 500s, the object exists at the new path; a retry therefore finds it, overwrites
-   * it, skips the row and answers **201** — for a file no list will ever show. Ported, not
-   * fixed; registered in `docs/phase-8-deviations.md`.
+   * the first upload's `display_name` over the second upload's bytes (Q41, kept).
    */
   async saveFile(obj: FileUploadData): Promise<void> {
-    const type = pythonIntOf(obj.type, 'type'); // 1
+    const type = knownFileType(obj.type); // 1 — D47
+    await this.refuseNameUnderOtherType(obj.name, type); // D46
     const bucket = await this.storage.getBucket(this.config.gcsBucket); // 2
     const displayName = lowerableName(obj.name);
     const blob = bucket.blob(`${fileTypeDisplay(type)}/${pythonLower(displayName)}`); // 3
@@ -89,12 +91,55 @@ export class FileService {
       // 6 — `created_at` is `auto_now_add`, application-set: the column has no default.
       await this.prisma.file.create({
         data: {
-          type: int4Column(type),
+          type,
           display_name: displayName,
           created_at: nowInstant(),
         },
         select: { id: true },
       });
+    }
+  }
+
+  /**
+   * **D46** (plan §5, operator Q40) — a v2 control v1 does not have. Runs after D47 and
+   * **before any storage call**.
+   *
+   * Refuses with **409** `{"message": "A file with this name already exists with a different
+   * type"}` when a row with **exactly** this `display_name` exists and its `type` differs.
+   * "Exactly" is PostgreSQL `=` on the `text` column — the comparison the
+   * `fondo_api_file_display_name_key` unique index itself uses, so the refusal fires on the
+   * names whose insert would violate that constraint. `test/file.e2e-spec.ts` pins a
+   * case variant (`ACTA NÚMERO 1` over `Acta número 1`, other type) as **not** refused.
+   *
+   * Not refused, and left to v1's statements below:
+   * - the same name under the **same** type (v1's overwrite, and the row-without-object 500 —
+   *   Q41, kept, no log line);
+   * - a name differing only in case under the other type (v1 writes a new row).
+   *
+   * ⚠️ **A name no row can hold is not queried.** A `name` that is a file part or a non-string
+   * JSON value (measurement 2 / P8-F7), or a string containing U+0000 (PostgreSQL `text`
+   * cannot store it), cannot equal any `display_name`, so the predicate is false and v1's own
+   * failure follows unchanged — a 500 after `get_bucket` for the first two, and for U+0000 the
+   * upload followed by the failed insert. Querying anyway would either read a file as a
+   * scalar (D23) or turn v1's measured sequence into a query error with no storage calls.
+   *
+   * ⚠️ **Check-then-act.** Two concurrent uploads of one new name under different types can
+   * both pass this check before either inserts; the loser then fails on the unique index
+   * **after** its upload, as v1 does. Measured and registered in `docs/phase-8-deviations.md`.
+   *
+   * @throws ApiException 409, flagged `isDeviation` so `FileController` does not launder it
+   *   into v1's blanket 500.
+   */
+  private async refuseNameUnderOtherType(name: DrfRequestDataEntry, type: 0 | 1): Promise<void> {
+    if (name.source === 'file' || typeof name.value !== 'string' || name.value.includes('\0')) {
+      return;
+    }
+    const existing = await this.prisma.file.findUnique({
+      where: { display_name: name.value },
+      select: { type: true },
+    });
+    if (existing !== null && existing.type !== type) {
+      throw ApiException.deviation(HttpStatus.CONFLICT, D46_MESSAGE);
     }
   }
 
@@ -165,14 +210,48 @@ export class FileService {
   }
 }
 
-/** `int(obj[key])`. A file part is `int(InMemoryUploadedFile)` → `TypeError`. */
-function pythonIntOf(entry: DrfRequestDataEntry, key: string): bigint {
-  if (entry.source === 'file') {
-    throw new PythonTypeError(
-      "int() argument must be a string, a bytes-like object or a number, not 'InMemoryUploadedFile'",
-    );
+/** D46's body. */
+export const D46_MESSAGE = 'A file with this name already exists with a different type';
+/** D47's body, modelled on `SavingAccountView.get`'s `State must be between 0 and 1`. */
+export const D47_MESSAGE = 'Type must be 0 or 1';
+
+/**
+ * **D47** (plan §5, operator Q42) in place of v1's `int(obj["type"])` — the first statement of
+ * `save_file`, so it runs after the view's presence check and before D46 and any storage call.
+ *
+ * The predicate is **"v1's own `int(obj['type'])` returns 0 or 1"**; everything else is a
+ * **400** `{"message": "Type must be 0 or 1"}`. For a string that is {@link toDjangoInt}'s
+ * string branch, i.e. `parsePythonIntLiteral`, the grammar {@link pythonInt} uses. Accepted,
+ * measured on the pinned v1 (`~/.fondo-parity-harness/p8/oracle-d46-out.jsonl`, 2026-09-14)
+ * and pinned by `file.service.spec.ts` / `test/file.e2e-spec.ts`:
+ * `' 1 '`, `'１'` (fullwidth), `'\xa01'`, `'+0'`, `'-0'`, `'0_1'`. Refused: `'1_0'` (10),
+ * `'＋1'` and `'\x1c1'` (not integers to `int()`), `'abc'`, `'1.0'`, `'-1'`, `' ٣ '`, and
+ * anything past int4 — which v1 stored and then 500ed.
+ *
+ * What `int()` raises on is refused too, since it is not the integer 0 or 1: a `type` sent as
+ * a **file part** (v1: `TypeError`, 500 before any storage call — measurement 2) and a JSON
+ * `null` / list / object. ⚠️ A JSON `1.5` or `true` is `int()`-ed to 1 as in v1 and therefore
+ * **passes**; a JSON body can never upload (P8-F7), so this changes no 201. Flagged as
+ * underspecified in `docs/phase-8-deviations.md`.
+ *
+ * @throws ApiException 400, flagged `isDeviation`.
+ */
+function knownFileType(entry: DrfRequestDataEntry): 0 | 1 {
+  let type: bigint | undefined;
+  if (entry.source === 'field') {
+    try {
+      type = toDjangoInt(entry.value, 'type');
+    } catch {
+      type = undefined;
+    }
   }
-  return toDjangoInt(entry.value, key);
+  if (type === 0n) {
+    return 0;
+  }
+  if (type === 1n) {
+    return 1;
+  }
+  throw ApiException.deviation(HttpStatus.BAD_REQUEST, D47_MESSAGE);
 }
 
 /** `file.display_name.lower()` — anything but a `str` has no `.lower`. */
@@ -192,17 +271,6 @@ function uploadedFileOf(entry: DrfRequestDataEntry): { buffer: Buffer; mimetype:
     throw new PythonAttributeError(pythonTypeName(entry.value), 'content_type');
   }
   return entry.file;
-}
-
-/**
- * The `integer` column. v1 hands any Python int to `INSERT` and PostgreSQL raises
- * `integer out of range` — **after** the upload, so the object stays (measured).
- */
-function int4Column(type: bigint): number {
-  if (type < INT4_MIN || type > INT4_MAX) {
-    throw new Error('integer out of range');
-  }
-  return Number(type);
 }
 
 function pythonTypeName(value: unknown): string {

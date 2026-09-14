@@ -29,11 +29,18 @@ export class RecordingFileStorage implements FileStorage {
   /** What `generate_signed_url` returns — v1's `test_get_url` sets `"This is a URL"`. */
   signedUrl: (path: string) => string = (path) => `signed://${path}`;
 
+  /**
+   * Awaited by `uploadFromFile` **after** the call is recorded and before the object is stored.
+   * Lets a test hold two uploads open at once — the D46 check-then-act window.
+   */
+  beforeUpload: (path: string) => Promise<void> = () => Promise.resolve();
+
   reset(): void {
     this.calls.length = 0;
     this.objects.clear();
     this.failures.clear();
     this.signedUrl = (path) => `signed://${path}`;
+    this.beforeUpload = () => Promise.resolve();
   }
 
   getBucket(name: string): Promise<FileStorageBucket> {
@@ -54,13 +61,13 @@ export class RecordingFileStorage implements FileStorage {
         }
         return Promise.resolve(this.objects.has(path));
       },
-      uploadFromFile: (data: Buffer, contentType: string) => {
+      uploadFromFile: async (data: Buffer, contentType: string) => {
         this.calls.push(['upload', path, contentType]);
+        await this.beforeUpload(path);
         if (this.failures.has('upload')) {
-          return Promise.reject(new Error('error uploading file'));
+          throw new Error('error uploading file');
         }
         this.objects.set(path, { data: data.toString('utf8'), contentType });
-        return Promise.resolve();
       },
       generateSignedUrl: (options: SignedUrlOptions) => {
         this.calls.push(['sign', path, options.version, options.expirationSeconds, options.method]);

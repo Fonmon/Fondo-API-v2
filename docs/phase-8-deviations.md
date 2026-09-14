@@ -16,6 +16,7 @@ Audience: `nestjs-reviewer` (§1–§5), `manual-tester` (§6 — everything it 
 | Storage boundary | `FILE_STORAGE` + `GcsFileStorage` (`@google-cloud/storage` **8.1.0**, new dependency) + `UnavailableFileStorage` for `ENVIRONMENT=test` |
 | Shared semantics (`src/common/`) | `pythonLower` + its generated fixture (measurement 7); `drf-request-data.ts` (measurement 2, D22 subset); `parseDjangoIntPathId`; **`readUploadedFile` now takes the last part** (§4 P8-F5) |
 | Tests | v1's `test_file_views.py` **8 of 8** ported under their own names; admin cells written from source + measured v1 (v1 has none) |
+| **Follow-up 2026-09-14** | Plan §5 **D46** (409) and **D47** (400) on `POST /api/file`, per operator Q40–Q42. See §4, §5.1, §6.1 rows 7–9, §7.9–§7.10, and the gate table below |
 
 The four route rows in `django-url-conf.ts`, `permission-matrix.ts` and
 `v1-role-matrix.fixture.ts` already existed and were **checked, not edited**: patterns
@@ -55,6 +56,55 @@ from arithmetic, and their sums reproduce both totals exactly:
 **No cell was removed.** Two changed subject, both named above; the multipart one was
 **certifying the defect** P8-F5 fixes.
 
+### Gate for the D46 / D47 follow-up (2026-09-14)
+
+The baseline was re-measured at `76e3366` in this session, not copied. "After" was run on the
+files whose hashes are listed in §5.1, and `sha256sum -c` passed both before and after the gate.
+
+| | baseline (`76e3366`) | after (D46/D47) |
+|---|---|---|
+| `npm run lint` | exit 0 | **exit 0** |
+| `npx tsc --noEmit` | exit 0 | **exit 0** |
+| `npm test` | exit 0 — 2482 / 77 suites | **exit 0 — 2517 / 77 suites** |
+| `npm run test:e2e` | exit 0 — 1297 passed + 2 skipped; 22 passed + 1 skipped of 23 | **exit 0 — 1331 passed + 2 skipped; 22 passed + 1 skipped of 23** |
+| `fixture-check.sh \| diff - BASELINE-fondodev-2026-09-12.txt` | exit 0 | **exit 0** |
+| control: `DB=fondo_api_test …` | exit 1 | **exit 1** |
+
+**+35 unit and +34 e2e, all in two suites.** The per-suite counts come from each run's own
+`--json` output, and no other suite changed:
+
+| suite | baseline | after | Δ |
+|---|---|---|---|
+| `src/files/file.service.spec.ts` | 42 | **77** | +35 |
+| `test/file.e2e-spec.ts` | 97 | **131** | +34 |
+
+**Every baseline title that no longer appears is accounted for,** matched by case name against
+the titles in the final run.
+
+| suite | baseline titles gone | renamed only | **changed subject** (v1 behaviour → D46/D47) | **removed** |
+|---|---|---|---|---|
+| unit | 16 | 6: `M1-again-overwrite`, `M1-case-variant-same-path`, `M2-name-as-file`, `P-json-name-number` and `a JSON null name` (all five now also assert "not queried by D46"), and `M5-type-underscore` (now in the D47 accepted table) | 7: `M2-type-as-file`, `M5-type-abc`, `M5-type-1.0`, `P-json-type-list` (500 → 400); `M5-type-arabic3`, `M5-type-neg1` (201 → 400); `M5-type-int4-overflow` (object stored, then 500 → 400) | 3, listed below |
+| e2e | 25 | 16: the 14 `G-type-*` query cells (unchanged: only their `describe` was renamed to "measurement 5 — int(), and D47 on top of it", and D47 does not apply to `?type=`), `M3-existing-row-no-blob` (Q41) and `M5-type-underscore` | 9: `M2-type-as-file`, `M2-type-scalar-and-file`, `M5-type-abc`, `M5-type-1.0`, `P-json-type-list` (500 → 400); `M5-type-arabic3`, `M5-type-neg1` (201 → 400); `M5-type-int4-overflow` (→ 400); `M3-cross-type` (500, then 201 on retry → 409 both times, with zero storage calls) | 0 |
+
+The three removed unit cells:
+* **`accepts the int4 bounds themselves`.** It asserted that `-2147483648` and `2147483647` are
+  stored, which D47 now forbids. Its successor is the refused cell `int4 max`, alongside
+  `M5-type-int4-overflow` and `int4 min - 1`.
+* **`JSON numbers and booleans go through int() too`.** Its assertions moved into the D47 accepted
+  table as `Z-json-type-float (int(1.5) is 1)` and `Z-json-type-true (int(True) is 1)`, with the
+  same object paths. That table adds `JSON 0`, `JSON 1`, `JSON false` and `JSON 0.9`.
+* **`M3-cross-type` (unit).** Its assertion, that the insert fails after the upload and the object
+  stays, is now the `D46 window` cell. The assertion is the same, but it is framed as the losing
+  side of the measured race, because a sequential cross-type upload can no longer reach the insert.
+
+⚠️ **A pre-existing cosmetic defect, not introduced here and not fixed.** Measured on the final
+run: **24** titles in `test/file.e2e-spec.ts` render `NaN`, because a `%i` placeholder receives a
+string. They are the 10 `G-type-*` cells (e.g. `G-type-1: 200 with NaN files`) and the 14 body-shape
+cells (e.g. `P-json-null → NaN, the view's own response`). Their assertions are correct; only the
+titles are wrong. I fixed the same defect in the two cells I added, and left the baseline's cells
+alone so this change stays scoped. The 5 unit titles that contain "NaN" name the value on purpose
+and are not affected.
+
 ---
 
 ## ⚠️ `fondodev` was never written to, and nothing reached Google, SES or SQS
@@ -90,6 +140,8 @@ Everything under `~/.fondo-parity-harness/p8/`.
 | `oracle2.py` → `oracle2-out.jsonl` | `HEAD`, `OPTIONS`, `PUT` on `AdminView`; roles 1–3; list bytes for a name with U+2028/U+2029 | single run |
 | `sign.py` / `sign.js` | v1's `generate_signed_url(version="v4", expiration=5 min, method="GET")` vs this adapter's library, same key, same pinned instant, no network (`--network none` / `unshare -rn`) | **8 of 8 URLs identical** |
 | `gen-lower.py`, `scripts/gen-python-lower-fixture.py` | CPython 3.9.25 `str.lower()` as data, with a self-check | see §2.4 |
+| `oracle-d46.py` → `oracle-d46-out.jsonl` (2026-09-14) | 18 cases for D46/D47 (8 `I-*`, 1 `N-*`, 3 `X-*`, 6 `Z-*`): the `int()` axes (`I-*`), a name holding U+0000 (`N-nul-name`), the case-variant corner (`X-*`), and measurement 2 against bad types and JSON types (`Z-*`). Same prologue, fake and recorders as `oracle.py`, `api.settings.test`, proxies set to a closed port, clone `fondodev_p8` only | single run; the clone was reset **in place** before and after (`reset-clone.sh`, hstore OID `3417907` kept both times). CPython `int()` also checked on its own in `python:3.9-slim --network none` |
+| v2 Prisma probe (read-only, `fondo_api_test`) | `findUnique({ where: { display_name } })` with U+0000, and with a lone surrogate | U+0000 **throws** `22021`; a lone surrogate **resolves `null`** |
 
 ---
 
@@ -105,7 +157,7 @@ Everything under `~/.fondo-parity-harness/p8/`.
 | a `file` field **and** a `file` part, either order | the **part** is uploaded → **201** |
 | two `file` parts | the **second** is uploaded → **201** |
 | `name` as a file part, alone or beside a `name` field | **500** after `get_bucket` (`.lower()` on `InMemoryUploadedFile`) |
-| `type` as a file part, alone or beside a `type` field | **500** before any storage call (`int(InMemoryUploadedFile)`) |
+| `type` as a file part, alone or beside a `type` field | **500** before any storage call (`int(InMemoryUploadedFile)`) — ⚠️ **v2 since D47: 400** `Type must be 0 or 1`, still no storage call (§4) |
 | a repeated `name` field | the **last** value |
 
 `MultiValueDict.update` (Django 2.2.27, read in the pinned image) **appends** `FILES` after the
@@ -136,10 +188,12 @@ show. The same partial write happens for a row whose object is missing
 (`M3-existing-row-no-blob`) and for a `type` beyond int4 (`M5-type-int4-overflow`, `integer out
 of range` after the upload).
 
-**Decided:** ported, in v1's statement order (`FileService.saveFile` carries the table). Fixing
-it means choosing between "check the name first" (changes a 201 to a 409/400 the client has
-never seen) and "delete the object on failure" (a second outward write with its own failure
-mode). Both are business decisions; see §7.1.
+~~**Decided:** ported, in v1's statement order.~~ **Superseded 2026-09-14 by D46 (operator Q40):**
+the exact cross-type name is now refused with 409 before any storage call; the retry is refused
+too. `M3-existing-row-no-blob` is **kept** as v1 (Q41). `M5-type-int4-overflow` is now D47's 400.
+The only partial writes left on this route are listed in `FileService.saveFile`'s table: the
+same-type row with a missing object (Q41), a name with U+0000, and D46's concurrent window
+(§4, measured).
 
 ### 2.3 Measurement 6 — the `created_at` tie → **v2 adds `id` as a tie-break; registered P8-D1**
 
@@ -185,7 +239,9 @@ form, in both directions (0 differ). No row claims to catch it.
   overwrites another row's object (P8-F2).
 * **4 (admin):** reproduced and extended by measurement — see §4 P8-F6 for `HEAD`.
 * **5 (`int()`):** `pythonInt` on the query, `toDjangoInt` on the body; no local regex. Measured
-  and pinned: `?type=٠`, `?type=0_0`, `?type=%201%20`, `type=" ٣ "`, `type=0_1`.
+  and pinned: `?type=٠`, `?type=0_0`, `?type=%201%20`, `type=" ٣ "`, `type=0_1`. ⚠️ Since D47 the
+  body's `type=" ٣ "` is **refused (400)** — `int()` still reads it as 3, which is not 0 or 1 —
+  and `type=0_1` is still accepted as 1. The query's `?type=` is untouched by D47.
 * **8 (storage):** `@google-cloud/storage` 8.1.0 behind `FILE_STORAGE`. Signed URLs measured
   byte-identical (8/8) given one clock read — which the adapter now guarantees, and a spec with
   an advancing clock pins (the first version of that spec used a constant clock and could not
@@ -234,20 +290,98 @@ the route's other invalid boundaries. I did not guess; §7.2.
 | **P8-D6** | a lone surrogate in an object name raises `UnicodeEncodeError` at `blob.exists()` | refused at `blob()` (the SDK's `File` constructor would throw `URIError` there) | same outcome — 500, no request sent. Only reachable from a JSON body, which always 500s on this route anyway |
 | **P8-D7** | `upload_from_file` without `size` → a resumable session | the SDK's default upload | same object; protocol not observable to a client |
 
-### Findings (v1 behaviour, ported, not fixed — for business-analyst / operator)
+### Plan §5 deviations applied on `POST /api/file` (operator decisions Q40, Q42)
 
-**P8-F1 — the cross-type duplicate is a self-perpetuating partial write.** §2.2. One live
-consequence to know before cutover: a v1 upload may already have left such an orphan in
-`fonmon`; nothing in the database can show it.
+| # | v1 | v2 | decided by |
+|---|---|---|---|
+| **D46** | an exact `display_name` already stored under the **other** type: upload, then the insert fails → **500**, object orphaned; a retry → **201**, no row | **409** `{"message": "A file with this name already exists with a different type"}`, **zero storage calls**, no row | Q40 |
+| **D47** | `type` not validated: non-integers **500** before storage; other integers **stored** (`3/…`, `-1/…`, `10/…`); past int4 → object stored, then **500** | unless v1's `int(type)` is **0** or **1**: **400** `{"message": "Type must be 0 or 1"}`, **zero storage calls**, no row | Q42 |
 
-**P8-F2 — an upload silently replaces another row's object.** Paths are lowercased; names are
-not. `NEW FILE` over an existing `New file` overwrites its bytes, writes no row, answers 201, and
-the list keeps showing `New file` — now with different content. Measured
-(`M1-case-variant-same-path`).
+**Order, as implemented and pinned:** v1's presence check (its bodiless 400, unchanged) → D47 →
+D46 → storage. Both refusals are `ApiException.deviation`, so `FileController` re-raises them past
+v1's blanket `except` (no 500, no `Exception saving file` log line), and they render with the
+view's `Allow` and `Vary: Accept` like any DRF `Response`. Cells: `D47 runs before D46 …`,
+`presence runs first …` (e2e and unit).
 
-**P8-F3 — `type` is not validated.** `type=3` and `type=-1` are stored (`3/<name>`,
-`-1/<name>`) and listed with `"type_display": "3"`; `type=2147483648` stores the object and
-then 500s. Measured (`M5-*`).
+#### D46 — what "exactly" means, and what is not refused
+
+* **Exact** is PostgreSQL `=` on `text` (`findUnique({ where: { display_name } })`), the equality
+  the `fondo_api_file_display_name_key` index uses. Not lowered, not trimmed, not normalised:
+  `ACTA NÚMERO 1` and `Acta número 1 ` under the other type are **201 with a new row**, as v1
+  (e2e `D46 neighbour — …`).
+* **Not refused, ported as v1 (Q41, no log line):** the same name under the same type, including
+  a case variant that lowers onto an existing object (`M1-again-overwrite`,
+  `M1-case-variant-same-path`), and a same-type row whose object is missing — still upload then
+  500, object stays (`M3-existing-row-no-blob`).
+* ⚠️ **D46 refuses one case v1 did not orphan** — measured on v1 (`oracle-d46-out.jsonl`,
+  `X-*`): with `Dup X` (type 0) and `DUP X` (type 1) stored, uploading `Dup X` as type 1 finds
+  `presentations/dup x` (DUP X's object), **overwrites it and answers 201 with no orphan**. The
+  exact predicate refuses it with 409. This is what Q40 specifies ("same `display_name`,
+  different type"); the plan's gloss that this predicate is "precisely the case that orphans an
+  upload" is not quite true — see §7.9. Pinned by `X-exact-t1-over-casevariant` (e2e, unit).
+* **A name no row can hold is not queried**, so the predicate is false and v1's failure follows:
+  - a `name` **file part** (with or without a `name` field) or a non-string JSON `name`: v1's
+    **500 after `get_bucket`**, unchanged — D46 never reads a file as a scalar (D23), and never
+    falls back to the `name` field (`Z-name-file-over-cross-type-name`, `M2-name-*`);
+  - a name containing **U+0000**: measured on v1 (`N-nul-name`) as upload → insert fails → 500,
+    object stays; measured on v2's Prisma (2026-09-14, `fondo_api_test`, read-only) that a lookup
+    with U+0000 **throws** `22021 invalid byte sequence for encoding "UTF8": 0x00`. Querying it
+    would have turned v1's sequence into a 500 with no storage calls. v2 matches v1
+    (`N-nul-name`, e2e and unit).
+  - Not handled, stated: a JSON `name` holding a **lone surrogate** is looked up (measured: Prisma
+    resolves `null` rather than throwing), so it could 409 against a row literally named with the
+    replacement character. A JSON body can never upload (P8-F7); no cell.
+
+#### D46 — the concurrent window (measured)
+
+Two uploads of one new name under types 0 and 1, held open at the upload
+(`RecordingFileStorage.beforeUpload`) so both checks read an empty table:
+**both pass D46; one answers 201 and writes the row; the other answers 500 after its upload —
+and its object stays, an orphan.** The unique index keeps the table consistent; it does not
+protect the bucket. A later identical upload is refused (409) — the cell's positive control.
+e2e `D46 race — MEASURED …`. D46 therefore **narrows** P8-F1 to this window; it does not close it.
+Closing it needs the check and the insert to bracket the upload under one lock — §7.10.
+
+#### D47 — the predicate, as measured
+
+The predicate is **"v1's own `int(data['type'])` returns 0 or 1"**. For a string that is
+`parsePythonIntLiteral`, the grammar `pythonInt` uses (via `toDjangoInt`). Measured on v1
+(`~/.fondo-parity-harness/p8/oracle-d46-out.jsonl`, 2026-09-14, clone `fondodev_p8`, reset in place
+before and after) and on CPython 3.9.25 (`python:3.9-slim`, `--network none`):
+
+| `type` | CPython `int()` | v1 | v2 |
+|---|---|---|---|
+| `' 1 '`, `'１'` (fullwidth), `'\xa01'` | 1 | 201 presentations | **201** (accepted) |
+| `'+0'`, `'-0'` | 0 | 201 proceeding | **201** (accepted) |
+| `'0_1'` | 1 | 201 | **201** (accepted) |
+| `'1_0'` | **10** | 201, stored `10/…` | **400** |
+| `'＋1'` (fullwidth plus), `'\x1c1'` | `ValueError` | 500 before storage | **400** |
+| `'abc'`, `'1.0'`, `''` | `ValueError` | 500 before storage | **400** |
+| `'-1'`, `' ٣ '`, `'2'` | −1, 3, 2 | 201, stored | **400** |
+| `'2147483648'`, `'-2147483649'` | int | object stored, then 500 | **400**, nothing stored |
+| a `type` **file part** (alone or beside a field) | `TypeError` | 500 before storage | **400** |
+| JSON `null`, `[0]`, `{}`, `2` | `TypeError` / 2 | 500 | **400** |
+| JSON `1.5`, `true` | 1 | 500 after `exists` (no file) | **500 after `exists`**, unchanged |
+
+⚠️ **The file-part row is a registered consequence, not a guess.** The operator's decision is
+"anything other than the integer 0 or 1 is refused"; `int()` of a file part is not the integer 0
+or 1, and v1 already failed there before any storage call, so nothing but the status changes
+(500 → 400). Pinned: `M2-type-as-file`, `M2-type-scalar-and-file`, `Z-type-file-name-cross`.
+⚠️ **JSON `1.5` / `true` pass** because `int()` truncates them to 1, as v1 did; flagged in §7.9.
+
+### Findings (v1 behaviour — for business-analyst / operator)
+
+**P8-F1 — the cross-type duplicate is a self-perpetuating partial write.** ✅ **Decided (Q40):
+refused before upload — D46**, above. Residual, measured: the concurrent window still orphans. One
+live consequence to know before cutover still stands: a v1 upload may already have left such an
+orphan in `fonmon`; nothing in the database can show it.
+
+**P8-F2 — an upload silently replaces another row's object.** ✅ **Kept (Q41)** — ported as v1,
+no refusal, no log line. Paths are lowercased; names are not. `NEW FILE` over an existing
+`New file` (same type) overwrites its bytes, writes no row, answers 201, and the list keeps
+showing `New file`. Measured (`M1-case-variant-same-path`).
+
+**P8-F3 — `type` is not validated.** ✅ **Decided (Q42): refused — D47**, above.
 
 **P8-F4 — ⚠️ cross-phase: v2 does not escape U+2028 / U+2029 in JSON responses.** DRF 3.11.2's
 `JSONRenderer` replaces both with the six-character escapes `\u2028` / `\u2029` (`renderers.py:106-109`, read in the
@@ -357,6 +491,85 @@ is the runner's per-mutant assertion, together with a content check for all 8 W-
 **One enumerated mutant is equivalent and is not claimed** — reading Σ's *lowered* neighbours
 (§2.4, measured 0 of 1,393).
 
+### 5.1 D46 / D47 mutation controls (2026-09-14)
+
+**Measured on the committed code — these exact files** (`mutation-targets-d46.sha256`, hashed
+immediately before the run):
+
+| file | sha256 |
+|---|---|
+| `src/files/file.service.ts` | `723903b852ddfc3b5fae97dd42b9f396ebf794950db5a4a994bd48112e03cdfe` |
+| `src/files/file.controller.ts` | `23ccac912a73f0d627487bcb9e0ea021543191e85961f0fb677d5c9c1e57ee7f` |
+| `src/files/file.service.spec.ts` | `6e6a30802b7242335c141ec7a4995af586fe9c20fe74dca51a9a95a80a15cbc6` |
+| `test/file.e2e-spec.ts` | `e7fd7a57cc3d1a27ba48bf53be79bf8955283356c4f407d2f4d907b56fff42e4` |
+
+The run went from 2026-09-14 07:07:28 to 07:13:00 (-05:00), with no edits to the tree in between.
+When it finished, `sha256sum -c mutation-targets-d46.sha256` exited 0, and all four files were OK.
+Anyone can check that these hashes match the commit that carries this document.
+
+Runner `~/.fondo-parity-harness/p8/mutate-d46.py`: all **19 definitions** (17 mutants and 2 blind
+controls) ran in **one run**. Raw results are in `mutants-d46-final.jsonl`, and the jest JSON for
+each run is in `mutants-d46/`. The rules are the same as above. Each anchor must occur exactly
+once. Every touched file is restored and hash-checked after each mutant. A suite that does not
+compile, or has zero assertions, is **INVALID**. Both suites (`file.service.spec.ts`,
+`test/file.e2e-spec.ts`) run for every mutant.
+
+**Result: 17 mutants planted: 17 killed, 0 survived, 0 invalid. The 2 blind controls: both
+survived, which is their expected outcome, and neither was invalid.** The blind controls are not
+counted in the 17.
+
+| # | wrong implementation | unit | e2e | named e2e cells that fail (abridged) |
+|---|---|---|---|---|
+| D46a | name compared case-insensitively | 35 ⚠️ | **2** | `D46 neighbour — a case variant under the other type is NOT refused`, `X-exact-t1-over-casevariant` |
+| D46b | the same type refused too | 3 | 2 | `M1-again-overwrite`, `M3-existing-row-no-blob (Q41, not refused)` |
+| D46c | checked after uploading | 3 | 6 | `M3-cross-type → D46`, `D46 a seeded type 0/1 row` (×2), `X-exact-…`, `a JSON body naming a cross-type file`, `D46 race` |
+| D46d | checked after `get_bucket`/`blob`/`exists`, before the upload | 3 | 6 | the same six |
+| D46e | the lowered name queried | 5 | 6 | the same six; unit adds `compares the name exactly as sent` |
+| D46f | the U+0000 guard dropped | 1 | 1 | `N-nul-name` |
+| D46g | a `name` file part read as its filename (the D23 shape) | 1 | 1 | `Z-name-part-FILENAME-is-a-cross-type-name` |
+| D46h | refusal not flagged `isDeviation` (laundered into a 500) | 4 | 6 | the D46 six |
+| D47a | `Number()` instead of `pythonInt` | 8 | 7 | `M5-type-1.0`, `an empty type`, `accepts M5-type-underscore`, `accepts I-fullwidth1`, `P-json-type-list`, `Z-json-type-null`, `Z-json-type-float` |
+| D47b | a regex (`/^[+-]?\d+$/` on `trim()`) instead of `pythonInt` | 7 | 5 | `accepts M5-type-underscore`, `accepts I-fullwidth1`, `P-json-type-list`, `Z-json-type-float`, `Z-json-type-true` |
+| D47c | runs after D46 | 22 | 3 | `D47 runs before D46 — … type=abc` / `type=5`, `Z-type-file-name-cross` |
+| D47d | runs before the presence check | **0** | 3 | `presence runs first — P-mp-missing-name, with type=abc`, `… P-mp-missing-file, with type=5`, `P-json-missing-file` |
+| D47e | a `type` file part parsed by its content (the D23 shape) | 3 | 3 | `M2-type-as-file`, `M2-type-scalar-and-file`, `Z-type-file-name-cross` |
+| D47f | checked after `get_bucket` | 26 | 27 | every D47 400 cell, plus the D46 cells (through their storage-call counts) |
+| D47g | the other reading of "parses": only strings may pass | 6 | 5 | `Z-json-type-float`, `Z-json-type-true`, `a JSON body naming a cross-type file`, `P-json-all-keys`, `P-json-name-number` |
+| D47h | refusal not flagged `isDeviation` | 23 | 21 | every D47 400 cell |
+| CTL | the controller's re-raise removed | **0** | 27 | every D46 and D47 refusal cell |
+| D46d-blind | D46d, with every `expect(storage.calls).toEqual([])` stripped from both specs | 0 | 0 | **survived**, as expected |
+| D47f-blind | D47f, stripped the same way | 0 | 0 | **survived**, as expected |
+
+**What the blind controls show.** A check that runs after the storage **reads** (`get_bucket`,
+`blob`, `exists`) but before the upload still answers the right status, writes no object and adds
+no row. The storage-call count assertion is the **only** guard against it, at both layers. Without
+it, D46d and D47f pass every cell.
+
+**Where only one layer catches a mutant:**
+* **D47d** and **CTL** are caught only end to end. The presence check and the re-raise live in the
+  controller, and no unit spec covers the controller.
+* ⚠️ **D46a's 35 unit failures are mostly an artefact, not detection.** The mutant calls
+  `findFirst`, which the unit mock does not define, and 24 of the 35 fail with `findFirst is not a
+  function`. The **2 e2e cells** are the real kill: they run the `mode: 'insensitive'` query
+  against PostgreSQL. No unit cell is claimed for D46a.
+
+⚠️ **Two earlier runs are superseded, and neither is evidence for this code.** Both are kept in
+`~/.fondo-parity-harness/p8/mutants-d46-superseded/`.
+1. **An instrument defect.** In the first run, both blind controls were **INVALID**, not
+   survived. Stripping the assertion to `void 0;` left `storage` unread in some unit cells, so
+   `TS6133` stopped the unit suite from compiling, and it ran zero assertions. The runner now
+   strips it to `void storage.calls;`. A rerun of the two blind controls then survived.
+2. **Measured on files that changed afterwards.** After both earlier runs I edited
+   `file.service.ts`, `file.service.spec.ts` and `test/file.e2e-spec.ts`: two docblocks, and two
+   test titles whose printf placeholders rendered `NaN`. The coordinator found the stale hashes.
+   Because the pre-edit content was not kept, nothing on disk could show those edits were
+   harmless, so **all 19 definitions were re-run** on the final files (above).
+
+**How the final run compares with the superseded one,** checked per mutant, per layer, per named
+cell: every mutant failed the **same number** of cells in each layer. The only differences are
+the renamed titles of the two cells whose placeholders I fixed. No cell started or stopped
+catching a mutant.
+
 ---
 
 ## 6. For `manual-tester`
@@ -371,8 +584,18 @@ is the runner's per-mutant assertion, together with a content check for all 8 W-
 | 4 | P8-F4: a name containing U+2028/U+2029 renders raw in v2, escaped in v1 |
 | 5 | P8-F5: two `file` parts on `PATCH /api/user` / `PATCH /api/loan` — v2 now matches v1 (the **second** part); a Phase 3/4 baseline recorded before this commit will differ |
 | 6 | P8-D3: a file part with no `Content-Type` may be stored with a guessed type |
+| 7 | **D46** — an exact `display_name` stored under the **other** type: v1 **500** (object written; `M3-cross-type`) or v1 **201** (a retry, or an object already at that path — `M3-cross-type-retry`, `X-exact-t1-over-casevariant`) → v2 **409** `{"message":"A file with this name already exists with a different type"}`, **no storage call** in v2. Also a JSON body naming such a file: v1 500 → v2 409 |
+| 8 | **D47** — `type` whose `int()` is not 0 or 1: v1 **201, stored** (`-1`, `3`, `' ٣ '`, `1_0`, …), v1 **500 with the object stored** (past int4), or v1 **500 before storage** (`abc`, `1.0`, `''`, `＋1`, U+001C, a `type` **file part**, JSON `null`/list) → v2 **400** `{"message":"Type must be 0 or 1"}`, **no storage call** in v2. A JSON `type` of `2` (v1 500 after `exists`) is 400 too |
+| 9 | Only **D47 then D46** change a status. Where both apply, v2 answers **400** (e.g. `Acta número 1` with `type=abc`). The bodiless 400 of a **missing** key is unchanged, whatever `type` says |
 
 ### 6.2 Explicitly **unchanged** — if these differ, that IS a failure
+
+* The D46/D47 **non-refusals**: same name + same type (overwrite, 201, no row); a same-type row
+  whose object is missing (500, object written); a case variant or a trailing-space variant under
+  the other type (201, new row); `type` of `' 1 '`, `'１'`, NBSP+`1`, `'+0'`, `'-0'`, `'0_1'` (201);
+  a `name` **file part** — even one whose *filename* is a stored name — (500 after `get_bucket`);
+  a name containing U+0000 (500 after the upload, object written); JSON `type` `1.5` / `true`
+  (500 after `exists`).
 
 * Every status, `Allow`, and `Vary: Accept` presence in `oracle-out2.jsonl` and `S1`–`S12`
   except the rows above.
@@ -396,8 +619,10 @@ is the runner's per-mutant assertion, together with a content check for all 8 W-
 
 ### 6.4 Pre-declared rows — do not re-file these
 
-**D22** (with the §3 note), **D23**, **P3-D6**, rule **12b** (no parser narrowing — `text/plain`
-is a 500 here, not a 415), and P8-D1 … P8-D7, P8-F1 … P8-F7 above.
+**D22** (with the §3 note), **D23**, **D46**, **D47** (§4, with §6.1 rows 7–9), **P3-D6**, rule
+**12b** (no parser narrowing — `text/plain` is a 500 here, not a 415), and P8-D1 … P8-D7,
+P8-F1 … P8-F7 above. **D46's concurrent window** (§4) is a known, measured residual: an orphan
+object after a v2 500 in a two-request race is not a new finding.
 
 ---
 
@@ -449,3 +674,41 @@ approved phases; hoisting them onto the common one is a mechanical follow-up.
 
 `GET|POST /api/file`, `GET /api/file/<id>`, `GET /api/admin` implemented; v1's 8 file tests
 ported; admin covered from measurement. **C71 and D39 untouched** (out of scope).
+
+### 7.9 D46 / D47 — what the plan rows should say, and four points they leave open
+
+The rows can move to ✅ implemented. Wording corrections, each measured (§4):
+
+1. **D46's gloss "precisely the case that orphans an upload" is not exact, in either direction.**
+   - **Wider than the orphan:** when a case variant of the name already has an object under the
+     requested type (`Dup X` t0 + `DUP X` t1, then `Dup X` t1), v1 **overwrote and answered 201
+     with no orphan**; D46 refuses it (409). This follows Q40's predicate as written; I did not
+     narrow it. Operator: confirm that refusal is wanted (I read it as desirable: the upload
+     would otherwise have silently replaced `DUP X`'s document — P8-F2's hazard).
+   - **Narrower than the orphan:** two concurrent cross-type uploads still orphan (measured,
+     §4 "concurrent window"). So do the cases Q41 keeps (same-type row, missing object) and a
+     name with U+0000.
+2. **D47's "parses with `pythonInt`" is defined only for strings.** Multipart and form values are
+   always strings, so every body that can upload is covered exactly. For the rest I implemented
+   "v1's own `int(type)` is 0 or 1": a `type` **file part**, JSON `null` / list / object → **400**;
+   JSON `1.5` / `true` / `0.9` / `false` → **pass** (`int()` truncates), then v1's 500 at
+   `.content_type`. No 201 depends on it (P8-F7). The strict alternative ("only a string may
+   pass") is mutant **D47g**, and the cells that pin the choice are named in §5. Operator /
+   business-analyst to confirm, or say "strings only".
+3. **The file-part `type` row is a status change on a case v1 already refused before storage**
+   (500 → 400). I applied D47 because `int()` of a file is not "the integer 0 or 1"; if the
+   operator meant D47 to change only requests that reach storage, that one row reverts to 500.
+4. **Both refusals are reached only by ADMIN** (`FileView` `POST 0`), after authentication and
+   the role check, so D46's 409 is not a name-existence probe for other roles (e2e cell
+   `a MEMBER is refused by the role guard (403) before D46 runs …`). Listing names is already
+   `GET 3`, so the 409 discloses nothing new to anyone.
+
+### 7.10 D46's concurrent window — if the operator wants it closed
+
+Measured (§4): both checks pass, the loser orphans. The mechanism that would close it within one
+database is to **hold a transaction-scoped advisory lock keyed on `display_name` from the check
+through the insert**, with the upload inside (`pg_advisory_xact_lock(hashtext(name))` in a
+`prisma.$transaction`). That keeps a connection and a transaction open for the whole upload — a
+real cost on a pool — and changes the D46 unit of work, so it is a decision, not a fix I slipped
+in. At the fund's volume (37 documents in about six years, one admin) the window needs two
+concurrent uploads of the same name under different types. Not implemented.

@@ -61,7 +61,10 @@ export class FileController {
    * a plain field passes and then 500s on `.content_type`, as in v1 (measurement 2;
    * `common/http/drf-request-data.ts`).
    *
-   * Bodiless on every branch: **201**, **400**, **500**.
+   * v1's branches are bodiless: **201**, **400**, **500**. v2 adds two refusals raised by
+   * `FileService.saveFile` before any storage call and re-raised past the `except` below:
+   * plan §5 **D47** — **400** `{"message": "Type must be 0 or 1"}` — then **D46** — **409**
+   * `{"message": "A file with this name already exists with a different type"}`.
    */
   @DrfNoRequestData()
   @Post()
@@ -84,6 +87,12 @@ export class FileController {
         status = HttpStatus.BAD_REQUEST;
       }
     } catch (exception: unknown) {
+      if (exception instanceof ApiException && exception.isDeviation) {
+        // D47 (400) and D46 (409) — deliberate v2 refusals, raised before any storage call.
+        // v1's blanket `except Exception` would launder them into a 500 and log them as
+        // failures; they are neither. See `ApiException.deviation`.
+        throw exception;
+      }
       this.logger.error(`Exception saving file: ${describeException(exception)}`);
       if (isNonAsciiBoundaryFailure(request)) {
         // Plan §5 D22 decides this case for every multipart endpoint in Phases 4–8, this one
