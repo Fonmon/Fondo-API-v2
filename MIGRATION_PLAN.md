@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-09-14 | v4.31 | Board row 9 corrected: it still read "Blocked on P8 and P8b" after v4.30 closed both. Phase 9 starting. |
 | 2026-09-14 | v4.30 | ✅ **Phase 8b CLOSED — approved** on re-check of `796ba2b`. C71, C87, C88, C89 closed; D39, D48, D49 implemented. `TIME_ZONE` is now pinned, so **runbook step 3** gains a pre-boot check of production's value (review N3 — not verifiable from the repo). **C90** opened for two non-gating test nits (Phase 9 cleanup). Phase 9 next. |
 | 2026-09-14 | v4.29 | 🟡 **Phase 8b fix round landed** at `796ba2b` (C88 int4 guard, C89 zone pinned to `America/Bogota`, C87 wording). Gate re-measured independently (lint 0, `tsc` 0, 2590 / 80 unit, 1348 + 2 e2e, fixture diff 0 / control 1; per-suite deltas attributed); register hashes match the commit (17 of 17). Re-check with `nestjs-reviewer` dispatched. |
 | 2026-09-14 | v4.28 | 🟡 **Phase 8b review: APPROVED WITH CONDITIONS.** One measured code defect — **C88**: an `owner_id` above int4 reaches Prisma and throws P2020, where the code, the register and a test name all claimed it skips as missing (the unit cell mocked the lookup; the e2e cell used 999999). **C89**: D48's zone and the runner's selection zone have different sources. **C87** widened to three sites. The rest verified with checks named in the review. Fix round dispatched to `nestjs-developer`. |
@@ -1793,7 +1794,7 @@ on the **10:00 Bogotá pass only**, which **needs no code**: selection is date-g
 | 7b Scheduler *runner* | ✅ **CLOSED — approved w/ conditions** (`a191f74`) | ✅ | ✅ **PASS** (`3659eef`; no re-round — nothing conditioned changes a row, a byte, a status or a body) | ✅ **Approved w/ conditions** (C68–C76) | 🟡 **C71, C72 dispatched** | **C74 ✅ closed** (`a191f74`, gated P6's start); **C72 code half ✅** (`cfa57ea`); C68–C70, C73, C75, C76 🟡 → P6 gate; **C71 + C72 policy half → `business-analyst`** |
 | 8 Files + admin | ✅ **CLOSED — approved** (re-check of `8948f79`; docs `935f3fb`, `1750256`; C86 pin `a963e5f`) | ✅ | ✅ **PASS** + ✅ C79 re-measure (500/500) | ✅ **Approved** after one narrow changes-requested round | ✅ `ba-phase-8-files.md` | C79–C82, C85, C86 ✅; D45–D47 registered/implemented; C83 non-gating (P9 cleanup); **C84 operator action before cutover** |
 | 8b Birthday notifications | ✅ **CLOSED — approved** (re-check of `796ba2b`) | ✅ | ✅ **PASS** (`parity-phase-8b.md`) | ✅ **Approved** after one conditions round | ✅ `ba-phase-8b-birthdays.md` — concerns resolved by **Q51**/**Q52** | C71, C87–C89 ✅; D39, D48, D49 implemented; **C90** non-gating (P9 cleanup); runbook 3a/3a-bis delete 1497/2142; ⏰ task 2142 deadline 14 November 2026 |
-| 9 Cutover, hstore→jsonb | ⬜ Blocked on P8 and P8b | — | — | — | — | **C39** lands here |
+| 9 Cutover, hstore→jsonb | 🟡 **STARTING** — P8 and P8b closed; `nestjs-developer` (step-6 migrations, D34, D6/D11 constraints, runbook) and `business-analyst` (C49 re-decisions for the operator) dispatched | ⬜ | ⬜ | ⬜ | ⬜ | **C39** lands here; **C49** re-decisions; C83, C90 cleanup; C84 operator action |
 
 **Legend.** ✅ done · 🟡 next / open-but-tracked · 🔴 overdue · ⬜ not started · ⚠️ unverified.
 "Ready" means no unmet dependency, not scheduled next.
