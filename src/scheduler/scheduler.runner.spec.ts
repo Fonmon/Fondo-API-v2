@@ -165,7 +165,16 @@ describe('SchedulerRunner', () => {
       expect(tasks.findDueUnprocessed).toHaveBeenCalledWith({ year: 2026, month: 9, day: 6 });
     });
 
-    it('honours a configured time zone other than the default', async () => {
+    /**
+     * ⚠️ **Renamed in the Phase 8b review fix round (C89).** Until `5e3457a` this was
+     * `honours a configured time zone other than the default`. The schema now pins `TIME_ZONE` to
+     * `America/Bogota`, so no deployment can configure another zone, and the old name described
+     * a capability that no longer exists. The cell is kept, and still sets a UTC config on the
+     * mock, because what it pins is still true and still worth pinning: the runner reads its
+     * zone **from configuration**, not from a constant of its own. One source is enforced by
+     * `zone-single-source.spec.ts`; this is the plumbing that source flows through.
+     */
+    it('reads its zone from configuration, not from a constant of its own (C89)', async () => {
       config.timeZone = 'UTC';
 
       await runner.run(LATE_EVENING_UTC);

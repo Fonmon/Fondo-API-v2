@@ -61,9 +61,25 @@ export class NotificationExecuter implements SchedulerExecuter {
    * no longer chooses who receives a birthday greeting (§2.3). Payment reminders and every
    * other `type` go down v1's path unchanged.
    *
-   * The skip is a *return*, never a *throw*: a throw releases the claim and clones no
-   * successor (`scheduler-executer.ts`, C77), which would end the yearly chain. Q48 requires the
-   * chain to keep rolling, so a member who returns is greeted again with no action.
+   * The skip is a *return*, never a *throw*. A throw releases the claim (`scheduler.runner.ts`),
+   * so the row stays unprocessed, clones nothing on that pass, and D7's `<=` picks it up again at
+   * every later pass: the chain is **stalled**, logged twice a day, and clones only once a pass
+   * gets through (C87). That is right for a malformed row someone must repair, and wrong for a
+   * greeting that simply should not go out, which would retry and log for as long as the member
+   * is away. So a departed or missing owner is a return: processed, cloned, chain rolling (Q48).
+   *
+   * ## The owner read and the audience read are deliberately not atomic (review m3)
+   *
+   * {@link MemberDirectory.ownerStatus} and {@link MemberDirectory.activeMemberIdsExcept} are two
+   * statements, not one transaction. Nothing observable depends on their agreeing:
+   *
+   *  * the owner is removed from the audience **whatever** their status at the second read, so a
+   *    member deactivated between the two reads is not greeted about themselves either way;
+   *  * a member activated or deactivated between the reads joins or leaves this one audience,
+   *    exactly as if the change had landed a second earlier or later.
+   *
+   * ⚠️ Do not wrap them in a transaction. It buys nothing, and it invites moving the SQS publish
+   * inside it, which `NotificationPublisher` forbids (a publish is not rolled back).
    */
   async run(payload: HstoreMap): Promise<SchedulerExecuterOutcome> {
     // `json.loads(payload["user_ids"])`. Raises for an absent key (C23) and for a NULL value.
@@ -76,6 +92,11 @@ export class NotificationExecuter implements SchedulerExecuter {
     }
 
     const ownerId = parseOwnerId(payload);
+    if (ownerId === null) {
+      // C88: beyond `integer`, so no `auth_user` row can have it. Answered here, with no query:
+      // Prisma refuses the bind (P2020), which would throw and stall the row instead of §2.2.
+      return MISSING_OWNER;
+    }
     const owner = await this.members.ownerStatus(ownerId);
     if (owner === 'inactive') {
       // D39 (Q35, Q48).
@@ -83,9 +104,7 @@ export class NotificationExecuter implements SchedulerExecuter {
       return { ok: true, detail: 'owner-inactive' };
     }
     if (owner === 'missing') {
-      // §2.2: a hard-deleted or hand-written owner. No announcement, but it is not the expected
-      // case, so `ok: false` puts a WARN naming the task in the runner's log.
-      return { ok: false, detail: 'owner-missing' };
+      return MISSING_OWNER;
     }
 
     // D49 (Q49): the stored list is ignored for the audience.
@@ -109,27 +128,38 @@ export class NotificationExecuter implements SchedulerExecuter {
 /** The `type` both birthday writers store (`services/user.py:273`). */
 export const BIRTHDATE_PAYLOAD_TYPE = 'birthdate';
 
+/**
+ * §2.2: a birthday whose owner has no `auth_user` row. No announcement, but it is not the expected
+ * case, so `ok: false` puts a WARN naming the task in the runner's log. Shared by the lookup's
+ * `missing` answer and C88's no-query answer for an id beyond `integer`, so the two cannot drift.
+ */
+const MISSING_OWNER: SchedulerExecuterOutcome = { ok: false, detail: 'owner-missing' };
+
 /** `auth_user.id` is `integer`; a larger id cannot name any row. */
 const MAX_INT4 = 2147483647;
 
 /**
  * `payload["owner_id"]` as a member id, for D39/D49. v1's executer never reads this key.
  *
- *  * absent → `KeyError: 'owner_id'`, thrown: the row stays unprocessed and is logged, like
- *    every other missing key (C23). Both writers always set it (`services/user.py:271`), so only
- *    a hand-written row reaches this.
+ *  * absent → `KeyError: 'owner_id'`, thrown. The row stays unprocessed, is retried and logged at
+ *    every pass, and clones nothing until it is repaired (C87). Both writers always set it
+ *    (`services/user.py:271`), so only a hand-written row reaches this.
  *  * NULL → `TypeError`, as for `message`/`target` (P7-D4).
- *  * not ASCII decimal digits → `ValueError`, thrown.
- *  * digits beyond `integer` → no row can match, so the caller gets `MAX_INT4 + 1` and the
- *    lookup answers `missing` without sending an out-of-range bind to PostgreSQL.
+ *  * not ASCII decimal digits → `ValueError`, thrown, with the same stall.
+ *  * digits beyond `integer` → **`null`**: no row can match, and the caller answers `missing` with
+ *    **no query** (C88). Measured by `nestjs-reviewer` on `fondo_api_test`: `findUnique` with
+ *    `2147483647` returns `null`, with `2147483648` it throws P2020 (value out of range).
+ *
+ * ⚠️ **Whoever repairs a stalled row must also move its `run_date` to the next birthday** (D48's
+ * rule). D7's `<=` sends a past-dated row on the very next pass, saying *"hoy"* on the wrong day.
  */
-function parseOwnerId(payload: HstoreMap): number {
+function parseOwnerId(payload: HstoreMap): number | null {
   const text = requireText(payload, 'owner_id');
   if (!/^[0-9]+$/.test(text)) {
     throw new Error(`ValueError: invalid owner_id in scheduler payload: '${text}'`);
   }
   const id = Number(text);
-  return id > MAX_INT4 ? MAX_INT4 + 1 : id;
+  return id > MAX_INT4 ? null : id;
 }
 
 /**

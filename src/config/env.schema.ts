@@ -117,8 +117,26 @@ export const envSchema = z.object({
   // --- localisation --------------------------------------------------------
   /** v1: `settings.LANGUAGE_LOCALE = 'es'`. */
   LANGUAGE_LOCALE: z.literal('es').default('es'),
-  /** v1: `settings.TIME_ZONE = 'America/Bogota'` with `USE_TZ = True`. */
-  TIME_ZONE: z.string().trim().min(1).default('America/Bogota'),
+  /**
+   * v1: `settings.TIME_ZONE = 'America/Bogota'` with `USE_TZ = True`, hardcoded.
+   *
+   * ⚠️ **Pinned, not configurable: condition C89 (Phase 8b review m2).** v2 decides calendar
+   * dates in more than one place, and not all of them can read configuration:
+   *
+   *  * the scheduler cron's zone is a decorator argument, fixed at class definition
+   *    (`scheduler.runner.ts`, `BOGOTA_TIME_ZONE`);
+   *  * D48's birthday run date, `scheduleNotification`'s wall-clock-to-instant and every
+   *    `todayInBogota()` default use the constant `BOGOTA_TIME_ZONE`;
+   *  * the runner's "today" and `SchedulerTaskRepository`'s dedupe and selection queries read
+   *    this variable.
+   *
+   * A free string here let a deployment move the second group without the first: tasks written
+   * for one calendar and selected in another. Pinning the variable makes the constant the one
+   * source. `src/scheduler/zone-single-source.spec.ts` fails if any other value is accepted, if
+   * the cron zone differs from the configured one, or if D48's zone and the configured zone
+   * decide differently.
+   */
+  TIME_ZONE: z.literal('America/Bogota').default('America/Bogota'),
 
   // --- scheduler (Phase 7b) ------------------------------------------------
   /**

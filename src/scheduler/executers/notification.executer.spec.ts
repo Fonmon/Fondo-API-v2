@@ -269,7 +269,7 @@ describe('NotificationExecuter', () => {
     });
   });
 
-  describe('owner_id on a birthday task (§2.4)', () => {
+  describe('owner_id on a birthday task (§2.5)', () => {
     it('raises KeyError when it is absent, so the row stays unprocessed', async () => {
       const payload = { ...LIVE_PAYLOAD };
       delete payload.owner_id;
@@ -297,13 +297,33 @@ describe('NotificationExecuter', () => {
       expect(members.ownerStatus).toHaveBeenCalledWith(5);
     });
 
-    it('maps an id beyond integer to one no row can have, rather than an out-of-range bind', async () => {
+    /**
+     * **C88 boundary.** `auth_user.id` is `integer`. The largest value is queried like any id;
+     * one past it is answered `missing` without a query, because Prisma refuses that bind with
+     * P2020 (measured by `nestjs-reviewer`). The DB-backed half is in
+     * `test/scheduler-runner.e2e-spec.ts › C88 …`.
+     */
+    it('queries an owner_id of exactly 2147483647, the largest integer', async () => {
       members.ownerStatus.mockResolvedValue('missing');
 
-      await executer.run({ ...LIVE_PAYLOAD, owner_id: '99999999999' });
-
-      expect(members.ownerStatus).toHaveBeenCalledWith(2147483648);
-      expect(notifications.sendNotification).not.toHaveBeenCalled();
+      await expect(executer.run({ ...LIVE_PAYLOAD, owner_id: '2147483647' })).resolves.toEqual({
+        ok: false,
+        detail: 'owner-missing',
+      });
+      expect(members.ownerStatus).toHaveBeenCalledWith(2147483647);
     });
+
+    it.each(['2147483648', '99999999999', '1'.repeat(40)])(
+      'answers owner_id %s as a missing owner with no query and no send (C88)',
+      async (ownerId) => {
+        await expect(executer.run({ ...LIVE_PAYLOAD, owner_id: ownerId })).resolves.toEqual({
+          ok: false,
+          detail: 'owner-missing',
+        });
+        expect(members.ownerStatus).not.toHaveBeenCalled();
+        expect(members.activeMemberIdsExcept).not.toHaveBeenCalled();
+        expect(notifications.sendNotification).not.toHaveBeenCalled();
+      },
+    );
   });
 });

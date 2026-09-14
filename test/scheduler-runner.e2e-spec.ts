@@ -889,6 +889,69 @@ describe('Phase 7b — scheduler runner', () => {
       expect(rows[0].processed).toBe(true);
       expect(rows[1].payload).toBe(payload);
     });
+
+    /**
+     * **C88 (Phase 8b review M1).** `auth_user.id` is `integer`. Before the fix an `owner_id` beyond
+     * it reached `findUnique`, and Prisma refused the bind with P2020 (measured by
+     * `nestjs-reviewer` on this database): the task threw, was released, and would have stalled
+     * and logged at every pass instead of taking §2.2's skip-and-clone. The §2.2 cell above uses
+     * `999999`, which is in range, so it could not see this.
+     */
+    it('C88 — owner_id 99999999999: nothing sent, processed, cloned, counted as failed, not errored', async () => {
+      const payload = birthdayPayload('99999999999', [member.id, other.id]);
+      const id = await insertTask({ runDateIso: BIRTHDAY, payload, repeat: 4 });
+
+      const summary = await runner.run(TODAY);
+
+      expect(sqs.send).not.toHaveBeenCalled();
+      expect(summary).toEqual({
+        loaded: 1,
+        processed: 1,
+        failedDelivery: 1,
+        skippedClaimed: 0,
+        errored: 0,
+        cloned: 1,
+      });
+      const rows = await allTasks();
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({ id, processed: true, repeat: 4 });
+      expect(rows[1]).toMatchObject({ processed: false, repeat: 4 });
+      expect(rows[1].run_date.toISOString()).toBe('2027-09-07T05:00:00.000Z');
+      expect(rows[1].payload).toBe(payload);
+    });
+
+    /**
+     * **C88 boundary, against the real column.** Both ids name no row, so both end as a missing
+     * owner. What differs is how: `2147483647` goes through `findUnique` (and a spy sees it), while
+     * `2147483648` is answered before any query, which is the only way it cannot throw P2020.
+     */
+    it.each([
+      ['2147483647', true],
+      ['2147483648', false],
+    ] as const)(
+      'C88 boundary — owner_id %s is a missing owner; queried: %s',
+      async (ownerId, queried) => {
+        const lookup = jest.spyOn(prisma.authUser, 'findUnique');
+        try {
+          await insertTask({
+            runDateIso: BIRTHDAY,
+            payload: birthdayPayload(ownerId, [member.id]),
+            repeat: 4,
+          });
+
+          const summary = await runner.run(TODAY);
+
+          expect(summary).toMatchObject({ processed: 1, failedDelivery: 1, errored: 0, cloned: 1 });
+          expect(sqs.send).not.toHaveBeenCalled();
+          const ownerLookups = lookup.mock.calls.filter(
+            ([args]) => (args as { where?: { id?: number } }).where?.id === Number(ownerId),
+          );
+          expect(ownerLookups).toHaveLength(queried ? 1 : 0);
+        } finally {
+          lookup.mockRestore();
+        }
+      },
+    );
   });
 });
 
