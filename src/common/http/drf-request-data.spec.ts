@@ -1,12 +1,7 @@
 import type { Request } from 'express';
 import { PythonKeyError, PythonTypeError } from '../utils/python-obj';
 import { setUploadedFiles, type DjangoUploadedFile } from './django-multipart';
-import {
-  drfRequestDataGet,
-  drfRequestDataHas,
-  isMultipartInitFailure,
-  isNonAsciiBoundaryFailure,
-} from './drf-request-data';
+import { drfRequestDataGet, drfRequestDataHas, isMultipartInitFailure } from './drf-request-data';
 import { setParseState } from './drf-request-parsing.middleware';
 
 /**
@@ -97,46 +92,6 @@ describe('drfRequestDataGet — `request.data[key]`, each value from its own sou
   });
 });
 
-describe('isNonAsciiBoundaryFailure — the subset plan §5 D22 decides', () => {
-  const withDetail = (detail: string | null): Request => {
-    const request = req({});
-    setParseState(request, {
-      contentType: 'multipart/form-data',
-      hasBody: true,
-      parseErrorDetail: detail,
-      suspiciousOperation: null,
-    });
-    return request;
-  };
-
-  it.each([
-    [
-      'a non-ASCII boundary (D22)',
-      'Multipart form parse error - Invalid boundary in multipart: zzé',
-      true,
-    ],
-    [
-      'a replacement character, as latin1 bytes decode',
-      'Multipart form parse error - Invalid boundary in multipart: zz�',
-      true,
-    ],
-    [
-      'an empty boundary (not D22)',
-      'Multipart form parse error - Invalid boundary in multipart: ',
-      false,
-    ],
-    [
-      'a trailing space (not D22)',
-      'Multipart form parse error - Invalid boundary in multipart: zzz ',
-      false,
-    ],
-    ['bad base64', 'Multipart form parse error - Could not decode base64 data.', false],
-    ['no parse error', null, false],
-  ])('%s -> %s', (_label, detail, expected) => {
-    expect(isNonAsciiBoundaryFailure(withDetail(detail))).toBe(expected);
-  });
-});
-
 describe('isMultipartInitFailure — which parse failures v1 double-faults on', () => {
   const withDetail = (detail: string | null): Request => {
     const request = req({});
@@ -152,8 +107,18 @@ describe('isMultipartInitFailure — which parse failures v1 double-faults on', 
   it.each([
     ['S1 empty boundary', 'Multipart form parse error - Invalid boundary in multipart: ', true],
     [
-      'S2 non-ASCII boundary',
+      'S2 non-ASCII boundary (plan §7 C79: no D22 exception on this route)',
       'Multipart form parse error - Invalid boundary in multipart: zzé',
+      true,
+    ],
+    [
+      'a non-ASCII boundary decoded as latin1 (replacement character)',
+      'Multipart form parse error - Invalid boundary in multipart: zz�',
+      true,
+    ],
+    [
+      'a quoted trailing-space boundary',
+      'Multipart form parse error - Invalid boundary in multipart: zzz ',
       true,
     ],
     [

@@ -14,7 +14,7 @@ Audience: `nestjs-reviewer` (§1–§5), `manual-tester` (§6 — everything it 
 | Services | `FileService` — `save_file`, `get_files`, `get_signed_url`; `AdminService` — `test_email`, `test_notifications` |
 | Serializer | `serializeFile` / `fileTypeDisplay` — `FileSerializer`, `get_type_display` |
 | Storage boundary | `FILE_STORAGE` + `GcsFileStorage` (`@google-cloud/storage` **8.1.0**, new dependency) + `UnavailableFileStorage` for `ENVIRONMENT=test` |
-| Shared semantics (`src/common/`) | `pythonLower` + its generated fixture (measurement 7); `drf-request-data.ts` (measurement 2, D22 subset); `parseDjangoIntPathId`; **`readUploadedFile` now takes the last part** (§4 P8-F5) |
+| Shared semantics (`src/common/`) | `pythonLower` + its generated fixture (measurement 7); `drf-request-data.ts` (measurement 2, init-time multipart classification; its D22 subset was removed in the fix round, C79); `parseDjangoIntPathId`; **`readUploadedFile` now takes the last part** (§4 P8-F5) |
 | Tests | v1's `test_file_views.py` **8 of 8** ported under their own names; admin cells written from source + measured v1 (v1 has none) |
 | **Follow-up 2026-09-14** | Plan §5 **D46** (409) and **D47** (400) on `POST /api/file`, per operator Q40–Q42. See §4, §5.1, §6.1 rows 7–9, §7.9–§7.10, and the gate table below |
 
@@ -97,17 +97,64 @@ The three removed unit cells:
   stays, is now the `D46 window` cell. The assertion is the same, but it is framed as the losing
   side of the measured race, because a sequential cross-type upload can no longer reach the insert.
 
-⚠️ **A pre-existing cosmetic defect, not introduced here and not fixed.** Measured on the final
-run: **24** titles in `test/file.e2e-spec.ts` render `NaN`, because a `%i` placeholder receives a
-string. They are the 10 `G-type-*` cells (e.g. `G-type-1: 200 with NaN files`) and the 14 body-shape
-cells (e.g. `P-json-null → NaN, the view's own response`). Their assertions are correct; only the
-titles are wrong. I fixed the same defect in the two cells I added, and left the baseline's cells
-alone so this change stays scoped. The 5 unit titles that contain "NaN" name the value on purpose
-and are not affected.
+✅ **A pre-existing cosmetic defect, fixed in the review fix round (n4).** **24** titles in
+`test/file.e2e-spec.ts` rendered `NaN`, because a `%i` placeholder received a string. They were
+the 10 `G-type-*` cells (e.g. `G-type-1: 200 with NaN files`) and the 14 body-shape cells (e.g.
+`P-json-null → NaN, the view's own response`). The placeholders now consume every argument in
+order, e.g. `G-type-1 (/api/file?type=-1): 200 with 25 files` and `P-json-null (application/json,
+"null") → 500, the view's own response`. Measured on the fix-round run: **0** e2e titles in that
+suite contain `NaN`. The assertions did not change. The 5 unit titles that contain "NaN" name the
+value on purpose and are not affected.
+
+### Gate for the review fix round (2026-09-14)
+
+This round's changes: M1 (the D22 branch removed, C79), m1 (C85 pinned), m2, m4, m5, and n1–n4.
+The baseline is the reviewer's re-measurement at `ba5d6db`. No code changed between that commit
+and `a9a6475`.
+
+| | baseline (`ba5d6db`) | after (fix round) |
+|---|---|---|
+| `npm run lint` | exit 0 | **exit 0** |
+| `npx tsc --noEmit` | exit 0 | **exit 0** |
+| `npm test` | exit 0 — 2517 / 77 suites | **exit 0 — 2513 / 77 suites** |
+| `npm run test:e2e` | exit 0 — 1331 passed + 2 skipped; 22 passed + 1 skipped of 23 | **exit 0 — 1331 passed + 2 skipped; 22 passed + 1 skipped of 23** |
+| `fixture-check.sh \| diff - BASELINE-fondodev-2026-09-12.txt` | exit 0 | **exit 0** |
+| control: `DB=fondo_api_test …` | exit 1 | **exit 1** |
+
+**−4 unit, all in `src/common/http/drf-request-data.spec.ts`: 28 → 24.** Both counts come from
+each run's own `--json`.
+* Removed: the 6 rows of `isNonAsciiBoundaryFailure — the subset plan §5 D22 decides`, because the
+  function is deleted.
+* Added: 2 rows to `isMultipartInitFailure — which parse failures v1 double-faults on`, both
+  `true`. They are `a non-ASCII boundary decoded as latin1 (replacement character)` and `a quoted
+  trailing-space boundary`. The `S2` row was retitled.
+
+⚠️ The per-suite baseline was measured in a detached worktree at `a9a6475`. That run **exited 1**:
+16 suites loaded no assertions there, an instrument defect of the worktree that I did not
+investigate. So a per-suite comparison exists only for the **61** suites that ran on both trees.
+60 are equal, and `drf-request-data.spec.ts` went from 28 to 24. The other 16 suites hold 558 cells
+on the current tree, and 1959 + 558 = 2517, the reviewer's baseline total. None of their spec files
+is in this change's diff.
+
+**±0 e2e.** `test/file.e2e-spec.ts` stays at **131**.
+* Removed: the standalone cell `S2 / P-mp-nonascii-boundary → 400 parse error: plan §5 D22 decides
+  it (v1 is 500) — flagged`.
+* Added: the row `S2 / P-mp-nonascii-boundary (plan §7 C79: D22 does not apply here)`, in the
+  `expectUncaught500` boundary table.
+* Titles only, same assertions: the 24 `%i` titles (n4), and the boundary table's title, now
+  `… → 500 without Allow, Vary: Origin only (v1: no Vary, P8-D4) …`.
+* `expectUncaught500` now asserts `vary === 'Origin'` (m1). Its other callers, the four `G-type-*`
+  uncaught GET 500s, pass under it. v1's `Vary` on those GET pages was not measured in this round,
+  so the helper claims no parity for them.
 
 ---
 
-## ⚠️ `fondodev` was never written to, and nothing reached Google, SES or SQS
+## ⚠️ Data safety as measured: `fondodev` read-only; fakes and stubs for Google, SES and SQS
+
+What is measured is below. ⚠️ **For v1, "nothing reached Google" is not a measurement.** The
+closed-port proxy meant to fence v1 away from GCS was never shown to block anything by a control
+(`docs/parity-phase-8.md` §8, row GCS). What holds is weaker: no Google credentials exist on this
+host, and every v1 run patched `get_bucket` with a fake, whose recorded calls are the evidence.
 
 * `fondodev`: `SELECT` and `pg_dump` only. `scripts/parity/fixture-check.sh | diff -
   ~/.fondo-parity-harness/p6/out/FINAL2-fondodev.txt` → **exit 0**; control against
@@ -256,15 +303,30 @@ form, in both directions (0 differ). No row claims to catch it.
 No merge. `readUploadedFile` reads `request.files`; scalars come from `request.body`. §2.1
 explains why the presence helper is not the merge.
 
-### D22 — applied as written, and ⚠️ a conflict flagged
+### D22 — ✅ does not apply to `POST /api/file` (plan §7 **C79**, fix round)
 
-D22 decides a **non-ASCII boundary** is DRF's **400** parse error on "every multipart endpoint
-in Phases 4–8", naming the P8 file upload. Plan precedence (§5 decides v2) was followed:
-`POST /api/file` with a non-ASCII boundary answers **400** `{"detail": "Multipart form parse
-error - Invalid boundary in multipart: …"}`.
+**Now:** a **non-ASCII boundary** on `POST /api/file` answers **500 / 500** — v1's double-fault
+page, v2's uncaught zero-byte 500 with no `Allow` and `Vary: Origin` (P8-D4) — with 0 storage calls
+and no row. The D22 branch in `FileController.create` and its helper `isNonAsciiBoundaryFailure`
+were removed. Pinned by the e2e cell `S2 / P-mp-nonascii-boundary (plan §7 C79: D22 does not apply
+here)` in the `expectUncaught500` boundary table; inverted mutant **R7** (§5) re-plants the branch
+and must fail it.
 
-**The conflict:** D22's reasoning was "the same answer v2 gives for every other invalid
-boundary". On this route that is not true. `FileView.post` wraps `request.data` in `except
+**The invalid boundaries measured on this route, and nothing wider** (the earlier helper comment
+said every other invalid boundary keeps v1's 500 — including a too-long boundary, which no cell
+measures; that claim is withdrawn):
+
+| boundary | v1 | v2 | cell |
+|---|---|---|---|
+| empty `boundary=` | 500 | 500 | e2e `S1 / P-mp-empty-boundary`; parity `docs/parity-phase-8.md` §3.3 |
+| quoted trailing space `boundary="zzz "` | 500 | 500 | e2e `an invalid ASCII boundary (quoted trailing space)`; parity §1.4 |
+| non-ASCII `boundary=zzé` | 500 | **500** (was 400) | e2e `S2 / P-mp-nonascii-boundary …`; v1 parity §3.3 |
+| **unquoted** trailing space `boundary=zzz ` | **201** | **201** | parity §3.3 only (no e2e cell: Node strips the space before the parser) |
+| too long | not measured | not measured | none |
+
+**History (superseded by C79).** The first implementation applied D22 as written and answered
+**400**. The conflict it flagged: D22's reasoning was "the same answer v2 gives for every other
+invalid boundary". On this route that is not true. `FileView.post` wraps `request.data` in `except
 Exception`, so v1 answers every invalid boundary with a **500** — and measured under gunicorn it
 is the **141-byte double-fault page** with no `Allow`/`Vary` (the exception is raised in
 `MultiPartParser.__init__`, the view returns its 500, and Django's response handling re-reads
@@ -274,9 +336,8 @@ ported as **v1 500 / v2 500** (unmarked, no `Allow`; ⚠️ v1 sends no `Vary` a
 measured by `manual-tester`). An **unquoted** trailing space never reaches the multipart parser on
 either stack — gunicorn and Node both strip it from the header — so that request succeeds **201 / 201**.
 An earlier version of this paragraph did not distinguish the two, having been measured through Django's
-test client, which keeps the space. Either D22's row should say that on
-`POST /api/file` its pair is 500/400, or the operator may prefer 500 here for consistency with
-the route's other invalid boundaries. I did not guess; §7.2.
+test client, which keeps the space. `nestjs-reviewer` ruled 500 for this route (C79); §7.2 is
+closed.
 
 ---
 
@@ -289,7 +350,7 @@ the route's other invalid boundaries. I did not guess; §7.2.
 | **P8-D1** | list order within a `created_at` tie is undefined | `ORDER BY created_at, id` | stable; parity for tied rows not claimed (§2.3) |
 | **P8-D2** | `ENVIRONMENT == 'test'` builds an **anonymous** GCS client that makes real unauthenticated requests | `UnavailableFileStorage` refuses every call; tests inject a fake | a test that forgets its fake must fail, not reach `fonmon`. Test environments only |
 | **P8-D3** | a file part with **no** `Content-Type` uploads with `content_type=''` (`_get_content_type` tests `is None`) | the SDK treats `''` as unset and guesses from the object name | no browser sends such a part; the SDK exposes no way to send `''`. Pinned by `file-storage.spec.ts` |
-| **P8-D4** | uncaught 500 pages: gunicorn's 141-byte `text/html` (init-time multipart failures), Django's 27-byte `text/html` (`?type=abc`, storage errors on detail) | zero-byte 500, same absence of `Allow` and of `Accept` in `Vary` | the existing **P3-D6** class; status and header parity kept |
+| **P8-D4** | uncaught 500 pages: gunicorn's 141-byte `text/html` (init-time multipart failures), Django's 27-byte `text/html` (`?type=abc`, storage errors on detail) | zero-byte 500, same absence of `Allow` and of `Accept` in `Vary`. ⚠️ **Not the same header set** on the init-time multipart 500s (empty, quoted trailing-space and non-ASCII boundary): v1's gunicorn page has **no `Vary`**, v2 sends **`Vary: Origin`** (measured, `docs/parity-phase-8.md` §1.4, §2.4) | the existing **P3-D6** class; status parity kept. The `Vary: Origin` difference is registered here (plan §7 **C85**, no fix), the same kind of header-set difference **D24** registered on the same gunicorn double-fault page in Phase 3. Pinned by `expectUncaught500` (`response.headers.vary === 'Origin'`) in the e2e boundary table |
 | **P8-D5** | bucket literal `"fonmon"` | `GCS_BUCKET`, default `fonmon` (Phase 0 config) | one environment variable; the default is v1's literal |
 | **P8-D6** | a lone surrogate in an object name raises `UnicodeEncodeError` at `blob.exists()` | refused at `blob()` (the SDK's `File` constructor would throw `URIError` there) | same outcome — 500, no request sent. Only reachable from a JSON body, which always 500s on this route anyway |
 | **P8-D7** | `upload_from_file` without `size` → a resumable session | the SDK's default upload | same object; protocol not observable to a client |
@@ -392,8 +453,9 @@ showing `New file`. Measured (`M1-case-variant-same-path`).
 pinned image); measured on `GET /api/file` (`oracle2 G-u2028`). No file in `src/` escapes them
 (grep at this commit), so **every** JSON response in **every** phase that can carry
 user-entered text differs byte-wise when it contains either character; the parsed JSON is equal.
-Not fixed here — it is shared rendering owned by an approved phase. Pinned both sides by one e2e
-cell so a fix cannot land silently. §7.3.
+Not fixed — ✅ registered permanently as plan §5 **D45** (C80). Pinned by one e2e cell on
+`GET /api/file`: a change to the shared `res.json` rendering fails it. A change on any other
+rendering path would not. §7.3.
 
 **P8-F5 — `readUploadedFile` took the FIRST of two same-named parts; v1 takes the LAST.
 Fixed.** Measured (`M2-two-file-parts`). ⚠️ This changes **approved** Phase 3 and Phase 4
@@ -425,6 +487,26 @@ restores and hash-checks each file after each mutant.
 
 **Result, measured 2026-09-12 on this tree: 38 planted, 38 killed, 0 survived, 0 invalid.**
 
+**Re-run in the review fix round (2026-09-14), for every definition that plants into code M1
+changed.** The table below is the 2026-09-12 run, except row R7, which was rewritten. The re-run
+used the same runner, `mutate.py`, whose R7 definition is now the inverted one.
+* **Inverted R7** ran on the §5.1 hashes, from 11:45:48 to 11:46:04: **killed**, 1 e2e cell
+  (`mutants-R7-inverted.jsonl`). ⚠️ Re-planting the removed D22 branch must fail, and it fails
+  only `S2 / P-mp-nonascii-boundary …`. No unit cell covers the controller.
+* **R1, R2, R3, R5, R6a, R6b** (`src/common/http/drf-request-data.ts`) and **C1a, C1b, C8**
+  (`src/files/file.controller.ts`) ran from 11:48:21 to 11:50:57, on `drf-request-data.ts`
+  `sha256 af4b44802070059491952c0ae180bfcbd28d46f99e51d499f8648ca14a1a41de` and `file.controller.ts`
+  `867f9fc8bb7a894b26ac1da0751c62d8ea00dc2e7e717f16a13054c492c0e845`
+  (`mutation-targets-fixround-mutatepy.sha256`, checked OK from the repo afterwards):
+  **9 planted, 9 killed, 0 survived, 0 invalid** (`mutants-fixround-mutatepy.jsonl`). Unit/e2e
+  failing cells: R1 2/14, R2 3/33, R3 2/5, R5 1/1, R6a 4/3, R6b 1/1, C1a —/8, C1b —/8, C8 —/5.
+  The e2e counts are higher than in the table below because D46/D47 added cells to
+  `test/file.e2e-spec.ts`. R6a's 4 unit failures include the 2 `isMultipartInitFailure` rows this
+  round added.
+* R4, W\*, S\*, C2–C7, G\* and A\* plant into files this round did not change, or changed only in
+  docblocks (`file.service.ts`, `file-storage.ts`, `admin.service.ts`). They were **not re-run**,
+  and their rows below remain 2026-09-12 measurements.
+
 | # | wrong implementation | unit failures | e2e failures |
 |---|---|---|---|
 | W1 | `toLowerCase()` for `lower()` | 10 | — |
@@ -447,7 +529,7 @@ restores and hash-checks each file after each mutant.
 | R5 | JSON string `in` as key presence | 1 | 1 |
 | R6a | init-time multipart failure never detected | 2 | 2 |
 | R6b | every multipart parse error treated as init-time | 1 | 1 |
-| R7 | D22 not applied to the non-ASCII boundary | — | 1 |
+| R7 | ~~D22 not applied to the non-ASCII boundary~~ **inverted 2026-09-14 (C79):** the D22 branch **re-planted** in `FileController.create` (a non-ASCII boundary rethrown as DRF's 400) | — | 1: `S2 / P-mp-nonascii-boundary (plan §7 C79: D22 does not apply here)` |
 | C1a | `@DrfNoRequestData()` forgotten (415/400 before the view) | — | 7 |
 | C1b | parse errors not raised inside the view's `try` | — | 8 |
 | C8 | `Number()` for `int()` on `?type` | — | 5 |
@@ -497,23 +579,34 @@ is the runner's per-mutant assertion, together with a content check for all 8 W-
 
 ### 5.1 D46 / D47 mutation controls (2026-09-14)
 
-**Measured on the committed code — these exact files** (`mutation-targets-d46.sha256`, hashed
-immediately before the run):
+**Re-run in the review fix round, on the committed code — these exact files**
+(`mutation-targets-fixround.sha256`, hashed at 11:40:12, after the last edit to any target):
 
 | file | sha256 |
 |---|---|
-| `src/files/file.service.ts` | `723903b852ddfc3b5fae97dd42b9f396ebf794950db5a4a994bd48112e03cdfe` |
-| `src/files/file.controller.ts` | `23ccac912a73f0d627487bcb9e0ea021543191e85961f0fb677d5c9c1e57ee7f` |
+| `src/files/file.service.ts` | `2c373d10dd002c0edfabd80a65845033c0ff83f732dd9e1c19afb4cfac52e017` |
+| `src/files/file.controller.ts` | `867f9fc8bb7a894b26ac1da0751c62d8ea00dc2e7e717f16a13054c492c0e845` |
 | `src/files/file.service.spec.ts` | `6e6a30802b7242335c141ec7a4995af586fe9c20fe74dca51a9a95a80a15cbc6` |
-| `test/file.e2e-spec.ts` | `e7fd7a57cc3d1a27ba48bf53be79bf8955283356c4f407d2f4d907b56fff42e4` |
+| `test/file.e2e-spec.ts` | `bd3ee2147e72d1d3c4587edcc0c0d4101a31bf312521a9b3ea47ddda7381c1e1` |
 
-The run went from 2026-09-14 07:07:28 to 07:13:00 (-05:00), with no edits to the tree in between.
-When it finished, `sha256sum -c mutation-targets-d46.sha256` exited 0, and all four files were OK.
-Anyone can check that these hashes match the commit that carries this document.
+The run went from 2026-09-14 11:40:17 to 11:46:04 (-05:00). The 19 definitions finished at
+11:45:48, and inverted **R7** (§5) ran after them. No target was edited in between. `sha256sum -c`,
+**run from the repo**, passed for all four files both before and after (`POSTCHECK_EXIT=0`,
+`fixround-run.log`). ⚠️ That log also holds a first pre-run check that printed "FAILED open or
+read" for all four files. It ran from the harness directory, where the relative paths do not
+resolve, so it is my instrument's defect, not a mismatch. Anyone can check that these hashes match
+the commit that carries this document.
+
+The previous run's hashes (`ba5d6db`: service `723903b8…`, controller `23ccac91…`, e2e
+`e7fd7a57…`) are superseded. That run's raw results are kept in
+`mutants-d46-superseded/ba5d6db-final-run/`. Compared per mutant and per layer, this run has **the
+same status and the same number of failing cells**. The only title differences are 3 cells renamed
+by n4 (e.g. `P-json-missing-file → NaN, …` became `P-json-missing-file (application/json, "…") →
+400, …`).
 
 Runner `~/.fondo-parity-harness/p8/mutate-d46.py`: all **19 definitions** (17 mutants and 2 blind
-controls) ran in **one run**. Raw results are in `mutants-d46-final.jsonl`, and the jest JSON for
-each run is in `mutants-d46/`. The rules are the same as above. Each anchor must occur exactly
+controls) ran in **one run**. Raw results are in `mutants-d46-fixround.jsonl`, and the jest JSON
+for each run is in `mutants-d46/`. The rules are the same as above. Each anchor must occur exactly
 once. Every touched file is restored and hash-checked after each mutant. A suite that does not
 compile, or has zero assertions, is **INVALID**. Both suites (`file.service.spec.ts`,
 `test/file.e2e-spec.ts`) run for every mutant.
@@ -584,7 +677,7 @@ catching a mutant.
 |---|---|
 | 1 | P8-D1: tied `created_at` rows may come back in a different relative order |
 | 2 | P8-D4: uncaught 500s are zero bytes in v2, HTML in v1; status matches. ⚠️ **Headers do not all match** (measured by `manual-tester`, `docs/parity-phase-8.md` §2.4): on an init-time multipart 500, such as an empty boundary, v1 serves gunicorn's page with **no `Vary`** while v2 sends **`Vary: Origin`**. An earlier version of this row said the headers matched. |
-| 3 | §3: a **non-ASCII boundary** on `POST /api/file` is **400** in v2, **500** in v1 (D22, flagged) |
+| 3 | §3: a **non-ASCII boundary** on `POST /api/file` is **500 / 500** (plan §7 **C79**: D22 does not apply to this route). Bytes and `Vary` differ as row 2 says |
 | 4 | P8-F4: a name containing U+2028/U+2029 renders raw in v2, escaped in v1 |
 | 5 | P8-F5: two `file` parts on `PATCH /api/user` / `PATCH /api/loan` — v2 now matches v1 (the **second** part); a Phase 3/4 baseline recorded before this commit will differ |
 | 6 | P8-D3: a file part with no `Content-Type` may be stored with a guessed type |
@@ -623,7 +716,7 @@ catching a mutant.
 
 ### 6.4 Pre-declared rows — do not re-file these
 
-**D22** (with the §3 note), **D23**, **D46**, **D47** (§4, with §6.1 rows 7–9), **P3-D6**, rule
+**D22** (not applicable to `POST /api/file`, C79 — §3), **D23**, **D46**, **D47** (§4, with §6.1 rows 7–9), **P3-D6**, rule
 **12b** (no parser narrowing — `text/plain` is a 500 here, not a 415), and P8-D1 … P8-D7,
 P8-F1 … P8-F7 above. **D46's concurrent window** (§4) is a known, measured residual: an orphan
 object after a v2 500 in a two-request race is not a new finding.
@@ -644,7 +737,8 @@ overwritten"*. P8-F1 needs an owner (business-analyst): keep, or choose a fix.
 
 Its pair on this route is **v1 500 (double-fault page) / v2 400**, not the pairs recorded for the
 three P3 endpoints; and the "same answer as every other invalid boundary" rationale does not hold
-here (§3). Decide whether D22 stands for this route.
+here (§3). Decide whether D22 stands for this route. ✅ **Closed — C79:** D22 does not apply to
+`POST /api/file`; v2 answers 500 like v1, implemented in the fix round (§3).
 
 ### 7.3 P8-F4 (U+2028/U+2029) needs a cross-cutting row and an owner
 

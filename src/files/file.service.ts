@@ -231,7 +231,9 @@ export const D47_MESSAGE = 'Type must be 0 or 1';
  * What `int()` raises on is refused too, since it is not the integer 0 or 1: a `type` sent as
  * a **file part** (v1: `TypeError`, 500 before any storage call — measurement 2) and a JSON
  * `null` / list / object. ⚠️ A JSON `1.5` or `true` is `int()`-ed to 1 as in v1 and therefore
- * **passes**; a JSON body can never upload (P8-F7), so this changes no 201. Flagged as
+ * **passes**. With all three keys present, a JSON or form body 500s on `.content_type` instead
+ * of uploading (P8-F7; e2e `P-json-all-keys`, `P-form`, and `P-json-all-keys / P-form reach
+ * exists() and stop at .content_type`), so this changes no 201 in those cells. Flagged as
  * underspecified in `docs/phase-8-deviations.md`.
  *
  * @throws ApiException 400, flagged `isDeviation`.

@@ -14,8 +14,9 @@ import { AppConfigService } from '../config/app-config.service';
  *     self.client = storage.Client()
  * ```
  *
- * v2 makes that choice a provider ({@link fileStorageProvider}) and every test binds
- * {@link FILE_STORAGE} to a fake. The interface mirrors the calls v1 makes, **in the order it
+ * v2 makes that choice a provider ({@link fileStorageProvider}). Only `test/file.e2e-spec.ts`
+ * overrides {@link FILE_STORAGE} with a fake; every other suite runs with `ENVIRONMENT=test`
+ * (set by `test/setup-env.ts`) and so gets {@link UnavailableFileStorage}. The interface mirrors the calls v1 makes, **in the order it
  * makes them**, so a fake can record the sequence and a cell can assert that a failure at step
  * *n* leaves steps *n+1…* unrun:
  *

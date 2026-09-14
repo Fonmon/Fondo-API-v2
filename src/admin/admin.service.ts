@@ -18,8 +18,12 @@ import { NotificationService } from '../notifications/notification.service';
  *
  * ⚠️ **Both sends go to the caller only**, and **both results are discarded**: a mail SES
  * refuses and a push with no subscription both still answer 200. `MailService.sendMail`
- * returns `false` rather than throwing and `sendNotification` swallows publish failures, so
- * nothing here can turn into an error. ⚠️ These are **real** sends in production — the
+ * returns `false` rather than throwing (`admin.service.spec.ts`, "a refused send is
+ * swallowed"), and `NotificationPublisher.publish` swallows publish failures
+ * (`notification-publisher.spec.ts`, "condition 2 — the failure is swallowed at the
+ * boundary"). ⚠️ Not everything is swallowed: `sendNotification` first awaits the subscription
+ * query, and a rejection there propagates out of `testNotifications`. No cell here pins that
+ * path. ⚠️ These are **real** sends in production — the
  * `TEST` template to a real inbox, a push to real devices.
  */
 @Injectable()

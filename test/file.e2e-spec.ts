@@ -144,11 +144,15 @@ describe('Phase 8 — /api/file', () => {
     expect(response.headers.vary).toContain('Accept');
   };
 
-  /** An exception that escaped the view: v1's page carries neither `Allow` nor `Vary: Accept`. */
+  /**
+   * An exception that escaped the view: no `Allow`, and `Vary` is exactly `Origin` — no `Accept`.
+   * ⚠️ On the init-time multipart 500s, v1's gunicorn page has **no `Vary` header at all**, so
+   * this asserts v2's measured header, not parity (P8-D4, plan §7 C85; same class as D24).
+   */
   const expectUncaught500 = (response: request.Response): void => {
     expect(response.status).toBe(500);
     expect(response.headers.allow).toBeUndefined();
-    expect(response.headers.vary ?? '').not.toContain('Accept');
+    expect(response.headers.vary).toBe('Origin');
   };
 
   // ==========================================================================
@@ -580,7 +584,7 @@ describe('Phase 8 — /api/file', () => {
       ['G-type-huge', '/api/file?type=99999999999999999999', 0],
       ['G-type-int4max+1', '/api/file?type=2147483648', 0],
       ['G-type-int4min-1', '/api/file?type=-2147483649', 0],
-    ])('%s: 200 with %i files', async (_label, path, count) => {
+    ])('%s (%s): 200 with %i files', async (_label, path, count) => {
       const response = await request(server()).get(path).set(asAdmin());
       expect(response.status).toBe(200);
       expect(response.body).toHaveLength(count);
@@ -864,7 +868,7 @@ describe('Phase 8 — /api/file', () => {
       ["S3 / P-text-plain (not DRF's 415)", 'text/plain', 'x', 500],
       ['P-form', 'application/x-www-form-urlencoded', 'name=a&file=b&type=0', 500],
       ['P-form-missing', 'application/x-www-form-urlencoded', 'name=a&type=0', 400],
-    ])("%s → %i, the view's own response", async (_label, contentType, body, status) => {
+    ])("%s (%s, %j) → %i, the view's own response", async (_label, contentType, body, status) => {
       expectViewResponse(await postRaw(contentType, body), status);
       expect(await prisma.file.count()).toBe(25);
     });
@@ -910,9 +914,13 @@ describe('Phase 8 — /api/file', () => {
 
     it.each([
       ['S1 / P-mp-empty-boundary', 'multipart/form-data; boundary='],
-      ['an invalid ASCII boundary (trailing space)', 'multipart/form-data; boundary="zzz "'],
+      ['an invalid ASCII boundary (quoted trailing space)', 'multipart/form-data; boundary="zzz "'],
+      [
+        'S2 / P-mp-nonascii-boundary (plan §7 C79: D22 does not apply here)',
+        'multipart/form-data; boundary=zzé',
+      ],
     ])(
-      '%s → 500 WITHOUT Allow/Vary: v1 double-faults past its own except',
+      '%s → 500 without `Allow`, `Vary: Origin` only (v1: no `Vary`, P8-D4) — v1 double-faults past its own except',
       async (_label, contentType) => {
         const response = await postRaw(
           contentType,
@@ -923,20 +931,6 @@ describe('Phase 8 — /api/file', () => {
         expect(storage.calls).toEqual([]);
       },
     );
-
-    it('S2 / P-mp-nonascii-boundary → 400 parse error: plan §5 D22 decides it (v1 is 500) — flagged', async () => {
-      const response = await postRaw(
-        'multipart/form-data; boundary=zzé',
-        multipart([['name', 'b'], ['type', '0'], FILE_PART]),
-      );
-      expect(response.status).toBe(400);
-      expect((response.body as { detail: string }).detail).toMatch(
-        /^Multipart form parse error - Invalid boundary in multipart: zz/,
-      );
-      expect(response.headers.allow).toBe('GET, POST, HEAD, OPTIONS');
-      expect(await prisma.file.count()).toBe(25);
-      expect(storage.calls).toEqual([]);
-    });
 
     it("S6 bad base64 in a file part → the view's 500 (raised mid-stream, no double fault)", async () => {
       const body =

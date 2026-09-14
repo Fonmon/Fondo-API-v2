@@ -7,7 +7,6 @@ import {
   drfRequestDataGet,
   drfRequestDataHas,
   isMultipartInitFailure,
-  isNonAsciiBoundaryFailure,
 } from '../common/http/drf-request-data';
 import { assertRequestDataParsable, DrfNoRequestData } from '../common/http/drf-parser.interceptor';
 import { DrfException } from '../common/http/drf.exception';
@@ -54,8 +53,10 @@ export class FileController {
    *
    * ⚠️ **Except when the multipart parser fails in its constructor** (empty or non-ASCII
    * boundary): v1 double-faults past its own `except` to gunicorn's bare page — see
-   * {@link isMultipartInitFailure}. That case is rethrown uncaught, so it loses `Allow` and
-   * `Vary` as v1's does.
+   * {@link isMultipartInitFailure}. That case is rethrown uncaught, so it loses `Allow` as v1's
+   * does. v1's page has no `Vary` at all; v2 still sends `Vary: Origin` (P8-D4, plan §7 C85).
+   * ⚠️ **Plan §5 D22 does not apply here** (§7 C79): a non-ASCII boundary is this 500, like v1,
+   * not DRF's 400. Pinned by the `expectUncaught500` boundary table in `test/file.e2e-spec.ts`.
    *
    * ⚠️ **Presence is checked against DRF's merged view** without building it — a `file` sent as
    * a plain field passes and then 500s on `.content_type`, as in v1 (measurement 2;
@@ -94,12 +95,6 @@ export class FileController {
         throw exception;
       }
       this.logger.error(`Exception saving file: ${describeException(exception)}`);
-      if (isNonAsciiBoundaryFailure(request)) {
-        // Plan §5 D22 decides this case for every multipart endpoint in Phases 4–8, this one
-        // included: DRF's 400 parse error. v1 answers 500 here — flagged, see
-        // `isNonAsciiBoundaryFailure`.
-        throw exception;
-      }
       if (isMultipartInitFailure(request)) {
         throw new Error(
           `multipart parse failed before the stream was read: ${describeException(exception)}`,

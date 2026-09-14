@@ -115,27 +115,6 @@ export function isMultipartInitFailure(request: Request): boolean {
   return typeof detail === 'string' && detail.startsWith(INVALID_BOUNDARY_PREFIX);
 }
 
-/**
- * Whether the init-time failure was a **non-ASCII** boundary — plan §5 **D22**.
- *
- * D22 decides that v2 answers a non-ASCII boundary with DRF's **400** parse error "on every
- * multipart endpoint in Phases 4–8", naming the Phase 8 file upload. Plan precedence is that
- * §5 decides v2, so `FileView.post` applies it even though, on this route, v1's status is a
- * 500 (the double fault above) rather than the 500-vs-400 pairs D22 recorded elsewhere. The
- * conflict is flagged in `docs/phase-8-deviations.md`; every *other* invalid boundary (empty,
- * trailing space, too long) is not D22's subject and keeps v1's uncaught 500.
- */
-export function isNonAsciiBoundaryFailure(request: Request): boolean {
-  const detail = getParseState(request)?.parseErrorDetail;
-  return (
-    typeof detail === 'string' &&
-    detail.startsWith(INVALID_BOUNDARY_PREFIX) &&
-    Array.from(detail.slice(INVALID_BOUNDARY_PREFIX.length)).some(
-      (ch) => (ch.codePointAt(0) as number) > 0x7f,
-    )
-  );
-}
-
 const INVALID_BOUNDARY_PREFIX = 'Multipart form parse error - Invalid boundary in multipart:';
 
 function pythonTypeName(value: unknown): string {
