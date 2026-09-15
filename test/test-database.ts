@@ -25,6 +25,11 @@ export const BASELINE_MIGRATIONS_PATH = 'prisma/migrations';
  */
 export const STEP6_MIGRATIONS_PATH = 'prisma/migrations-step6';
 
+// ⚠️ **The literal is the documented local fallback, not a stray credential (review N11).**
+// It names `fondo_api_test`, which `assertDisposableDatabase` re-checks before anything
+// destructive; README and `docs/SESSION-STATE.md` §3 both quote it, and `buildspec.yml` uses
+// the CI equivalent. Replacing it with a placeholder would break `npm run test:e2e` on a fresh
+// checkout for no gain — the value is a local development password.
 export const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL ??
   'postgresql://fondouser:fondo@localhost:5432/fondo_api_test?schema=public';
@@ -65,6 +70,20 @@ export async function provisionTestDatabase(): Promise<void> {
 
   // ⚠️ `PRISMA_MIGRATIONS_PATH` is pinned on each run, not inherited — review finding **m3**.
   // The ambient value must not decide which ledgers a test database gets.
+  //
+  // 🔴 **The two builds cannot share this database — measured, 2026-09-15.** Gating the
+  // `release-a-cutover` tag against a `fondo_api_test` that still held head's **converted**
+  // schema failed **1306 of 1388** e2e cells: Release A's `SchemaShapeGuard` refused to start
+  // and named both columns. That is the guard doing its job, not a defect — but the symptom
+  // is a wall of bootstrap errors rather than an assertion, so it does not read as "wrong
+  // schema" at first glance.
+  //
+  //     dropdb fondo_api_test && npm run test:e2e     # the provisioner rebuilds it
+  //
+  // Whichever checkout ran last leaves a database the other cannot boot on: Release A builds
+  // it from `prisma/migrations` alone (hstore), head builds it from both ledgers (jsonb). And
+  // because the counts are nearly identical either way — 1386 on hstore, 1387 on jsonb — the
+  // number alone does not say which shape a run was on. Say it when reporting one.
   //
   // ⚠️ **Two sequential deploys, not one, and not a moved directory (C92, C94).** This is
   // Release B's code: the hstore codec is gone and `SchemaShapeGuard` requires `jsonb`, so a

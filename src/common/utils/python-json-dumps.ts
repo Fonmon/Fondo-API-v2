@@ -30,9 +30,11 @@
  *
  * Reproduces `json.dumps(obj)` with CPython 3.9 defaults:
  * `skipkeys=False, ensure_ascii=True, check_circular=True, allow_nan=True, indent=None,
- * separators=None, sort_keys=False`. Key order is the object's own insertion order, which is
- * what makes `parseHstore`'s order preservation observable (§2 of the plan: hstore key order
- * is part of the wire format).
+ * separators=None, sort_keys=False`. **Key order is the object's own insertion order**, which
+ * is what makes the wire format reproducible at all (§2 of the plan). Two orders reach this
+ * function and both are deliberate: jsonb's `(length, bytes)` member order, which reproduces
+ * the one hstore emitted, and the `keys` object's `p256dh, auth`, restored by
+ * `pinKeysMemberOrder` — C91 / Q60. Sorting here would silently discard both.
  *
  * Every expectation in `python-json-dumps.spec.ts` was captured from `python:3.9-slim`, not
  * written from memory.

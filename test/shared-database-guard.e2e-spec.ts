@@ -17,6 +17,9 @@ describe('C25 — shared-database guard', () => {
   it('refuses the shared dev database by name, without needing to connect', async () => {
     await expect(
       assertDisposableDatabase(
+        // ⚠️ **Load-bearing, not a stray credential (review N11).** This cell exists to prove
+        // that *this exact URL* is refused; a placeholder would leave the guard untested
+        // against the one string it is written to stop.
         'postgresql://fondouser:fondo@localhost:5432/fondodev?schema=public',
       ),
     ).rejects.toBeInstanceOf(SharedDatabaseError);

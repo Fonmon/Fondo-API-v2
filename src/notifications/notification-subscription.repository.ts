@@ -11,43 +11,49 @@ import { pinKeysMemberOrder, type PushSubscription } from './push-subscription';
 const SUBSCRIPTION_NATIVE_KEYS = ['keys'] as const;
 
 /**
- * The **only** place in the codebase allowed to write SQL against
- * `fondo_api_notificationsubscriptions.subscription`.
- *
- * ## Why raw SQL at all
- *
- * The column is `hstore`. Prisma models it as `Unsupported("hstore")` and its client can
- * neither select nor write it ([prisma#19000](https://github.com/prisma/prisma/issues/19000)),
- * so every access casts — `subscription::text` on the way out, `$1::hstore` on the way in —
- * and goes through the Phase 0 codec. Plan §2 confines that to this class and
- * `SchedulerTaskRepository` (Phase 7); `nestjs-reviewer` enforces the rule. It all disappears
- * at Phase 9 when the column becomes `jsonb`.
- *
- * ## Three encoding quirks that live rows depend on
- *
- * `fondodev` holds **94 real subscriptions** written by v1, so the encoding is not
- * negotiable:
- *
- *  1. **hstore stores strings only.** Django's `HStoreField.get_prep_value` runs `str()` over
- *     every value, so the nested `keys` object is stored as a Python `repr`:
- *     `{'p256dh': '…', 'auth': '…'}` — single quotes, **not** JSON. {@link toHstoreLiteral}
- *     reproduces that on write; writing real JSON would make v2's own rows unreadable by the
- *     read-side repair below (and by v1, which still runs until cutover).
- *  2. **`None` becomes SQL NULL**, not the string `'None'` — 93 of the 94 rows have
- *     `"expirationTime"=>NULL`, and one (an `web.push.apple.com` endpoint) has no
- *     `expirationTime` key at all.
- *  3. **The `'` → `"` repair on read** (`subscription['keys'].replace("'", '"')` in
- *     `services/notification.py:38`), applied by {@link decodePushSubscription}.
+ * `fondo_api_notificationsubscriptions`, on ordinary Prisma models.
  *
  * ## ⚠️ Row order is part of the SQS wire format — do not add an ORDER BY
+ *
+ * **Read this first, because it is the one thing in this file that a change can break
+ * silently, and it survived Phase 9 step 6 unchanged.**
  *
  * `NotificationSubscriptions.objects.filter(user_id__in=…)` has no `Meta.ordering`, so
  * Django emits no `ORDER BY` and v1 serialises whatever heap order PostgreSQL returns
  * straight into `json.dumps`. On `fondodev` that order is **not** id order — the table has
  * been updated enough for the heap to diverge — so adding `ORDER BY id` here would make v2's
- * SQS body differ from v1's for the same input. {@link findPushSubscriptionsByUserIds}
- * therefore emits `IN (…)`, exactly as Django does, and the planner picks the same sequential
- * scan for both. Counter-intuitive, and verified against the live table.
+ * SQS body differ from v1's for the same input. {@link findPushSubscriptionsByUserIds} is a
+ * `findMany` with **no `orderBy`**, which emits none, exactly as Django does, and the planner
+ * picks the same sequential scan for both. Counter-intuitive, and verified against the live
+ * table.
+ *
+ * 🔴 An `orderBy: { id: 'asc' }` added here "for determinism" changes **every** notification's
+ * SQS body. Nothing in the type system, the lint rules or the unit suite would object.
+ *
+ * ## What step 6 changed, and what it did not
+ *
+ * The column was `hstore` until Phase 9 step 6; Prisma modelled it `Unsupported("hstore")`,
+ * every access cast (`subscription::text` out, `$1::hstore` in) and went through a codec. All
+ * of that is gone — the column is `jsonb`, the client reads and writes it directly, and
+ * `hstore.codec.ts` is deleted.
+ *
+ * Two of the old encoding quirks were **decided once, by the migration**, and no longer exist
+ * at runtime: the nested `keys` object was stored as a Python `repr`
+ * (`{'p256dh': '…', 'auth': '…'}`, single quotes, not JSON) and read back through a
+ * `'` → `"` repair — the step-6 repair pass unwrapped it into a real object in all 94 rows.
+ * ⚠️ Its **member order** did move, from `p256dh, auth` to jsonb's `auth, p256dh`, and
+ * `pinKeysMemberOrder` restores the browser's order on the way out — condition **C91**,
+ * operator answer **Q60**, and after step 6 that pin is the only thing holding it.
+ *
+ * The third quirk is **not** historical and still governs every write:
+ *
+ *  * **Values are strings.** Django's `HStoreField.get_prep_value` ran `str()` over every
+ *    value, and the 94 migrated rows embody that — `endpoint` is a JSON string even when the
+ *    caller passed a number, and `expirationTime: None` is JSON `null` (93 rows have it; one
+ *    `web.push.apple.com` row has no `expirationTime` member at all). {@link encodeJsonbColumn}
+ *    applies the rule; `common/utils/jsonb-storage.ts` explains why storing the value's own
+ *    JSON type instead would look tidier and would break every equality filter against those
+ *    rows.
  */
 @Injectable()
 export class NotificationSubscriptionRepository {
@@ -161,9 +167,16 @@ export class NotificationSubscriptionRepository {
    *     subscriptions.append(subscription)
    * ```
    *
-   * Key order within each subscription is PostgreSQL's — `(length, bytes)`, i.e.
-   * `keys`, `endpoint`, `expirationTime` — and is preserved through {@link parseHstore} into
-   * the JSON body. Row order is the heap order described in the class comment.
+   * The `keys` repair the loop above does on **every** read was done once and permanently by
+   * the step-6 migration, so this method only reads. Two orders still have to be right:
+   *
+   *  * **Top-level member order** is PostgreSQL's `(length, bytes)` — `keys`, `endpoint`,
+   *    `expirationTime` — which jsonb reproduces exactly as hstore emitted it (measured on all
+   *    720 migrated rows, `scripts/parity/step6-prove.sh`'s `keyorder` comparison).
+   *  * **`keys` member order** is restored to the browser's `p256dh, auth` by
+   *    `pinKeysMemberOrder`, inside {@link requirePushSubscription} — C91 / Q60.
+   *
+   * ⚠️ **Row order is the heap order the class comment describes: no `orderBy` here, ever.**
    *
    * An empty `user_ids` short-circuits: Django turns `__in=[]` into an `EmptyResultSet` and
    * never runs a query, whereas `IN ()` is a SQL syntax error.
@@ -182,9 +195,12 @@ export class NotificationSubscriptionRepository {
   }
 
   /**
-   * Reads one row's raw hstore rendering. Used by the Phase 2 round-trip integration test to
-   * prove that a subscription written by v2 is byte-identical to one written by v1 —
-   * including the Python `repr` in `keys` — and by nothing in production.
+   * Reads one row's stored `subscription` object. Used by the integration cells that prove a
+   * subscription v2 writes is stored exactly like one the step-6 migration produced — which is
+   * what keeps every equality filter matching the whole table — and by nothing in production.
+   *
+   * Before step 6 this returned the raw hstore *text*, because the comparison then was against
+   * v1's Python-repr encoding byte for byte.
    */
   async findSubscriptionById(id: number): Promise<Record<string, unknown> | null> {
     const row = await this.prisma.notificationSubscription.findUnique({

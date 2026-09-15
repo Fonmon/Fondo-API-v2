@@ -66,6 +66,13 @@ export function requireUserIds(payload: SchedulerPayload): number[] {
     throw new TypeError('TypeError: the JSON object must be str, bytes or bytearray, not NoneType');
   }
   if (!Array.isArray(value)) {
+    // ⚠️ **This deliberately disagrees with the step-6 preflight, and the pair is coherent —
+    // C99.** `prisma/migrations-step6/20260915120000_step6_preflight` **accepts** a scalar
+    // `user_ids`, because `json.loads('7')` is `7` and the migration reproduces v1 rather than
+    // deciding for an operator what such a row meant. This refuses to *run* on it, because v1
+    // fails there too — `send_notification` iterates the value — so both stacks abort the
+    // publish and leave the row unprocessed for the next pass. Measured 0 of 626 rows on
+    // fondodev 2026-09-15. Change either side alone and they stop agreeing.
     throw new TypeError(
       `scheduler payload key 'user_ids' is not a list (got ${typeof value}). ` +
         'Step 6 unwrapped it from its stringified form in all 626 rows; a string here means ' +

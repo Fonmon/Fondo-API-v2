@@ -115,6 +115,15 @@ The plan's rule is *"`0_init` stays at `applied_steps_count = 0` — do not repa
 | **M-D34-5** | the same file wrapped in `BEGIN; … COMMIT;` | exit 1 and **the column is gone** — atomic | **same** (`zz_probe_columns=0`) |
 | **M-D34-6** | `RAISE EXCEPTION` *inside* `BEGIN; … COMMIT;` | the operator sees `ERROR: current transaction is aborted…` — the RAISE text is **lost** | **same** |
 | **M-D34-7** | the same `RAISE` as the first statement, no explicit transaction | `P3018 … P0001 … ERROR: STEP6 PREFLIGHT FAILED: 3 unparseable rows: {1,2,3}` — verbatim | **same** |
+| **M-D34-8** | edit an **already-applied** migration file (append a comment) and re-run `migrate deploy` | `No pending migrations to apply.`, **exit 0** — `deploy` keys on the migration *name* and does **not** verify the checksum of an applied migration | — |
+
+⚠️ **M-D34-8 cuts both ways.** It is why a documentation-only edit to
+`_step6_preflight/migration.sql` (condition **C99**) is safe against every database that has
+already applied it — measured on `fondo_api_test`, not assumed. It is also why **a change to
+that file's SQL would not be noticed either**: a database that ran the old version reports
+itself up to date. Before step 6 runs in production that is harmless, because no production
+database has applied anything; after it, treat these four files as frozen and add a new
+migration instead.
 
 **Finding: no conflict with the plan.** Prisma treats a migration as applied when
 `finished_at IS NOT NULL AND rolled_back_at IS NULL`; `applied_steps_count` is informational
@@ -801,8 +810,31 @@ text to jsonb members, and the list is the `->` → `->>` sweep of §9.2 plus th
 subscription fixtures. Against `4db69fb`, the coordinator's stated baseline, the totals are
 unit **2601 → 2617** and e2e **1382 → 1387**; every step of both is in this table and §7.1.
 
-Every delta is a cell this round added; no existing cell changed meaning. The e2e run is on the
-**hstore** schema, which is what Release A deploys.
+### 7.3 🔴 The two builds cannot share a test database
+
+**Measured by `nestjs-reviewer` while gating the Release A tag, 2026-09-15:** the first attempt
+failed **1306 of 1388** e2e cells, because `fondo_api_test` still held Release B's **converted**
+schema and Release A's `SchemaShapeGuard` refused to start, naming both columns.
+
+**That is the guard doing its job, not a defect** — it is exactly the refusal Q57 asked for, and
+finding it in a gate rather than in production is the point of shipping the guard before
+cutover. But it has a practical consequence that costs an hour the first time it bites:
+
+> ⚠️ **Gating either build means dropping `fondo_api_test` first** and letting that checkout's
+> provisioner rebuild it. Release A builds it from `prisma/migrations` alone (hstore);
+> Release B (head) builds it from both ledgers (jsonb). Whichever ran last leaves a database
+> the other cannot boot on, and the failure is a wall of bootstrap errors rather than an
+> assertion, so it does not read as "wrong schema" at first glance.
+>
+> ```bash
+> dropdb fondo_api_test && npm run test:e2e      # the provisioner recreates it
+> ```
+>
+> The same note is in `test/test-database.ts`, where someone gating a build will actually be.
+
+**Say which shape an e2e run was on when you report it.** The counts are nearly identical
+between the two (1386 on hstore at the Release A tag, 1387 on jsonb at head), so the number
+alone does not say which database was under it.
 
 ---
 

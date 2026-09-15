@@ -151,6 +151,14 @@ END $$;
 --
 --    A scalar (`json.loads('7')` -> 7) is NOT rejected: that is what v1 would hand the
 --    application, and reproducing v1 is the rule. Only the still-a-string case is a stop.
+--
+--    ⚠️ **This deliberately disagrees with the application, and the pair is coherent — C99.**
+--    `src/scheduler/scheduler-payload.ts`'s `requireUserIds` **throws** on a scalar
+--    `user_ids`. That is not a contradiction to fix: the migration refuses to make a data
+--    decision on an operator's behalf and converts the row faithfully, and the application
+--    refuses to *run* on it. v1 fails there too — `send_notification` iterates the value — so
+--    both stacks abort the publish and leave the row unprocessed for the next pass. Measured
+--    0 of 626 rows on fondodev 2026-09-15. Change either side alone and they stop agreeing.
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE

@@ -101,8 +101,15 @@ export interface DueSchedulerTask {
 }
 
 /**
- * The **second and last** place in the codebase allowed to write raw SQL against an `hstore`
- * column (plan §2; the other is `NotificationSubscriptionRepository`).
+ * `fondo_api_schedulertask`, on ordinary Prisma models since Phase 9 step 6.
+ *
+ * ⚠️ **Two queries here are still raw SQL, and not because of the column.** Both
+ * {@link SchedulerTaskRepository.existsUnprocessedOnDay} and
+ * {@link SchedulerTaskRepository.findDueUnprocessed} compare
+ * `run_date AT TIME ZONE 'America/Bogota'`, which Prisma's query API cannot express — and
+ * getting that zone wrong moves every 19:00–23:59 local task onto the next day. They were
+ * left as SQL rather than rewritten as an instant range, because that predicate is the fund's
+ * only payment-reminder path and it was measured in its SQL form in Phase 7b.
  *
  * ## Why this lands in Phase 3 — review finding **S9**, condition **C24**
  *
@@ -126,31 +133,36 @@ export interface DueSchedulerTask {
  * written by v1 — 86 of them `payload->'type' = 'birthdate'`, 540 `payment_reminder` — so the
  * parity criterion for this phase is that a
  * `SchedulerTask` row v2 writes for a given user is byte-identical to the one v1 writes for
- * the same user, `payload::text` included, and that the same-day dedupe suppresses the second
- * write in both. That is a *data* comparison, available now; Phase 7 later adds the
+ * the same user, the stored `payload` included, and that the same-day dedupe suppresses the
+ * second write in both. That is a *data* comparison, available now; Phase 7 later adds the
  * behavioural half (does the runner pick it up, does the clone advance correctly), by which
  * time `nextRepeatRunDate` (Phase 0, condition C3) is already unit-pinned against
  * `python-dateutil==2.7.5`.
  *
  * ## The three encoding facts, taken from live rows
  *
- * A live birthdate row reads, verbatim:
+ * A live birthdate row reads, verbatim, **as Phase 9 step 6 left it**:
  *
  * ```
  * type      | 0
  * run_date  | 2027-08-25 05:00:00+00          -- i.e. 2027-08-25 00:00 America/Bogota
- * payload   | "type"=>"birthdate", "target"=>"/", "message"=>"Hoy está cumpliendo años …",
- *           | "owner_id"=>"5", "user_ids"=>"[2, 4, 3, 13, 11, 10, 1, 9, 12, 6, 7, 8]"
+ * payload   | {"type": "birthdate", "target": "/", "message": "Hoy está cumpliendo años …",
+ *           |  "owner_id": "5", "user_ids": [2, 4, 3, 13, 11, 10, 1, 9, 12, 6, 7, 8]}
  * processed | f
  * repeat    | 4
  * ```
  *
- *  1. **`owner_id` is stored as text.** Django's `KeyTransform` on an `HStoreField` has
- *     `output_field = TextField()`, so `payload__owner_id=5` compares against `'5'`. Both the
- *     dedupe query and the delete therefore bind strings, never integers.
- *  2. **`user_ids` is a Python list repr, not JSON.** They coincide for a list of ints, which
- *     is why v1's `json.loads` works — but the encoder must stay {@link toHstoreLiteral}, not
- *     `JSON.stringify`, or a future non-int value would diverge silently.
+ *  1. **`owner_id` is stored as text, and still is.** Django's `KeyTransform` on an
+ *     `HStoreField` had `output_field = TextField()`, so `payload__owner_id=5` compared
+ *     against `'5'`; the migration preserved the string in all 626 rows, and the dedupe query
+ *     and the delete still bind strings, never integers. ⚠️ Now that the column is `jsonb`,
+ *     that also means those two predicates use **`->>`**, not `->`: `->` yields a jsonb value
+ *     and would compare `"5"` against `5`, matching nothing, silently.
+ *  2. **`user_ids` is a real JSON array.** It used to be a Python list repr that v1
+ *     `json.loads`-ed on every read; the step-6 repair pass did that once and permanently.
+ *     The encoder must stay {@link encodeJsonbColumn}, which keeps `user_ids` structured and
+ *     `str()`s everything else — `JSON.stringify` over the whole payload would turn
+ *     `owner_id` into a number and break fact 1.
  *  3. **`run_date` is `make_aware(naive)` in `America/Bogota`**, so a birthday task fires at
  *     local midnight and lands in the column as `05:00Z`.
  *
