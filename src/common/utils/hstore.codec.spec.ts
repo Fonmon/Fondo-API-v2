@@ -101,6 +101,27 @@ describe('parseHstore', () => {
     expect(() => parseHstore('"a"=>"unterminated')).toThrow(SyntaxError);
     expect(() => parseHstore('NULL=>"b"')).toThrow(SyntaxError);
   });
+
+  /**
+   * **Phase 9, step 6 — why Release A cannot be left running on the converted schema.**
+   *
+   * After the hstore -> jsonb migration, `SELECT payload::text` — which is what both raw-SQL
+   * repositories issue — returns JSON text, not an hstore rendering. Measured on the migrated
+   * clone `fondodev_p9_run`, 2026-09-15:
+   *
+   *     {"type": "birthdate", "target": "/", "message": "...", "owner_id": "1", "user_ids": [2, 4]}
+   *
+   * The write side already fails at the type level (`column "payload" is of type jsonb but
+   * expression is of type hstore`), and this is the read side: it throws rather than decoding
+   * something plausible. So the Release A -> jsonb combination is loud in both directions,
+   * which is what makes the step-6 ordering in `docs/phase-9-design.md` §6 a short outage
+   * rather than a silent corruption.
+   */
+  it('step 6: rejects the JSON text a converted jsonb column renders', () => {
+    const afterConversion =
+      '{"type": "birthdate", "target": "/", "message": "Hoy", "owner_id": "1", "user_ids": [2, 4]}';
+    expect(() => parseHstore(afterConversion)).toThrow(SyntaxError);
+  });
 });
 
 describe('formatHstore', () => {
