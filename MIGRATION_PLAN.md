@@ -10,6 +10,7 @@ When CONTEXT.md and the v1 source disagree, **the source wins** and CONTEXT.md g
 
 | Date | Rev | Change |
 |---|---|---|
+| 2026-09-15 | v4.32 | ✅ **C49 re-decided at last — all eight items keep v1's behaviour (Q53–Q55).** `business-analyst`'s brief is `docs/ba-phase-9-c49-redecisions.md`, with the numbers measured read-only on `fondodev`. **Q53:** item 5 keeps v1 **bare** — no monthly pre-upload id check, no client change showing `closed_loans`, no §2.10 rehearsal; the residual (28 loans / 9 borrowers / 115 991 401 / 90 reminders on one wrong file) is accepted with those numbers known. **Q54:** items 1–4, 6, 7 keep v1, improvements to the backlog. **Q55:** item 8 (`EXEMPTED` never written, 0 of 338) goes to the PRESIDENT now, before the 2026 activity marking. Phase 9 stage 1 running. |
 | 2026-09-14 | v4.31 | Board row 9 corrected: it still read "Blocked on P8 and P8b" after v4.30 closed both. Phase 9 starting. |
 | 2026-09-14 | v4.30 | ✅ **Phase 8b CLOSED — approved** on re-check of `796ba2b`. C71, C87, C88, C89 closed; D39, D48, D49 implemented. `TIME_ZONE` is now pinned, so **runbook step 3** gains a pre-boot check of production's value (review N3 — not verifiable from the repo). **C90** opened for two non-gating test nits (Phase 9 cleanup). Phase 9 next. |
 | 2026-09-14 | v4.29 | 🟡 **Phase 8b fix round landed** at `796ba2b` (C88 int4 guard, C89 zone pinned to `America/Bogota`, C87 wording). Gate re-measured independently (lint 0, `tsc` 0, 2590 / 80 unit, 1348 + 2 e2e, fixture diff 0 / control 1; per-suite deltas attributed); register hashes match the commit (17 of 17). Re-check with `nestjs-reviewer` dispatched. |
@@ -1014,7 +1015,19 @@ recorded here in ledger terms so nobody reads a clean `django_migrations` as "v1
 Each of these is a v1 behaviour v2 reproduces *on purpose*, under §4 rule 2 ("do not modernise
 v1's status choices"). None is a bug in v2, and none has been re-decided since the phase that
 ported it. Cutover is the single moment they get one deliberate re-decision, rather than
-surviving forever by silence:
+surviving forever by silence.
+
+✅ **Re-decided by the operator 2026-09-15 (Q53–Q55), after `business-analyst`'s brief
+(`docs/ba-phase-9-c49-redecisions.md`): all eight keep v1's behaviour.** Item 5 keeps it
+**bare** — the operator declined the analyst's no-code mitigations (**Q53**), so there is no
+monthly pre-upload id check, no scheduled client change to show `closed_loans`, and no rehearsal
+of the §2.10 repair. ⚠️ **Residual, accepted with the numbers known:** one wrong monthly file
+closes every APPROVED loan it omits — measured 2026-09-14 on `fondodev`, **28** loans, **9**
+borrowers, **115 991 401** of outstanding capital and **90** deleted reminders, against a
+historical norm of ~**3.3** closes a month — and the repair is an unrehearsed direct database
+edit (`docs/phase-4-deviations.md` §2.10). Items 1–4, 6 and 7 keep v1 and go to the backlog
+(**Q54**). Item 8 is a product decision to raise with the PRESIDENT **now**, before the 2026
+activity marking (**Q55**); it needs no code, and the API already accepts state 2:
 
 1. 🔴 **P4-D4 — `?page=`, `?page=abc` and `?state=abc` are 500s on `GET /api/loan`**, reachable
    from any client's query string. `LoanView.get` calls `int()` unguarded where `UserView.get`
@@ -1750,12 +1763,13 @@ pulled forward into Phase 3 (condition C24) and 7b waited on Phase 4.
 > happening at this moment. The table under it is the whole migration; the Conditions column is
 > the honest ledger of what each closed phase still owes.
 
-### ▶ Now — Phase 8b closed; Phase 9 next.
+### ▶ Now — Phase 9 running: C49 re-decided; migration design and proof in progress.
 
 | | |
 |---|---|
 | **Phase 8b — Birthday notifications** | ✅ **CLOSED — approved.** `nestjs-reviewer` approved the fix round at `796ba2b` (C88 int4 `owner_id` guard, C89 one zone, C87 wording). Gate on `796ba2b` re-measured by me: lint 0, `tsc` 0, 2590 / 80 unit, 1348 + 2 e2e, fixture diff 0 / control 1; register hashes match the commit (17 of 17). `manual-tester` PASS; `business-analyst` aligned, runbook concern resolved by Q51/Q52. |
-| **Phase 9 — Cutover, hstore→jsonb, decommission** | 🟡 **Next.** The operator performs the cutover; this phase delivers the runbook and the post-switch migrations (step 6 hstore→jsonb, D6's and D11's unique constraints, D34's ledgers). Non-gating cleanup rides along: **C83** path-id hoist, **C90** two test nits. |
+| **Phase 9 — Cutover, hstore→jsonb, decommission** | 🟡 **Running.** `nestjs-developer` **stage 1**: measure every hstore value shape, the `UNIQUE` blockers for D6/D11, and `_prisma_migrations`' `0_init`; prove the `hstore→jsonb` migration and its data repair row-by-row on `pg_restore` clones; design the Release A / Release B split and propose step-6 runbook text. **Stage 2 after review:** delete the hstore codec, move the raw-SQL repositories to Prisma models, C83 and C90 cleanup. Stop conditions: any duplicate blocking a `UNIQUE`, any unparseable value, or a `0_init` conflict with D34's rule. |
+| **C49 re-decided (Q53–Q55, 2026-09-15)** | **All eight keep v1's behaviour.** Item 5 (**Q53**) keeps it bare: the operator declined the monthly pre-upload id check, the scheduled client change and the §2.10 rehearsal. ⚠️ Accepted residual, measured: one wrong monthly file closes **28** APPROVED loans across **9** borrowers, **115 991 401** outstanding capital, **90** reminders deleted; repair is the unrehearsed database edit. Items 1–4, 6, 7 → backlog (**Q54**). Item 8 → raise with the PRESIDENT now, before the 2026 activity marking (**Q55**). |
 | **Operator actions before cutover** | **C84** — someone with bucket access compares `fonmon` against the live `File` rows. **Runbook step 3** — confirm production's `TIME_ZONE` is unset or exactly `America/Bogota` (C89). |
 | ⏰ **Dated deadline** | **Task 2142 fires 14 November 2026 under v1** — Angi Paola, `is_active = f`. **Q51: delete it** — on v1's production database before that date if cutover has not happened. Runbook **step 3a-bis**. |
 
@@ -1794,7 +1808,7 @@ on the **10:00 Bogotá pass only**, which **needs no code**: selection is date-g
 | 7b Scheduler *runner* | ✅ **CLOSED — approved w/ conditions** (`a191f74`) | ✅ | ✅ **PASS** (`3659eef`; no re-round — nothing conditioned changes a row, a byte, a status or a body) | ✅ **Approved w/ conditions** (C68–C76) | 🟡 **C71, C72 dispatched** | **C74 ✅ closed** (`a191f74`, gated P6's start); **C72 code half ✅** (`cfa57ea`); C68–C70, C73, C75, C76 🟡 → P6 gate; **C71 + C72 policy half → `business-analyst`** |
 | 8 Files + admin | ✅ **CLOSED — approved** (re-check of `8948f79`; docs `935f3fb`, `1750256`; C86 pin `a963e5f`) | ✅ | ✅ **PASS** + ✅ C79 re-measure (500/500) | ✅ **Approved** after one narrow changes-requested round | ✅ `ba-phase-8-files.md` | C79–C82, C85, C86 ✅; D45–D47 registered/implemented; C83 non-gating (P9 cleanup); **C84 operator action before cutover** |
 | 8b Birthday notifications | ✅ **CLOSED — approved** (re-check of `796ba2b`) | ✅ | ✅ **PASS** (`parity-phase-8b.md`) | ✅ **Approved** after one conditions round | ✅ `ba-phase-8b-birthdays.md` — concerns resolved by **Q51**/**Q52** | C71, C87–C89 ✅; D39, D48, D49 implemented; **C90** non-gating (P9 cleanup); runbook 3a/3a-bis delete 1497/2142; ⏰ task 2142 deadline 14 November 2026 |
-| 9 Cutover, hstore→jsonb | 🟡 **STARTING** — P8 and P8b closed; `nestjs-developer` (step-6 migrations, D34, D6/D11 constraints, runbook) and `business-analyst` (C49 re-decisions for the operator) dispatched | ⬜ | ⬜ | ⬜ | ⬜ | **C39** lands here; **C49** re-decisions; C83, C90 cleanup; C84 operator action |
+| 9 Cutover, hstore→jsonb | 🟡 **IN PROGRESS** — `nestjs-developer` stage 1 (measure, migration proof on clones, release design) on `feat/phase-9-cutover` | ⬜ | ⬜ | ⬜ | ✅ `ba-phase-9-c49-redecisions.md` — **C49 re-decided (Q53–Q55)** | **C39** lands here; C83, C90 cleanup; **C84** and the EXEMPTED question are operator actions |
 
 **Legend.** ✅ done · 🟡 next / open-but-tracked · 🔴 overdue · ⬜ not started · ⚠️ unverified.
 "Ready" means no unmet dependency, not scheduled next.
@@ -1923,6 +1937,9 @@ table (§5), flagged there.
 | **Q50** | **Development storage (review m3).** In any environment except tests, v2's file storage uses the machine's Google Application Default Credentials and `GCS_BUCKET` defaults to the production bucket `fonmon`, so running v2 on a development machine that has Google credentials would upload to production. v1 behaves the same. Measured 2026-09-14: this host has no gcloud configuration, no Google environment variables and no Google keys in `.env`; tests force `ENVIRONMENT=test`, which refuses every storage call (P8-D2). | ✅ **Answered 2026-09-14 — keep v1's behaviour.** No development-only refusal is added; the test environment's refusal (P8-D2) is unchanged. | P8-D2; Phase 8 |
 | **Q51** | **Tasks 1497 (Fernando) and 2142 (Angi Paola), two departed members' pending birthday chains.** Runbook 3a/3a-bis marked both processed, written under Q35; that ends each chain for good, which contradicts Q48 (a returning member resumes). `business-analyst` recommended moving each to the next birthday instead (`docs/ba-phase-8b-birthdays.md`). | ✅ **Answered 2026-09-14 — delete both tasks.** Runbook 3a and 3a-bis now `DELETE` by id; 2142 must go before 14 November 2026 on v1 if cutover is later. A returning member is greeted again once their birthdate is saved (D48). | Runbook 3a, 3a-bis; D39 |
 | **Q52** | **How does a departed member come back** — old account reactivated (a direct DB change; no API path) or invited as a new user? It decides whether keeping old chains has any value. | ✅ **Answered 2026-09-14 — not established / unsure.** No practice to design for; with Q51's delete, either path is greeted once a birthdate is saved. | Q51; D39 |
+| **Q53** | **C49 item 5 — D8's blast radius.** An incomplete or wrong monthly file auto-closes every APPROVED loan it does not list, with nobody notified. Measured 2026-09-14: **28** loans, **9** borrowers, **115 991 401** outstanding capital, **90** reminders deleted; norm ~3.3 closes/month. v2 returns `closed_loans` but no client reads it. `business-analyst` recommended three no-code mitigations (monthly id pre-check, schedule the client change, rehearse §2.10 once). | ✅ **Answered 2026-09-15 — keep exactly as v1.** No pre-upload check, no client change scheduled, no rehearsal. ⚠️ Residual accepted with the numbers above; repair stays the unrehearsed §2.10 database edit. | C49 item 5; D8, D31/D32 withdrawn, D33 |
+| **Q54** | **C49 items 1–4, 6, 7** — malformed `page`/`state` 500s, the MEMBER `all_loans` no-op, the refinance-body 500, v1's `""` / HTML error rendering, a TREASURER raising their own quota and approving their own loan, and activity detail exposing every attached member's `identification`, `email` and `birthdate`. | ✅ **Answered 2026-09-15 — keep all seven as v1**, improvements to the post-migration backlog, none scheduled ahead of the others. | C49 |
+| **Q55** | **C49 item 8 — `ActivityUser.EXEMPTED` has never been written** (0 of 338 rows), so an excused member is displayed as owing the fund on a route D36 keeps fund-open. A product/data decision, not a port; the API already accepts state 2. | ✅ **Answered 2026-09-15 — raise with the PRESIDENT now**, before the 2026 activity marking. No code either way. | C49 item 8; D36; `ba-phase-5-activity-exposure.md` §6 |
 
 ⚠️ **`DJANGO_SECRET_KEY` is now required in production.** v2 signs its own password-reset tokens
 with it (**P3-D4**). It reuses the variable v1's `production.py` already reads, so no
