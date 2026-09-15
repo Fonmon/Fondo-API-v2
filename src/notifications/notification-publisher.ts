@@ -2,7 +2,7 @@ import { SendMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import { Inject, Injectable, Logger, type Provider } from '@nestjs/common';
 import { AppConfigService } from '../config/app-config.service';
 import { pythonJsonDumps } from '../common/utils/python-json-dumps';
-import type { PushSubscription } from '../common/utils/hstore.codec';
+import type { PushSubscription } from './push-subscription';
 import { SQS_CLIENT } from './sqs.client';
 
 /**

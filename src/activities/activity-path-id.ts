@@ -1,3 +1,5 @@
+import { parseDjangoIntPathId } from '../common/http/django-int-path-id';
+
 /**
  * The `<id>` of `^api/activity/(?P<id>[0-9]+)/?$` and the `<id_year>` of
  * `^api/activity/year/(?P<id_year>[0-9]+)$`.
@@ -27,8 +29,10 @@
  *
  * Shared by both controllers rather than duplicated: `LoanDetailController` and
  * `LoanAppsController` share `parseLoanPathId` for the same reason.
+ * ✅ **C83 — the rule itself lives in `common/http/django-int-path-id.ts`.** This file kept
+ * its documentation, which is route-specific and worth keeping next to the routes, and
+ * delegates the one line that decides. There were three byte-identical copies at `71cd7de`.
  */
 export function parseActivityPathId(raw: string): number {
-  const value = BigInt(raw);
-  return value > 2147483647n ? -1 : Number(value);
+  return parseDjangoIntPathId(raw);
 }

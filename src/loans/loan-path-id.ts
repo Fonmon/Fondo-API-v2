@@ -1,3 +1,5 @@
+import { parseDjangoIntPathId } from '../common/http/django-int-path-id';
+
 /**
  * The `<id>` of `^api/loan/(?P<id>[0-9]+)$` and `^api/loan/(?P<id>[0-9]+)/(?P<app>[a-zA-Z]+)$`.
  *
@@ -22,8 +24,10 @@
  *
  * The regex admits only `[0-9]+`, so there is no sign to handle and no `-1` sentinel on the
  * way *in*: the loan routes have no "me".
+ * ✅ **C83 — the rule itself lives in `common/http/django-int-path-id.ts`.** This file kept
+ * its documentation, which is route-specific and worth keeping next to the routes, and
+ * delegates the one line that decides. There were three byte-identical copies at `71cd7de`.
  */
 export function parseLoanPathId(raw: string): number {
-  const value = BigInt(raw);
-  return value > 2147483647n ? -1 : Number(value);
+  return parseDjangoIntPathId(raw);
 }

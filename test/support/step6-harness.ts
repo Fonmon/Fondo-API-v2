@@ -1,11 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from 'pg';
-import {
-  parseHstore,
-  repairPythonReprToJson,
-  type HstoreMap,
-} from '../../src/common/utils/hstore.codec';
+import { parseHstore, repairPythonReprToJson, type HstoreMap } from './hstore-legacy';
 
 /**
  * Harness for the Phase 9 step-6 migration (`prisma/migrations-step6`).

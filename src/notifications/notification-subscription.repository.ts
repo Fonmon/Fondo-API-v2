@@ -1,13 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import {
-  decodePushSubscription,
-  parseHstore,
-  toHstoreLiteral,
-  type PushSubscription,
-  type PythonEncodable,
-} from '../common/utils/hstore.codec';
-import { Prisma } from '../prisma';
+import { encodeJsonbColumn, type StorableValue } from '../common/utils/jsonb-storage';
+import type { Prisma } from '../prisma';
 import { PrismaService } from '../prisma/prisma.service';
+import { pinKeysMemberOrder, type PushSubscription } from './push-subscription';
+
+/**
+ * The subscription members that hold structured JSON after Phase 9 step 6. Everything else is
+ * stored as a JSON **string**, which is what v1 stored and what all 94 migrated rows contain.
+ */
+const SUBSCRIPTION_NATIVE_KEYS = ['keys'] as const;
 
 /**
  * The **only** place in the codebase allowed to write SQL against
@@ -61,13 +62,11 @@ export class NotificationSubscriptionRepository {
    * correct — an endpoint identifies one browser installation, which belongs to one person.
    */
   async existsByEndpoint(endpoint: string): Promise<boolean> {
-    const rows = await this.prisma.$queryRaw<{ id: number }[]>`
-      SELECT id
-      FROM fondo_api_notificationsubscriptions
-      WHERE subscription -> 'endpoint' = ${endpoint}
-      LIMIT 1
-    `;
-    return rows.length > 0;
+    const row = await this.prisma.notificationSubscription.findFirst({
+      where: { subscription: { path: ['endpoint'], equals: endpoint } },
+      select: { id: true },
+    });
+    return row !== null;
   }
 
   /**
@@ -76,12 +75,16 @@ export class NotificationSubscriptionRepository {
    * `id` is left to the sequence — v1 and v2 share it during parity testing and plan §4
    * forbids v2 setting a primary key on a table v1 also writes.
    */
-  async create(userId: number, subscription: Record<string, PythonEncodable>): Promise<void> {
-    const literal = toHstoreLiteral(subscription);
-    await this.prisma.$executeRaw`
-      INSERT INTO fondo_api_notificationsubscriptions (user_id, subscription)
-      VALUES (${userId}, ${literal}::hstore)
-    `;
+  async create(userId: number, subscription: Record<string, StorableValue>): Promise<void> {
+    await this.prisma.notificationSubscription.create({
+      data: {
+        user_id: userId,
+        subscription: encodeJsonbColumn(
+          subscription,
+          SUBSCRIPTION_NATIVE_KEYS,
+        ) as Prisma.InputJsonValue,
+      },
+    });
   }
 
   /**
@@ -98,12 +101,13 @@ export class NotificationSubscriptionRepository {
    *   rows written by anything else, so it fails loudly rather than deleting an arbitrary one.
    */
   async findIdByUserAndEndpoint(userId: number, endpoint: string): Promise<number | null> {
-    const rows = await this.prisma.$queryRaw<{ id: number }[]>`
-      SELECT id
-      FROM fondo_api_notificationsubscriptions
-      WHERE user_id = ${userId}
-        AND subscription -> 'endpoint' = ${endpoint}
-    `;
+    const rows = await this.prisma.notificationSubscription.findMany({
+      where: {
+        user_id: userId,
+        subscription: { path: ['endpoint'], equals: endpoint },
+      },
+      select: { id: true },
+    });
     if (rows.length === 0) {
       return null;
     }
@@ -117,9 +121,7 @@ export class NotificationSubscriptionRepository {
 
   /** `.delete()` on the row `findIdByUserAndEndpoint` located. */
   async deleteById(id: number): Promise<void> {
-    await this.prisma.$executeRaw`
-      DELETE FROM fondo_api_notificationsubscriptions WHERE id = ${id}
-    `;
+    await this.prisma.notificationSubscription.delete({ where: { id } });
   }
 
   /**
@@ -141,9 +143,10 @@ export class NotificationSubscriptionRepository {
    * exist yet: **Phase 3 must wire this call** (P2-D4, corrected after parity finding F5).
    */
   async deleteAllByUserId(userId: number): Promise<number> {
-    return this.prisma.$executeRaw`
-      DELETE FROM fondo_api_notificationsubscriptions WHERE user_id = ${userId}
-    `;
+    const { count } = await this.prisma.notificationSubscription.deleteMany({
+      where: { user_id: userId },
+    });
+    return count;
   }
 
   /**
@@ -170,13 +173,12 @@ export class NotificationSubscriptionRepository {
       return [];
     }
 
-    const rows = await this.prisma.$queryRaw<{ subscription: string }[]>`
-      SELECT subscription::text AS subscription
-      FROM fondo_api_notificationsubscriptions
-      WHERE user_id IN (${Prisma.join([...userIds])})
-    `;
+    const rows = await this.prisma.notificationSubscription.findMany({
+      where: { user_id: { in: [...userIds] } },
+      select: { subscription: true },
+    });
 
-    return rows.map((row) => decodePushSubscription(parseHstore(row.subscription)));
+    return rows.map((row) => requirePushSubscription(row.subscription));
   }
 
   /**
@@ -184,12 +186,45 @@ export class NotificationSubscriptionRepository {
    * prove that a subscription written by v2 is byte-identical to one written by v1 —
    * including the Python `repr` in `keys` — and by nothing in production.
    */
-  async findRawSubscriptionById(id: number): Promise<string | null> {
-    const rows = await this.prisma.$queryRaw<{ subscription: string }[]>`
-      SELECT subscription::text AS subscription
-      FROM fondo_api_notificationsubscriptions
-      WHERE id = ${id}
-    `;
-    return rows.length === 0 ? null : rows[0].subscription;
+  async findSubscriptionById(id: number): Promise<Record<string, unknown> | null> {
+    const row = await this.prisma.notificationSubscription.findUnique({
+      where: { id },
+      select: { subscription: true },
+    });
+    return row === null ? null : (row.subscription as Record<string, unknown>);
   }
+}
+
+/**
+ * The read half of v1's `send_notification`, after Phase 9 step 6.
+ *
+ * ```python
+ * subscription = notification_subscription.subscription
+ * subscription['keys'] = subscription['keys'].replace("'", '"')
+ * subscription['keys'] = json.loads(subscription['keys'])
+ * ```
+ *
+ * The migration did the repair once and permanently, so there is nothing left to decode —
+ * but the two things that loop *guaranteed* still have to hold:
+ *
+ *  1. ⚠️ **Condition C23 — fail closed on a missing `keys`.** v1 subscripts the key
+ *     unconditionally, so a row without it raises before anything is published. Iterating the
+ *     object's own members would instead publish a subscription with no `keys` field to the
+ *     Lambda — a fail-*open* divergence invisible to any black-box round, because all 94 live
+ *     rows carry it.
+ *  2. ✅ **C91 (Q60) — the `keys` members go out as `p256dh, auth`.** jsonb stores them in
+ *     (length, bytes) order, i.e. `auth, p256dh`; the pin restores the browser's order at the
+ *     one place every SQS body passes through. See `push-subscription.ts`.
+ */
+function requirePushSubscription(stored: unknown): PushSubscription {
+  const subscription = stored as PushSubscription;
+  if (!Object.prototype.hasOwnProperty.call(subscription, 'keys')) {
+    throw new Error("KeyError: 'keys'");
+  }
+  if (subscription.keys === null) {
+    // Django stored Python `None` as SQL NULL, which step 6 turned into JSON null; v1 then
+    // did `None.replace(...)`.
+    throw new TypeError("AttributeError: 'NoneType' object has no attribute 'replace'");
+  }
+  return pinKeysMemberOrder(subscription);
 }

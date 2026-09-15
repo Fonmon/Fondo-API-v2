@@ -1180,10 +1180,7 @@ describe('Phase 4 — /api/loan (port of test_loan_views.py)', () => {
         )
         .expect(200);
 
-      const rows = await prisma.$queryRaw<
-        { run_date: Date; payload: string; processed: boolean; repeat: number; type: number }[]
-      >`SELECT run_date, payload::text AS payload, processed, repeat, type
-        FROM fondo_api_schedulertask ORDER BY run_date`;
+      const rows = await prisma.schedulerTask.findMany({ orderBy: { run_date: 'asc' } });
       expect(rows).toHaveLength(2);
       // `make_aware(datetime(y, m, d))` in America/Bogota -> 05:00Z.
       expect(rows[0].run_date.toISOString()).toBe('2018-06-10T05:00:00.000Z');
@@ -1192,13 +1189,15 @@ describe('Phase 4 — /api/loan (port of test_loan_views.py)', () => {
         expect(row.type).toBe(0);
         expect(row.repeat).toBe(0);
         expect(row.processed).toBe(false);
-        // hstore stores strings; `user_ids` is a Python list repr.
-        expect(row.payload).toContain('"type"=>"payment_reminder"');
-        expect(row.payload).toContain(`"owner_id"=>"${id}"`);
-        expect(row.payload).toContain(`"user_ids"=>"[${admin.id}]"`);
-        expect(row.payload).toContain(`"target"=>"/loan/${id}"`);
-        expect(row.payload).toContain(
-          `"message"=>"Recuerde que la fecha límite de pago para el crédito ${id}, es el: 15 jun. 2018"`,
+        // Phase 9 step 6: jsonb members — strings, except `user_ids`, which is a real array.
+        const stored = row.payload as Record<string, unknown>;
+        expect(stored.type).toBe('payment_reminder');
+        // ⚠️ On a payment reminder `owner_id` is the **loan** id, and still a string.
+        expect(stored.owner_id).toBe(String(id));
+        expect(stored.user_ids).toEqual([admin.id]);
+        expect(stored.target).toBe(`/loan/${id}`);
+        expect(stored.message).toBe(
+          `Recuerde que la fecha límite de pago para el crédito ${id}, es el: 15 jun. 2018`,
         );
       }
     });

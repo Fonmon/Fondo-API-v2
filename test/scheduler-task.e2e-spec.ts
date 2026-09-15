@@ -76,22 +76,44 @@ describe('Phase 7a — SchedulerTaskRepository (C24)', () => {
     // 2027-08-25 00:00 America/Bogota.
     expect(rows[0].run_date.toISOString()).toBe('2027-08-25T05:00:00.000Z');
 
-    // hstore normalises key order to (length, bytes) on storage, so this is v1's exact string.
-    await expect(repository.findRawPayloadById(rows[0].id)).resolves.toBe(
-      '"type"=>"birthdate", "target"=>"/", "message"=>"Hoy está cumpliendo años N@CHO ' +
-        'Montañez Herrera", "owner_id"=>"5", "user_ids"=>"[2, 4, 3, 13, 11, 10, 1, 9, 12, 6, 7, 8]"',
-    );
+    // Phase 9 step 6: jsonb normalises member order to (length, bytes) on storage — the same
+    // order hstore emitted — and `user_ids` is a real array. `owner_id` is still a string.
+    const stored = await repository.findPayloadById(rows[0].id);
+    expect(stored).toEqual({
+      type: 'birthdate',
+      target: '/',
+      message: 'Hoy está cumpliendo años N@CHO Montañez Herrera',
+      owner_id: '5',
+      user_ids: [2, 4, 3, 13, 11, 10, 1, 9, 12, 6, 7, 8],
+    });
+    expect(Object.keys(stored ?? {})).toEqual([
+      'type',
+      'target',
+      'message',
+      'owner_id',
+      'user_ids',
+    ]);
   });
 
-  it('stores owner_id as text and user_ids as a Python list repr', async () => {
+  /**
+   * **The write-side rule of `jsonb-storage.ts`, against the real column.**
+   *
+   * `owner_id` stays a JSON **string** and `user_ids` becomes a JSON **array** — which is
+   * exactly what Phase 9 step 6 left in all 626 migrated rows. A row v2 writes with
+   * `{"owner_id": 5}` would be invisible to the dedupe filter, which compares it as text.
+   */
+  it('stores owner_id as a JSON string and user_ids as a JSON array', async () => {
     await notifications.scheduleNotification({ year: 2027, month: 8, day: 25 }, payload(5), 4);
 
-    const [row] = await prisma.$queryRaw<{ owner: string; ids: string }[]>`
-      SELECT payload -> 'owner_id' AS owner, payload -> 'user_ids' AS ids
+    const [row] = await prisma.$queryRaw<{ owner_type: string; ids_type: string; owner: string }[]>`
+      SELECT jsonb_typeof(payload -> 'owner_id') AS owner_type,
+             jsonb_typeof(payload -> 'user_ids') AS ids_type,
+             payload ->> 'owner_id'              AS owner
       FROM fondo_api_schedulertask
     `;
+    expect(row.owner_type).toBe('string');
+    expect(row.ids_type).toBe('array');
     expect(row.owner).toBe('5');
-    expect(row.ids).toBe('[2, 4, 3, 13, 11, 10, 1, 9, 12, 6, 7, 8]');
   });
 
   it('dedupes a second schedule on the same local day for the same owner and type', async () => {
@@ -159,7 +181,7 @@ describe('Phase 7a — SchedulerTaskRepository (C24)', () => {
     await expect(notifications.removeSchNotifications('birthdate', 5)).resolves.toBe(2);
 
     const remaining = await prisma.$queryRaw<{ owner: string; type: string }[]>`
-      SELECT payload -> 'owner_id' AS owner, payload -> 'type' AS type
+      SELECT payload ->> 'owner_id' AS owner, payload ->> 'type' AS type
       FROM fondo_api_schedulertask ORDER BY id
     `;
     expect(remaining).toEqual([

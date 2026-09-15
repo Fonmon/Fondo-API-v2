@@ -1,5 +1,5 @@
 import type { Logger } from '@nestjs/common';
-import type { HstoreMap } from '../../common/utils/hstore.codec';
+import type { SchedulerPayload } from '../scheduler-payload';
 import type { NotificationService } from '../../notifications/notification.service';
 import type { MemberDirectory } from '../member-directory';
 import { NotificationExecuter } from './notification.executer';
@@ -14,12 +14,15 @@ import { NotificationExecuter } from './notification.executer';
  *
  * v1 has **no** test for this class.
  */
-const LIVE_PAYLOAD: HstoreMap = {
+const LIVE_PAYLOAD: SchedulerPayload = {
   type: 'birthdate',
   target: '/',
   message: 'Hoy está cumpliendo años N@CHO Montañez Herrera',
   owner_id: '5',
-  user_ids: '[2, 4, 3, 13, 11, 10, 1, 9, 12, 6, 7, 8]',
+  // ⚠️ Phase 9 step 6: a real array. It was the string `'[2, 4, …]'` while the column was
+  // hstore and v1 `json.loads`-ed it on every read; the migration did that once. `owner_id`
+  // stays a string — see `jsonb-storage.ts`.
+  user_ids: [2, 4, 3, 13, 11, 10, 1, 9, 12, 6, 7, 8],
 };
 
 describe('NotificationExecuter', () => {
@@ -67,7 +70,7 @@ describe('NotificationExecuter', () => {
     await executer.run({
       type: 'payment_reminder',
       owner_id: '412',
-      user_ids: '[7]',
+      user_ids: [7],
       target: '/loan/412',
       message: 'Recuerde que la fecha límite de pago para el crédito 412, es el: 30 sep. 2026',
     });
@@ -144,10 +147,10 @@ describe('NotificationExecuter', () => {
   // Phase 8b
   // ---------------------------------------------------------------------------------------
 
-  const REMINDER: HstoreMap = {
+  const REMINDER: SchedulerPayload = {
     type: 'payment_reminder',
     owner_id: '412',
-    user_ids: '[7]',
+    user_ids: [7],
     target: '/loan/412',
     message: 'Recuerde que la fecha límite de pago para el crédito 412, es el: 30 sep. 2026',
   };
@@ -214,7 +217,7 @@ describe('NotificationExecuter', () => {
     it('ignores the stored user_ids for the audience', async () => {
       members.activeMemberIdsExcept.mockResolvedValue([14]);
 
-      await executer.run({ ...LIVE_PAYLOAD, user_ids: '[2, 3]' });
+      await executer.run({ ...LIVE_PAYLOAD, user_ids: [2, 3] });
 
       expect(notifications.sendNotification).toHaveBeenCalledWith([14], LIVE_PAYLOAD.message, '/');
     });
@@ -243,11 +246,17 @@ describe('NotificationExecuter', () => {
       expect(members.activeMemberIdsExcept).not.toHaveBeenCalled();
     });
 
-    /** §2.3: the stored list is still parsed, so a row v1 fails on still fails, first. */
-    it('still json.loads the stored user_ids of a birthday, before any member read', async () => {
-      await expect(executer.run({ ...LIVE_PAYLOAD, user_ids: '[2, 3' })).rejects.toThrow(
-        SyntaxError,
-      );
+    /**
+     * §2.3: the stored list is still **read and validated** before any member lookup, so a row
+     * the executer cannot use still fails first and stays unprocessed.
+     *
+     * ⚠️ Phase 9 step 6 changed the failure, not the ordering. v1 — and v2 until stage 2a —
+     * did `json.loads` here, so a malformed `'[2, 3'` raised `SyntaxError`. The column is
+     * jsonb now and the migration unwrapped every row, so the reachable bad shape is a value
+     * that is **not a list**; `requireUserIds` refuses it with a `TypeError` naming the type.
+     */
+    it('still reads the stored user_ids of a birthday, before any member read', async () => {
+      await expect(executer.run({ ...LIVE_PAYLOAD, user_ids: '[2, 3' })).rejects.toThrow(TypeError);
       expect(members.ownerStatus).not.toHaveBeenCalled();
       expect(notifications.sendNotification).not.toHaveBeenCalled();
     });

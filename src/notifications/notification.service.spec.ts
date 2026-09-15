@@ -1,4 +1,4 @@
-import type { PushSubscription } from '../common/utils/hstore.codec';
+import type { PushSubscription } from './push-subscription';
 import type { NotificationPublisher } from './notification-publisher';
 import { NotificationService, UNSUBSCRIBE_NOT_FOUND, UNSUBSCRIBE_OK } from './notification.service';
 import type { NotificationSubscriptionRepository } from './notification-subscription.repository';

@@ -1,11 +1,6 @@
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Prisma, PrismaClient } from '../src/prisma/prisma-client';
-import {
-  decodePushSubscription,
-  decodeSchedulerPayload,
-  parseHstore,
-  toHstoreLiteral,
-} from '../src/common/utils/hstore.codec';
+import { encodeJsonbColumn } from '../src/common/utils/jsonb-storage';
 import { TEST_DATABASE_URL } from './test-database';
 
 /**
@@ -15,7 +10,8 @@ import { TEST_DATABASE_URL } from './test-database';
  * database provisioned from the Prisma baseline. This proves three things at once:
  *   - `schema.prisma` maps every column, name and type correctly;
  *   - the baseline migration reproduces the Django schema well enough to run against;
- *   - the two `Unsupported("hstore")` columns are reachable through raw SQL + the codec.
+ *   - the two columns Phase 9 step 6 converted to `jsonb` round-trip through the client
+ *     like any other, which is the whole payoff of that step.
  *
  * The whole suite runs inside one interactive transaction that is rolled back, so the test
  * database is left as it was found (bar sequence advancement).
@@ -350,7 +346,7 @@ describe('Prisma schema round-trip against the Django-created schema', () => {
     });
   });
 
-  it('reads and writes the hstore column on fondo_api_notificationsubscriptions', async () => {
+  it('reads and writes the jsonb column on fondo_api_notificationsubscriptions', async () => {
     await inRollback(async (tx) => {
       const { profile } = await createUser(tx);
       const subscription = {
@@ -359,39 +355,37 @@ describe('Prisma schema round-trip against the Django-created schema', () => {
         keys: { p256dh: 'BHUdL9eM2s6BoDOIl0zz', auth: '60-ComhtIqES' },
       };
 
-      // Prisma Client cannot write Unsupported("hstore"); this is the raw-SQL path the two
-      // repositories will use.
-      const inserted = await tx.$queryRaw<{ id: number }[]>`
-        INSERT INTO fondo_api_notificationsubscriptions (user_id, subscription)
-        VALUES (${profile.user_ptr_id}, ${toHstoreLiteral(subscription)}::hstore)
-        RETURNING id
-      `;
-      const id = inserted[0]?.id;
+      // ⚠️ Since step 6 the Prisma **client** writes this column directly — the raw-SQL
+      // repository that used to be required is gone. The value still goes through
+      // `encodeJsonbColumn`, which is the rule that keeps a v2 row identical to a migrated one.
+      const created = await tx.notificationSubscription.create({
+        data: {
+          user_id: profile.user_ptr_id,
+          subscription: encodeJsonbColumn(subscription, ['keys']) as Prisma.InputJsonValue,
+        },
+        select: { id: true },
+      });
 
-      const rows = await tx.$queryRaw<{ id: number; user_id: number; subscription: string }[]>`
-        SELECT id, user_id, subscription::text AS subscription
-        FROM fondo_api_notificationsubscriptions
-        WHERE id = ${id}
-      `;
-      expect(rows).toHaveLength(1);
-      const decoded = decodePushSubscription(parseHstore(rows[0]?.subscription));
+      const row = await tx.notificationSubscription.findUniqueOrThrow({
+        where: { id: created.id },
+      });
+      const decoded = row.subscription as unknown as typeof subscription;
       expect(decoded.endpoint).toBe(subscription.endpoint);
       expect(decoded.expirationTime).toBeNull();
       expect(decoded.keys).toEqual(subscription.keys);
 
-      // The nested keys object really is stored as a Python repr, not as JSON.
-      expect(rows[0]?.subscription).toContain("{'p256dh': 'BHUdL9eM2s6BoDOIl0zz'");
+      // The nested keys object is a real JSON object now, not the Python repr it was.
+      expect(typeof decoded.keys).toBe('object');
 
-      // And the `subscription -> 'endpoint'` lookup v1's dedupe relies on still works.
-      const byEndpoint = await tx.$queryRaw<{ count: bigint }[]>`
-        SELECT count(*) AS count FROM fondo_api_notificationsubscriptions
-        WHERE subscription -> 'endpoint' = ${subscription.endpoint}
-      `;
-      expect(Number(byEndpoint[0]?.count)).toBe(1);
+      // And the endpoint lookup the dedupe relies on still works, through the client.
+      const byEndpoint = await tx.notificationSubscription.count({
+        where: { subscription: { path: ['endpoint'], equals: subscription.endpoint } },
+      });
+      expect(byEndpoint).toBe(1);
     });
   });
 
-  it('reads and writes the hstore column on fondo_api_schedulertask', async () => {
+  it('reads and writes the jsonb column on fondo_api_schedulertask', async () => {
     await inRollback(async (tx) => {
       const payload = {
         type: 'payment_reminder',
@@ -400,28 +394,30 @@ describe('Prisma schema round-trip against the Django-created schema', () => {
         target: '/loan/53',
         message: 'Recuerde que la fecha límite de pago para el crédito 53, es el: 9 sept. 2099',
       };
-      const inserted = await tx.$queryRaw<{ id: number }[]>`
-        INSERT INTO fondo_api_schedulertask (type, run_date, payload, processed, repeat)
-        VALUES (0, ${NOW}, ${toHstoreLiteral(payload)}::hstore, false, 0)
-        RETURNING id
-      `;
-      const id = inserted[0]?.id;
+      const created = await tx.schedulerTask.create({
+        data: {
+          type: 0,
+          run_date: NOW,
+          payload: encodeJsonbColumn(payload, ['user_ids']) as Prisma.InputJsonValue,
+          processed: false,
+          repeat: 0,
+        },
+        select: { id: true },
+      });
 
-      const rows = await tx.$queryRaw<{ payload: string; processed: boolean; repeat: number }[]>`
-        SELECT payload::text AS payload, processed, repeat
-        FROM fondo_api_schedulertask WHERE id = ${id}
-      `;
-      const decoded = decodeSchedulerPayload(parseHstore(rows[0]?.payload));
+      const row = await tx.schedulerTask.findUniqueOrThrow({ where: { id: created.id } });
+      const decoded = row.payload as Record<string, unknown>;
+      // `user_ids` is a real array; `owner_id` is still the **string** v1 stored.
       expect(decoded.user_ids).toEqual([5]);
       expect(decoded.owner_id).toBe('53');
       expect(decoded.message).toBe(payload.message);
-      expect(rows[0]?.processed).toBe(false);
+      expect(row.processed).toBe(false);
 
-      // The dedupe query in schedule_notification: payload -> 'owner_id' compared as text.
+      // The dedupe query in schedule_notification, compared as text — `->>`, not `->`.
       const deduped = await tx.$queryRaw<{ count: bigint }[]>`
         SELECT count(*) AS count FROM fondo_api_schedulertask
-        WHERE payload -> 'owner_id' = '53' AND payload -> 'type' = 'payment_reminder'
-          AND processed = false AND id = ${id}
+        WHERE payload ->> 'owner_id' = '53' AND payload ->> 'type' = 'payment_reminder'
+          AND processed = false AND id = ${created.id}
       `;
       expect(Number(deduped[0]?.count)).toBe(1);
     });
@@ -482,6 +478,12 @@ describe('Prisma schema round-trip against the Django-created schema', () => {
     expect(Number(rows[0]?.deferred)).toBe(21);
   });
 
+  /**
+   * ⚠️ **Still installed, and deliberately not dropped.** Nothing in `src/` speaks hstore
+   * after step 6, but `prisma/migrations-step6` needs `hstore_to_jsonb` to run, and the
+   * step-6 mutation suite builds hstore fixtures. Dropping the extension is stage 2b work, if
+   * ever — it costs nothing to leave.
+   */
   it('has the hstore extension installed', async () => {
     const rows = await prisma.$queryRaw<{ extname: string }[]>`
       SELECT extname FROM pg_extension WHERE extname = 'hstore'

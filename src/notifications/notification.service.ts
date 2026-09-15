@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { pythonStr, type PythonEncodable } from '../common/utils/hstore.codec';
+import { pythonStr, type PythonEncodable } from '../common/utils/django-str';
 import { bogotaWallClockToInstant } from '../common/utils/timezone.util';
 import type { PlainDate } from '../common/utils/date.util';
 import {

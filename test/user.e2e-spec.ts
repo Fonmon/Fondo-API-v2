@@ -1117,16 +1117,15 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
       expect(tasks[0].type).toBe(0);
       expect(tasks[0].processed).toBe(false);
 
-      const [row] = await prisma.$queryRaw<{ payload: string }[]>`
-        SELECT payload::text AS payload FROM fondo_api_schedulertask
-      `;
-      expect(row.payload).toContain('"type"=>"birthdate"');
-      expect(row.payload).toContain(`"owner_id"=>"${members[0].id}"`);
-      expect(row.payload).toContain('"message"=>"Hoy está cumpliendo años Foo Name Foo Last Name"');
-      expect(row.payload).toContain('"target"=>"/"');
+      const row = await prisma.schedulerTask.findFirstOrThrow();
+      const payload = row.payload as Record<string, unknown>;
+      expect(payload.type).toBe('birthdate');
+      // ⚠️ Still a **string** after Phase 9 step 6 — on a birthday row it is the member id.
+      expect(payload.owner_id).toBe(String(members[0].id));
+      expect(payload.message).toBe('Hoy está cumpliendo años Foo Name Foo Last Name');
+      expect(payload.target).toBe('/');
       // Ten of the eleven active members: the owner is removed from the list.
-      const ids = /"user_ids"=>"\[([^\]]*)\]"/.exec(row.payload)?.[1] ?? '';
-      const parsed = ids.split(', ').map(Number);
+      const parsed = payload.user_ids as number[];
       expect(parsed).toHaveLength(10);
       expect(parsed).not.toContain(members[0].id);
     });
@@ -1164,12 +1163,9 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
       });
       expect(row.birthdate?.toISOString().slice(0, 10)).toBe('1980-03-04');
 
-      const [task] = await prisma.$queryRaw<{ payload: string }[]>`
-        SELECT payload::text AS payload FROM fondo_api_schedulertask
-      `;
+      const task = await prisma.schedulerTask.findFirstOrThrow();
       // Ten active members remain, and the inactive owner was never in the list to remove.
-      const ids = /"user_ids"=>"\[([^\]]*)\]"/.exec(task.payload)?.[1] ?? '';
-      expect(ids.split(', ')).toHaveLength(10);
+      expect((task.payload as { user_ids: number[] }).user_ids).toHaveLength(10);
     });
 
     /**
@@ -1245,13 +1241,9 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
         await expect(runDateAfterSaving('2026-09-14T17:00:00.000Z', '2020-08-05')).resolves.toBe(
           '2027-08-05T05:00:00.000Z',
         );
-        const [row] = await prisma.$queryRaw<
-          { payload: string; repeat: number; processed: boolean }[]
-        >`
-          SELECT payload::text AS payload, repeat, processed FROM fondo_api_schedulertask
-        `;
+        const row = await prisma.schedulerTask.findFirstOrThrow();
         expect(row).toMatchObject({ repeat: 4, processed: false });
-        expect(row.payload).toContain(`"owner_id"=>"${members[5].id}"`);
+        expect((row.payload as { owner_id: string }).owner_id).toBe(String(members[5].id));
       });
 
       /**
@@ -1280,9 +1272,12 @@ describe('Phase 3 — /api/user (port of test_user_views.py)', () => {
         for (const [userId, tag] of tagged) {
           await prisma.$executeRawUnsafe(
             'INSERT INTO fondo_api_notificationsubscriptions (user_id, subscription) ' +
-              'VALUES ($1, $2::hstore)',
+              'VALUES ($1, $2::jsonb)',
             userId,
-            REAL_FCM_ROW.replace('/fcm/send/', `/fcm/send/${tag}`),
+            JSON.stringify({
+              ...REAL_FCM_ROW,
+              endpoint: REAL_FCM_ROW.endpoint.replace('/fcm/send/', `/fcm/send/${tag}`),
+            }),
           );
         }
 

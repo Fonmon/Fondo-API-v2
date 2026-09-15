@@ -272,8 +272,8 @@ describe('Phase 2 — notifications', () => {
       const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
         'SELECT id FROM fondo_api_notificationsubscriptions',
       );
-      const raw = await repository.findRawSubscriptionById(rows[0].id);
-      expect(raw).toContain('"extra"=>"value"');
+      const stored = await repository.findSubscriptionById(rows[0].id);
+      expect(stored?.extra).toBe('value');
     });
   });
 
@@ -281,33 +281,57 @@ describe('Phase 2 — notifications', () => {
   // The extra integration coverage the plan requires for raw-SQL hstore
   // -------------------------------------------------------------------------
 
-  describe('hstore round-trip', () => {
-    it('writes the Python repr of the nested keys object, exactly as Django does', async () => {
+  describe('jsonb storage and the wire order', () => {
+    it('stores keys as a real object and expirationTime as JSON null', async () => {
       await subscribe(V1_TEST_SUBSCRIPTION).expect(200);
 
       const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
         'SELECT id FROM fondo_api_notificationsubscriptions',
       );
-      const raw = await repository.findRawSubscriptionById(rows[0].id);
+      const stored = await repository.findSubscriptionById(rows[0].id);
 
-      // Single quotes, `', '` separators, key order preserved — NOT JSON.
-      expect(raw).toContain(
-        `"keys"=>"{'p256dh': '${V1_TEST_SUBSCRIPTION.keys.p256dh}', 'auth': '${V1_TEST_SUBSCRIPTION.keys.auth}'}"`,
-      );
-      // `expirationTime: None` is SQL NULL, not the string 'None'.
-      expect(raw).toContain('"expirationTime"=>NULL');
+      // Phase 9 step 6: `keys` is an object, not the Python repr string it used to be.
+      expect(stored?.keys).toEqual({
+        p256dh: V1_TEST_SUBSCRIPTION.keys.p256dh,
+        auth: V1_TEST_SUBSCRIPTION.keys.auth,
+      });
+      // `expirationTime: None` was SQL NULL and is now JSON null — never the string 'None'.
+      expect(stored?.expirationTime).toBeNull();
+      expect(Object.prototype.hasOwnProperty.call(stored ?? {}, 'expirationTime')).toBe(true);
     });
 
-    it('reads back a v1-written row, repairing the repr into an object', async () => {
+    /**
+     * ✅ **C91 / Q60 — the `keys` members are *stored* `auth, p256dh` and go *out*
+     * `p256dh, auth`.** jsonb sorts object members by (length, bytes); the browser's order is
+     * the other way round, and `pinKeysMemberOrder` restores it on the emit path. This cell
+     * fails if the pin is removed, which is the whole reason it exists: after step 6 the
+     * stored order is no longer evidence of anything.
+     */
+    it('C91: stores keys as auth,p256dh and emits them as p256dh,auth', async () => {
+      await subscribe(V1_TEST_SUBSCRIPTION).expect(200);
+
+      const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+        'SELECT id FROM fondo_api_notificationsubscriptions',
+      );
+      const stored = await repository.findSubscriptionById(rows[0].id);
+      expect(Object.keys(stored?.keys as Record<string, string>)).toEqual(['auth', 'p256dh']);
+
+      const [emitted] = await repository.findPushSubscriptionsByUserIds([member.id]);
+      expect(Object.keys(emitted.keys)).toEqual(['p256dh', 'auth']);
+      // …and the top level is untouched: jsonb's order is hstore's order.
+      expect(Object.keys(emitted)).toEqual(['keys', 'endpoint', 'expirationTime']);
+    });
+
+    it('reads back a row v2 did not write, as the Lambda will receive it', async () => {
       // Written the way v1 wrote rows 160 and 1398 of `fondodev`, not the way v2 writes.
       const id = await insertRawSubscription(prisma, member.id, REAL_FCM_ROW);
 
       const [decoded] = await repository.findPushSubscriptionsByUserIds([member.id]);
 
       expect(decoded).toEqual(REAL_FCM_DECODED);
-      // The repaired `keys` is a real object, not the string it was stored as.
       expect(typeof decoded.keys).toBe('object');
-      expect(await repository.findRawSubscriptionById(id)).toBe(REAL_FCM_ROW);
+      // Stored unchanged — reading does not rewrite the row.
+      expect(await repository.findSubscriptionById(id)).toEqual(REAL_FCM_ROW);
     });
 
     it('survives the one live row that has no expirationTime key at all', async () => {
@@ -319,7 +343,7 @@ describe('Phase 2 — notifications', () => {
       expect('expirationTime' in decoded).toBe(false);
     });
 
-    it('preserves PostgreSQL key order — keys, endpoint, expirationTime', async () => {
+    it('preserves PostgreSQL member order — keys, endpoint, expirationTime', async () => {
       await subscribe(V1_TEST_SUBSCRIPTION).expect(200);
 
       const [decoded] = await repository.findPushSubscriptionsByUserIds([member.id]);
@@ -328,15 +352,15 @@ describe('Phase 2 — notifications', () => {
       expect(Object.keys(decoded)).toEqual(['keys', 'endpoint', 'expirationTime']);
     });
 
-    it('a v2-written row decodes identically to a v1-written one', async () => {
-      // The point of the write-side Python encoding: v1 still runs until cutover and both
-      // apps read the same table.
+    it('a row v2 writes is stored exactly like a migrated one', async () => {
+      // Step 6 left 94 rows behind; a row v2 writes afterwards must be indistinguishable
+      // from them, or every equality filter starts matching half the table.
       await subscribe(REAL_FCM_DECODED).expect(200);
       const written = await prisma.$queryRawUnsafe<{ id: number }[]>(
         'SELECT id FROM fondo_api_notificationsubscriptions',
       );
 
-      expect(await repository.findRawSubscriptionById(written[0].id)).toBe(REAL_FCM_ROW);
+      expect(await repository.findSubscriptionById(written[0].id)).toEqual(REAL_FCM_ROW);
     });
 
     /**
@@ -351,25 +375,31 @@ describe('Phase 2 — notifications', () => {
      */
     const liveUrl = process.env.FONDODEV_DATABASE_URL;
     (liveUrl === undefined ? it.skip : it)(
-      'decodes every live subscription row in fondodev',
+      'every live subscription row in fondodev is in its post-step-6 shape',
       async () => {
         const { PrismaPg } = await import('@prisma/adapter-pg');
         const { PrismaClient } = await import('../src/prisma/prisma-client');
         const live = new PrismaClient({ adapter: new PrismaPg({ connectionString: liveUrl }) });
         try {
-          const rows = await live.$queryRawUnsafe<{ id: number; subscription: string }[]>(
-            'SELECT id, subscription::text AS subscription FROM fondo_api_notificationsubscriptions ORDER BY id',
-          );
+          // ⚠️ Phase 9 step 6: `subscription` is jsonb, so the row arrives decoded and the
+          // codec that used to do it is gone. What this cell checks is therefore the shape
+          // the migration produced, on every live row, rather than a decoder.
+          const rows = await live.$queryRawUnsafe<
+            { id: number; subscription: Record<string, unknown> }[]
+          >('SELECT id, subscription FROM fondo_api_notificationsubscriptions ORDER BY id');
           expect(rows.length).toBeGreaterThan(0);
 
-          const { decodePushSubscription, parseHstore } =
-            await import('../src/common/utils/hstore.codec');
           for (const row of rows) {
-            const decoded = decodePushSubscription(parseHstore(row.subscription));
+            const decoded = row.subscription as unknown as {
+              endpoint: string;
+              keys: Record<string, string>;
+            };
             expect(typeof decoded.endpoint).toBe('string');
             expect(typeof decoded.keys).toBe('object');
             expect(typeof decoded.keys.auth).toBe('string');
             expect(typeof decoded.keys.p256dh).toBe('string');
+            // Nothing is still doubly stringified — the repair pass reached every row.
+            expect(typeof decoded.keys).not.toBe('string');
           }
         } finally {
           await live.$disconnect();
@@ -568,16 +598,24 @@ describe('Phase 2 — notifications', () => {
 });
 
 /** Inserts a row exactly as v1 wrote it, bypassing v2's encoder. */
+/**
+ * Inserts a subscription row exactly as the database holds it after Phase 9 step 6 — the
+ * migrated jsonb object, not v1's hstore text.
+ *
+ * ⚠️ It writes through `$queryRawUnsafe`, **not** through the repository, on purpose: the
+ * point of these cells is to read a row v2 did not encode, so the row must not go through
+ * v2's encoder on the way in.
+ */
 async function insertRawSubscription(
   prisma: PrismaService,
   userId: number,
-  hstoreText: string,
+  subscription: Record<string, unknown>,
 ): Promise<number> {
   const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
     'INSERT INTO fondo_api_notificationsubscriptions (user_id, subscription) ' +
-      'VALUES ($1, $2::hstore) RETURNING id',
+      'VALUES ($1, $2::jsonb) RETURNING id',
     userId,
-    hstoreText,
+    JSON.stringify(subscription),
   );
   return rows[0].id;
 }

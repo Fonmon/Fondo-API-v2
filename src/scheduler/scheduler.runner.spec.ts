@@ -21,9 +21,6 @@ import { SCHEDULER_CRON_EXPRESSION, SCHEDULER_CRON_JOB, SchedulerRunner } from '
 const LATE_EVENING_UTC = new Date('2026-09-07T02:30:00.000Z');
 
 function task(overrides: Partial<DueSchedulerTask> = {}): DueSchedulerTask {
-  const payloadText =
-    '"type"=>"birthdate", "target"=>"/", "message"=>"Hoy está cumpliendo años X", ' +
-    '"owner_id"=>"5", "user_ids"=>"[2, 3]"';
   return {
     id: 101,
     type: 0,
@@ -34,9 +31,10 @@ function task(overrides: Partial<DueSchedulerTask> = {}): DueSchedulerTask {
       target: '/',
       message: 'Hoy está cumpliendo años X',
       owner_id: '5',
-      user_ids: '[2, 3]',
+      // Phase 9 step 6: `user_ids` is a real array in the column now; every other member is
+      // still a JSON string, `owner_id` included.
+      user_ids: [2, 3],
     },
-    payloadText,
     ...overrides,
   };
 }
@@ -507,14 +505,14 @@ describe('SchedulerRunner', () => {
       expect(runDate.toISOString()).toBe('2027-08-25T05:00:00.000Z');
     });
 
-    it('hands the clone the source row’s stored payload text, not a re-encode', async () => {
+    it('hands the clone the source row’s stored payload, not a re-encode', async () => {
       const source = task({ repeat: 4 });
       tasks.findDueUnprocessed.mockResolvedValue([source]);
 
       await runner.run(LATE_EVENING_UTC);
 
       const [cloned] = tasks.createRepeatInstance.mock.calls[0] as [DueSchedulerTask];
-      expect(cloned.payloadText).toBe(source.payloadText);
+      expect(cloned.payload).toEqual(source.payload);
       expect(cloned.type).toBe(source.type);
       expect(cloned.repeat).toBe(source.repeat);
     });
@@ -678,7 +676,6 @@ describe('SchedulerRunner', () => {
         type: 1,
         repeat: 0,
         payload: { type: 'saving_account_close', saving_account_id: '3' },
-        payloadText: '"type"=>"saving_account_close", "saving_account_id"=>"3"',
       });
 
     beforeEach(() => {

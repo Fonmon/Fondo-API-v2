@@ -14,8 +14,7 @@ import { PrismaService } from './prisma.service';
  *   * Release A writing into a converted column:
  *     `ERROR: column "payload" is of type jsonb but expression is of type hstore`;
  *   * Release A reading one: `SELECT payload::text` returns JSON, which `parseHstore` throws
- *     on (`hstore.codec.spec.ts`, *"step 6: rejects the JSON text a converted jsonb column
- *     renders"*);
+ *     on — the codec is deleted now, but that was the measurement);
  *   * Release B against an un-migrated column: the mirror image.
  *
  * Without this guard, a build deployed on the wrong side **starts cleanly**, serves every
@@ -55,12 +54,20 @@ export const STEP6_COLUMNS = [
 /**
  * The type **this build** requires.
  *
- * Release A (the cutover build) requires `hstore`; Release B flips this one constant to
- * `jsonb` when the hstore codec is deleted. It is a constant rather than configuration on
- * purpose: which side of the door a build belongs on is a property of its code, not of its
- * environment, and an env var here would let a deployment silently opt out of the check.
+ * 🔴 **Flipped to `jsonb` by stage 2a — this is Release B.** The hstore codec is deleted, both
+ * repositories are on Prisma models and `schema.prisma` declares `Json @db.JsonB`, so this
+ * build cannot read an un-migrated database: `subscription` would arrive as an hstore value
+ * Prisma cannot map, and every notification and scheduler pass would fail per request.
+ *
+ * It is a constant rather than configuration on purpose: which side of the door a build
+ * belongs on is a property of its code, not of its environment, and an env var here would let
+ * a deployment silently opt out of the check.
+ *
+ * ⚠️ The Release A image — the one cutover step 3 deploys — carries this same file with
+ * `'hstore'` here, and refuses to start on a converted database. That is operator answer
+ * **Q57**: the guard bites in both directions.
  */
-export const REQUIRED_HSTORE_COLUMN_TYPE = 'hstore';
+export const REQUIRED_COLUMN_TYPE = 'jsonb';
 
 export class SchemaShapeError extends Error {
   constructor(message: string) {
@@ -140,9 +147,9 @@ export class SchemaShapeGuard implements OnModuleInit {
       schemaShapeSql('current_schema()'),
     );
 
-    assertSchemaShape(rows, REQUIRED_HSTORE_COLUMN_TYPE);
+    assertSchemaShape(rows, REQUIRED_COLUMN_TYPE);
     this.logger.log(
-      `Schema shape OK: both step-6 columns are "${REQUIRED_HSTORE_COLUMN_TYPE}" (pre-cutover build)`,
+      `Schema shape OK: both step-6 columns are "${REQUIRED_COLUMN_TYPE}" (post-step-6 build)`,
     );
   }
 }

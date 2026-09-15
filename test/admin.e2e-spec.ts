@@ -250,16 +250,24 @@ describe('Phase 8 — /api/admin', () => {
 });
 
 /** Inserts a row exactly as v1 wrote it (the same helper `notification.e2e-spec.ts` uses). */
+/**
+ * Inserts a subscription row exactly as the database holds it after Phase 9 step 6 — the
+ * migrated jsonb object, not v1's hstore text.
+ *
+ * ⚠️ It writes through `$queryRawUnsafe`, **not** through the repository, on purpose: the
+ * point of these cells is to read a row v2 did not encode, so the row must not go through
+ * v2's encoder on the way in.
+ */
 async function insertRawSubscription(
   prisma: PrismaService,
   userId: number,
-  hstoreText: string,
+  subscription: Record<string, unknown>,
 ): Promise<number> {
   const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
     'INSERT INTO fondo_api_notificationsubscriptions (user_id, subscription) ' +
-      'VALUES ($1, $2::hstore) RETURNING id',
+      'VALUES ($1, $2::jsonb) RETURNING id',
     userId,
-    hstoreText,
+    JSON.stringify(subscription),
   );
   return rows[0].id;
 }

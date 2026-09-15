@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { HstoreMap } from '../../common/utils/hstore.codec';
+import { requireText, type SchedulerPayload } from '../scheduler-payload';
 import { pythonInt } from '../../common/utils/python-obj';
 import { SavingAccountService } from '../../saving-accounts/saving-account.service';
 import type { SchedulerExecuter } from './scheduler-executer';
@@ -80,7 +80,7 @@ export class SavingAccountCloseExecuter implements SchedulerExecuter {
    * through {@link pythonInt} — the same CPython `int()` semantics the query-string readers
    * use, whitespace set included (**C63**).
    */
-  async run(payload: HstoreMap): Promise<{ ok: true; detail: string }> {
+  async run(payload: SchedulerPayload): Promise<{ ok: true; detail: string }> {
     const id = pythonInt(requireText(payload, 'saving_account_id'));
     const result = await this.accounts.closeAccount(id);
     return { ok: true, detail: result };
@@ -88,23 +88,7 @@ export class SavingAccountCloseExecuter implements SchedulerExecuter {
 }
 
 /**
- * `payload["saving_account_id"]`, with the same two failure modes
- * `NotificationExecuter.requireText` keeps.
- *
- * An **absent** key throws `KeyError: '…'`, which the runner catches, logs as
- * `Error processing task with id: …` and leaves unprocessed for the next pass — v1's shape,
- * modulo the log-text difference registered as **P7-D6**. A **SQL NULL** value is refused
- * rather than coerced: Django's `str()` on the way in means a Python `None` is stored as the
- * *string* `'None'`, never SQL NULL, so a NULL here can only come from a hand-edit, and
- * `int(None)` would be a `TypeError` in v1 anyway.
+ * `payload["saving_account_id"]`'s two failure modes are `scheduler-payload.ts`'s
+ * {@link requireText} — the same function the notification executer uses, so the two cannot
+ * drift apart on what an absent or NULL member does to a row.
  */
-function requireText(payload: HstoreMap, key: string): string {
-  if (!Object.prototype.hasOwnProperty.call(payload, key)) {
-    throw new Error(`KeyError: '${key}'`);
-  }
-  const value = payload[key];
-  if (value === null) {
-    throw new TypeError(`scheduler payload key '${key}' is NULL`);
-  }
-  return value;
-}

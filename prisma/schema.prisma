@@ -189,10 +189,12 @@ model UserProfile {
   powers_as_requestee Power[]                    @relation("power_requestee")
   powers_as_requester Power[]                    @relation("power_requester")
   saving_accounts     SavingAccount[]
-  // NOTE: Django models these as plain ForeignKeys, not OneToOne, so there is no unique
-  // constraint on `user_id`. v1 nevertheless does `UserFinance.objects.get(user_id=...)`,
-  // which raises MultipleObjectsReturned if a second row is ever created. v2 must keep
-  // creating exactly one row per user; do not add a unique constraint before cutover.
+  // **D11, both halves now landed.** Django models these as plain ForeignKeys, not OneToOne,
+  // so v1's schema had no unique constraint on `user_id` while `UserFinance.objects.get(
+  // user_id=...)` assumed one. Phase 9 step 6 added `UNIQUE (user_id)` to both tables, so the
+  // relations below are single-valued in the database as well as in v1's intent. They stay
+  // typed as lists here because Prisma derives that from the relation side, and changing it
+  // would ripple through every `include`; the constraint is what closes D11.
   finances            UserFinance[]
   preferences         UserPreference[]
 
@@ -208,6 +210,8 @@ model UserPreference {
   secondary_color String      @db.VarChar(15)
   user            UserProfile @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_userprefer_user_id_c39c1264_fk_fondo_api")
 
+  /// **D11**, physical half, landed by Phase 9 step 6.
+  @@unique([user_id], map: "fondo_api_userpreference_user_id_key")
   @@index([user_id], map: "fondo_api_userpreference_user_id_c39c1264")
   @@map("fondo_api_userpreference")
 }
@@ -225,6 +229,8 @@ model UserFinance {
   user_id               Int
   user                  UserProfile @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_userfinanc_user_id_9645b2bd_fk_fondo_api")
 
+  /// **D11**, physical half, landed by Phase 9 step 6.
+  @@unique([user_id], map: "fondo_api_userfinance_user_id_key")
   @@index([user_id], map: "fondo_api_userfinance_user_id_9645b2bd")
   @@map("fondo_api_userfinance")
 }
@@ -277,6 +283,10 @@ model LoanDetail {
   interests       BigInt
   loan            Loan     @relation(fields: [loan_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_loandetail_loan_id_6a9fa8c0_fk_fondo_api_loan_id")
 
+  /// **D6**, physical half, landed by Phase 9 step 6. Django's non-unique index
+  /// `fondo_api_loandetail_loan_id_6a9fa8c0` is kept alongside (operator answer Q58).
+  @@unique([loan_id], map: "fondo_api_loandetail_loan_id_key")
+
   @@index([loan_id], map: "fondo_api_loandetail_loan_id_6a9fa8c0")
   @@map("fondo_api_loandetail")
 }
@@ -326,7 +336,9 @@ model ActivityUser {
 /// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
 model NotificationSubscription {
   id           Int                   @id @default(autoincrement())
-  subscription Unsupported("hstore")
+  /// Phase 9 step 6 (stage 2a): `hstore` -> `jsonb`. Every member is a JSON string except
+  /// `keys`, which the migration's repair pass unwrapped from its Python repr into an object.
+  subscription Json                  @db.JsonB
   user_id      Int
   user         UserProfile           @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_notificati_user_id_5954476e_fk_fondo_api")
 
@@ -336,13 +348,14 @@ model NotificationSubscription {
 
 /// type:   0 NOTIFICATIONS
 /// repeat: 0 NONE, 1 DAILY, 2 WEEKLY, 3 MONTHLY, 4 YEARLY
-/// ⚠️ `payload` is `hstore` — same restrictions as above. `payload['user_ids']` is a
-/// JSON-encoded string that must be `JSON.parse`d on read (v1 `json.loads`).
+/// ⚠️ Phase 9 step 6 (stage 2a): `payload` is `jsonb`. `user_ids` is a real JSON array —
+/// the migration's repair pass did v1's `json.loads` once and permanently. Every other
+/// member is still a JSON **string**, `owner_id` included: that is what v1 stored and reads.
 model SchedulerTask {
-  id        Int                   @id @default(autoincrement())
+  id        Int      @id @default(autoincrement())
   type      Int
-  run_date  DateTime              @db.Timestamptz(6)
-  payload   Unsupported("hstore")
+  run_date  DateTime @db.Timestamptz(6)
+  payload   Json     @db.JsonB
   processed Boolean
   repeat    Int
 

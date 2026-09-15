@@ -255,11 +255,11 @@ describe('Phase 6 — /api/saving-account (no v1 suite exists; see the file head
       // 00:00 America/Bogota, the same shape Django wrote for every birthday row.
       expect(rows[0].run_date.toISOString()).toBe('2027-02-28T05:00:00.000Z');
 
-      const payload = await prisma.$queryRaw<
-        { payload: string }[]
-      >`SELECT payload::text AS payload FROM fondo_api_schedulertask WHERE id = ${rows[0].id}`;
-      expect(payload[0].payload).toContain('"saving_account_id"=>"' + String(accountId) + '"');
-      expect(payload[0].payload).toContain('"type"=>"saving_account_close"');
+      const task = await prisma.schedulerTask.findUniqueOrThrow({ where: { id: rows[0].id } });
+      const stored = task.payload as Record<string, unknown>;
+      // Phase 9 step 6: jsonb members, and `saving_account_id` still a string.
+      expect(stored.saving_account_id).toBe(String(accountId));
+      expect(stored.type).toBe('saving_account_close');
     });
 
     it('carries no recipient list, message or target — a close notifies nobody (Q22)', async () => {
@@ -1377,9 +1377,11 @@ describe('Phase 6 — /api/saving-account (no v1 suite exists; see the file head
         where: { id: (response.body as { id: number }).id },
       });
       expect(row.end_date.toISOString()).toBe('0100-01-01T00:00:00.000Z');
+      // ⚠️ `->>` since Phase 9 step 6: on jsonb, `->` yields a jsonb value and would compare
+      // against a text parameter as `"123"` vs `123`. On hstore `->` yielded text.
       const tasks = await prisma.$queryRaw<Array<{ count: bigint }>>`
         SELECT count(*) AS count FROM fondo_api_schedulertask
-        WHERE payload->'saving_account_id' = ${String((response.body as { id: number }).id)}
+        WHERE payload->>'saving_account_id' = ${String((response.body as { id: number }).id)}
       `;
       // The partial write is what B3 actually cost: no close task, silently.
       expect(Number(tasks[0].count)).toBe(1);

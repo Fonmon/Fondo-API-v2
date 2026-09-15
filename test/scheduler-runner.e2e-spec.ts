@@ -53,29 +53,41 @@ describe('Phase 7b — scheduler runner', () => {
    */
   async function insertTask(options: {
     runDateIso: string;
-    payload: string;
+    /** The jsonb payload, as Phase 9 step 6 left it: `user_ids` an array, the rest strings. */
+    payload: Record<string, unknown>;
     type?: number;
     repeat?: number;
     processed?: boolean;
   }): Promise<number> {
     const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
       'INSERT INTO fondo_api_schedulertask (type, run_date, payload, processed, repeat) ' +
-        'VALUES ($1, $2, $3::hstore, $4, $5) RETURNING id',
+        'VALUES ($1, $2, $3::jsonb, $4, $5) RETURNING id',
       options.type ?? 0,
       new Date(options.runDateIso),
-      options.payload,
+      JSON.stringify(options.payload),
       options.processed ?? false,
       options.repeat ?? 0,
     );
     return rows[0].id;
   }
 
-  function reminderPayload(ownerId: number, userId: number, dateText: string): string {
-    return (
-      `"type"=>"payment_reminder", "target"=>"/loan/${ownerId}", ` +
-      `"message"=>"Recuerde que la fecha límite de pago para el crédito ${ownerId}, ` +
-      `es el: ${dateText}", "owner_id"=>"${ownerId}", "user_ids"=>"[${userId}]"`
-    );
+  /**
+   * A payment-reminder payload in its **post-step-6** shape: members in jsonb's (length,
+   * bytes) order, `user_ids` a real array, and `owner_id` still a **string** — the loan id,
+   * as v1 stored it and as all 540 migrated reminder rows hold it.
+   */
+  function reminderPayload(
+    ownerId: number,
+    userId: number,
+    dateText: string,
+  ): Record<string, unknown> {
+    return {
+      type: 'payment_reminder',
+      target: `/loan/${ownerId}`,
+      message: `Recuerde que la fecha límite de pago para el crédito ${ownerId}, es el: ${dateText}`,
+      owner_id: String(ownerId),
+      user_ids: [userId],
+    };
   }
 
   async function allTasks(): Promise<
@@ -85,6 +97,7 @@ describe('Phase 7b — scheduler runner', () => {
       run_date: Date;
       repeat: number;
       processed: boolean;
+      /** The canonical jsonb text, so two rows can be compared byte for byte. */
       payload: string;
     }[]
   > {
@@ -219,12 +232,16 @@ describe('Phase 7b — scheduler runner', () => {
       expect(due.map((task) => task.id)).toEqual([evening]);
     });
 
-    it('parses the hstore payload into a map of strings', async () => {
+    it('reads the jsonb payload: strings, and user_ids as a real array', async () => {
       await insertTask({
         runDateIso: '2026-09-07T05:00:00.000Z',
-        payload:
-          '"type"=>"birthdate", "target"=>"/", "message"=>"Hoy está cumpliendo años X", ' +
-          '"owner_id"=>"5", "user_ids"=>"[2, 3]"',
+        payload: {
+          type: 'birthdate',
+          target: '/',
+          message: 'Hoy está cumpliendo años X',
+          owner_id: '5',
+          user_ids: [2, 3],
+        },
         repeat: 4,
       });
 
@@ -235,7 +252,8 @@ describe('Phase 7b — scheduler runner', () => {
         target: '/',
         message: 'Hoy está cumpliendo años X',
         owner_id: '5',
-        user_ids: '[2, 3]',
+        // Phase 9 step 6: a real array in the column now.
+        user_ids: [2, 3],
       });
       expect(task.repeat).toBe(4);
       expect(task.run_date.toISOString()).toBe('2026-09-07T05:00:00.000Z');
@@ -279,11 +297,13 @@ describe('Phase 7b — scheduler runner', () => {
       await insertRawSubscription(prisma, member.id, REAL_APPLE_ROW);
       await insertTask({
         runDateIso: '2026-09-07T05:00:00.000Z',
-        payload:
-          '"type"=>"payment_reminder", "target"=>"/loan/412", ' +
-          '"message"=>"Recuerde que la fecha límite de pago para el crédito 412, ' +
-          'es el: 12 sep. 2026", "owner_id"=>"412", ' +
-          `"user_ids"=>"[${member.id}]"`,
+        payload: {
+          type: 'payment_reminder',
+          target: '/loan/412',
+          message: 'Recuerde que la fecha límite de pago para el crédito 412, es el: 12 sep. 2026',
+          owner_id: '412',
+          user_ids: [member.id],
+        },
       });
 
       await runner.run(TODAY);
@@ -309,9 +329,13 @@ describe('Phase 7b — scheduler runner', () => {
       await insertRawSubscription(prisma, other.id, REAL_APPLE_ROW);
       await insertTask({
         runDateIso: '2026-09-07T05:00:00.000Z',
-        payload:
-          '"type"=>"payment_reminder", "target"=>"/loan/5", "message"=>"X", ' +
-          `"owner_id"=>"5", "user_ids"=>"[${member.id}, ${other.id}]"`,
+        payload: {
+          type: 'payment_reminder',
+          target: '/loan/5',
+          message: 'X',
+          owner_id: '5',
+          user_ids: [member.id, other.id],
+        },
       });
 
       await runner.run(TODAY);
@@ -380,9 +404,13 @@ describe('Phase 7b — scheduler runner', () => {
 
   describe('create_repeat_instance', () => {
     it('clones a YEARLY birthday task forward one year, payload byte-identical', async () => {
-      const payload =
-        '"type"=>"birthdate", "target"=>"/", "message"=>"Hoy está cumpliendo años N@CHO ' +
-        'Montañez Herrera", "owner_id"=>"5", "user_ids"=>"[2, 4, 3, 13, 11, 10, 1, 9, 12, 6, 7, 8]"';
+      const payload = {
+        type: 'birthdate',
+        target: '/',
+        message: 'Hoy está cumpliendo años N@CHO Montañez Herrera',
+        owner_id: '5',
+        user_ids: [2, 4, 3, 13, 11, 10, 1, 9, 12, 6, 7, 8],
+      };
       const id = await insertTask({
         runDateIso: '2026-09-07T05:00:00.000Z',
         payload,
@@ -397,9 +425,9 @@ describe('Phase 7b — scheduler runner', () => {
       expect(rows[0]).toMatchObject({ id, processed: true, repeat: 4 });
       expect(rows[1]).toMatchObject({ type: 0, processed: false, repeat: 4 });
       expect(rows[1].run_date.toISOString()).toBe('2027-09-07T05:00:00.000Z');
-      // Cloned verbatim — hstore's stored rendering, not a re-encode.
+      // Cloned verbatim — the parent row's stored jsonb, not a re-encode.
       expect(rows[1].payload).toBe(rows[0].payload);
-      expect(rows[1].payload).toBe(payload);
+      expect(JSON.parse(rows[1].payload)).toEqual(payload);
     });
 
     it.each([
@@ -574,8 +602,13 @@ describe('Phase 7b — scheduler runner', () => {
       await insertTask({
         runDateIso: '2026-09-07T05:00:00.000Z',
         // No `user_ids` — v1's `payload["user_ids"]` raises KeyError inside `run`.
-        payload:
-          '"type"=>"payment_reminder", "target"=>"/loan/1", "message"=>"x", ' + '"owner_id"=>"1"',
+        // ⚠️ No `user_ids` member at all — C23's fail-closed case.
+        payload: {
+          type: 'payment_reminder',
+          target: '/loan/1',
+          message: 'x',
+          owner_id: '1',
+        },
       });
 
       const summary = await runner.run(TODAY);
@@ -625,7 +658,8 @@ describe('Phase 7b — scheduler runner', () => {
       await insertRawSubscription(prisma, member.id, REAL_FCM_ROW);
       await insertTask({
         runDateIso: '2026-09-07T05:00:00.000Z',
-        payload: '"type"=>"payment_reminder", "owner_id"=>"1"',
+        // No `message`/`target`/`user_ids` — the executer must throw and the row stay unprocessed.
+        payload: { type: 'payment_reminder', owner_id: '1' },
       });
       const good = await insertTask({
         runDateIso: '2026-09-07T05:00:00.000Z',
@@ -697,12 +731,18 @@ describe('Phase 7b — scheduler runner', () => {
     /** 2027-09-07 10:00 Bogota — the clone's own day, a year on. */
     const NEXT_YEAR = new Date('2027-09-07T15:00:00.000Z');
 
-    function birthdayPayload(ownerId: number | string, stored: readonly number[]): string {
-      return (
-        '"type"=>"birthdate", "target"=>"/", ' +
-        '"message"=>"Hoy está cumpliendo años Cumple Añero", ' +
-        `"owner_id"=>"${ownerId}", "user_ids"=>"[${stored.join(', ')}]"`
-      );
+    function birthdayPayload(
+      ownerId: number | string,
+      stored: readonly number[],
+    ): Record<string, unknown> {
+      return {
+        type: 'birthdate',
+        target: '/',
+        message: 'Hoy está cumpliendo años Cumple Añero',
+        // ⚠️ Still a **string** after step 6 — on a birthday row it is the member id.
+        owner_id: String(ownerId),
+        user_ids: [...stored],
+      };
     }
 
     /** The tags whose devices a published body carries, sorted. */
@@ -744,11 +784,10 @@ describe('Phase 7b — scheduler runner', () => {
     beforeEach(async () => {
       await prisma.authUser.updateMany({ data: { is_active: true } });
       for (const [userId, tag] of tags) {
-        await insertRawSubscription(
-          prisma,
-          userId,
-          REAL_FCM_ROW.replace('/fcm/send/', `/fcm/send/${tag}`),
-        );
+        await insertRawSubscription(prisma, userId, {
+          ...REAL_FCM_ROW,
+          endpoint: REAL_FCM_ROW.endpoint.replace('/fcm/send/', `/fcm/send/${tag}`),
+        });
       }
     });
 
@@ -780,7 +819,7 @@ describe('Phase 7b — scheduler runner', () => {
       expect(rows[0]).toMatchObject({ id, type: 0, repeat: 4, processed: true });
       expect(rows[1]).toMatchObject({ type: 0, repeat: 4, processed: false });
       expect(rows[1].run_date.toISOString()).toBe('2027-09-07T05:00:00.000Z');
-      expect(rows[1].payload).toBe(payload);
+      expect(JSON.parse(rows[1].payload)).toEqual(payload);
     });
 
     it('D39 / Q48 — reactivated owner: next year’s greeting goes out with no other action', async () => {
@@ -887,7 +926,7 @@ describe('Phase 7b — scheduler runner', () => {
       expect(summary).toMatchObject({ processed: 1, failedDelivery: 1, errored: 0, cloned: 1 });
       const rows = await allTasks();
       expect(rows[0].processed).toBe(true);
-      expect(rows[1].payload).toBe(payload);
+      expect(JSON.parse(rows[1].payload)).toEqual(payload);
     });
 
     /**
@@ -917,7 +956,7 @@ describe('Phase 7b — scheduler runner', () => {
       expect(rows[0]).toMatchObject({ id, processed: true, repeat: 4 });
       expect(rows[1]).toMatchObject({ processed: false, repeat: 4 });
       expect(rows[1].run_date.toISOString()).toBe('2027-09-07T05:00:00.000Z');
-      expect(rows[1].payload).toBe(payload);
+      expect(JSON.parse(rows[1].payload)).toEqual(payload);
     });
 
     /**
@@ -955,17 +994,17 @@ describe('Phase 7b — scheduler runner', () => {
   });
 });
 
-/** Same helper as `test/notification.e2e-spec.ts`: a v1-shaped hstore subscription row. */
+/** Same helper as `test/notification.e2e-spec.ts`: a subscription row as step 6 left it. */
 async function insertRawSubscription(
   prisma: PrismaService,
   userId: number,
-  hstoreText: string,
+  subscription: Record<string, unknown>,
 ): Promise<number> {
   const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
     'INSERT INTO fondo_api_notificationsubscriptions (user_id, subscription) ' +
-      'VALUES ($1, $2::hstore) RETURNING id',
+      'VALUES ($1, $2::jsonb) RETURNING id',
     userId,
-    hstoreText,
+    JSON.stringify(subscription),
   );
   return rows[0].id;
 }

@@ -1,9 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import {
-  decodeSchedulerPayload,
-  type HstoreMap,
-  type HstoreValue,
-} from '../../common/utils/hstore.codec';
+import { requireText, requireUserIds, type SchedulerPayload } from '../scheduler-payload';
 import { NotificationService } from '../../notifications/notification.service';
 import { MemberDirectory } from '../member-directory';
 import type { SchedulerExecuter, SchedulerExecuterOutcome } from './scheduler-executer';
@@ -81,14 +77,15 @@ export class NotificationExecuter implements SchedulerExecuter {
    * ⚠️ Do not wrap them in a transaction. It buys nothing, and it invites moving the SQS publish
    * inside it, which `NotificationPublisher` forbids (a publish is not rolled back).
    */
-  async run(payload: HstoreMap): Promise<SchedulerExecuterOutcome> {
-    // `json.loads(payload["user_ids"])`. Raises for an absent key (C23) and for a NULL value.
-    const decoded = decodeSchedulerPayload(payload);
+  async run(payload: SchedulerPayload): Promise<SchedulerExecuterOutcome> {
+    // Step 6 did v1's `json.loads(payload["user_ids"])` once and permanently; this still
+    // raises for an absent key (C23) and for a NULL value.
+    const userIds = requireUserIds(payload);
     const message = requireText(payload, 'message');
     const target = requireText(payload, 'target');
 
     if (payload.type !== BIRTHDATE_PAYLOAD_TYPE) {
-      return this.deliver(decoded.user_ids, message, target);
+      return this.deliver(userIds, message, target);
     }
 
     const ownerId = parseOwnerId(payload);
@@ -153,42 +150,11 @@ const MAX_INT4 = 2147483647;
  * ⚠️ **Whoever repairs a stalled row must also move its `run_date` to the next birthday** (D48's
  * rule). D7's `<=` sends a past-dated row on the very next pass, saying *"hoy"* on the wrong day.
  */
-function parseOwnerId(payload: HstoreMap): number | null {
+function parseOwnerId(payload: SchedulerPayload): number | null {
   const text = requireText(payload, 'owner_id');
   if (!/^[0-9]+$/.test(text)) {
     throw new Error(`ValueError: invalid owner_id in scheduler payload: '${text}'`);
   }
   const id = Number(text);
   return id > MAX_INT4 ? null : id;
-}
-
-/**
- * `payload["<key>"]`, with v1's two failure modes preserved.
- *
- * * **Absent key** → `KeyError`, uncaught in `run`, caught by the scheduler loop. The row is
- *   left unprocessed and retried on the next pass, exactly as v1's is. ⚠️ **The log *text*
- *   does not match v1 and is not meant to** — registered as **P7-D6** (parity round F1).
- *   `'{}'.format(ex)` is `str(ex)`, and `str(KeyError('message'))` is `'message'`: the quotes
- *   are the repr and there is no `KeyError:` prefix, so v1 logs `exception: 'message'` where
- *   v2 logs `exception: KeyError: 'message'`. v2 keeps the prefix because its exception class
- *   is a plain `Error` — drop it and the line degrades to a bare quoted word with nothing
- *   saying what went wrong, which is the opposite of this phase's §3 stance. Rows and wire are
- *   identical either way; the one-line change that would match v1 is in `requireText` below
- *   and in {@link requireHstoreKey}.
- * * **SQL NULL value** → v1 would pass `None` straight into the message body and
- *   `json.dumps` would render `null` on the wire. Not reachable from either writer —
- *   Django's `HStoreField.get_prep_value` calls `str()`, so a Python `None` is stored as the
- *   *string* `'None'`, never SQL NULL — so v2 refuses it loudly instead of widening the
- *   notification payload's types for a row only a hand-edit can produce. Registered as
- *   **P7-D4**.
- */
-function requireText(payload: HstoreMap, key: string): string {
-  if (!Object.prototype.hasOwnProperty.call(payload, key)) {
-    throw new Error(`KeyError: '${key}'`);
-  }
-  const value: HstoreValue = payload[key];
-  if (value === null) {
-    throw new TypeError(`scheduler payload key '${key}' is NULL`);
-  }
-  return value;
 }

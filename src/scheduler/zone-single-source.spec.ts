@@ -22,8 +22,12 @@ import { SchedulerRunner } from './scheduler.runner';
  * cannot name a zone the constants do not. These cells fail if that stops being true in any of the
  * three directions.
  */
+// ⚠️ **C90 (N2) — a placeholder credential and a database name that is not the shared one.**
+// `validateEnv` never connects; it only parses. Copying the real dev URL into a seventh spec
+// made the literal look load-bearing and put a working credential one copy-paste away from a
+// script that *does* connect.
 const MINIMAL_ENV = {
-  DATABASE_URL: 'postgresql://fondouser:fondo@localhost:5432/fondodev?schema=public',
+  DATABASE_URL: 'postgresql://user:password@localhost:5432/example_db?schema=public',
   AWS_REGION: 'us-east-2',
   DEFAULT_FROM_EMAIL: 'Fondo Montanez <no-reply@fonmon.minagle.com>',
   HOST_URL_APP: 'http://localhost:3000',
@@ -94,13 +98,14 @@ describe('one zone for write, selection and cron (C89)', () => {
       await runner.run(now);
       const selected = (findDueUnprocessed.mock.calls[0] as [PlainDate])[0];
 
-      // D48 with its own default zone, against D48 in the zone the runner selected in.
+      // ⚠️ **C90 (N1): the comparison that used to be here is gone.** It called
+      // `nextBirthdayRunDate` with and without `env.TIME_ZONE` and expected the two to agree —
+      // but `TIME_ZONE` is pinned by the env schema to the same constant the default uses, so
+      // those are the same call and the cell could not fail. What ties D48 to the runner is
+      // the today/next-year check below, which is the whole point of this cell.
       const birthdate = { year: 1990, month: selected.month, day: selected.day };
-      expect(nextBirthdayRunDate(birthdate, now)).toEqual(
-        nextBirthdayRunDate(birthdate, now, env.TIME_ZONE),
-      );
 
-      // And D48 treats the runner's "today" as today: before 14:00 it keeps it, after 14:00
+      // D48 treats the runner's "today" as today: before 14:00 it keeps it, after 14:00
       // it moves it to next year. Neither answer is a date the runner has already passed.
       const runDate = nextBirthdayRunDate(birthdate, now);
       const keptToday =

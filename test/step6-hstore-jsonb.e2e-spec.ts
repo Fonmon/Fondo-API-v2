@@ -1,8 +1,8 @@
 import { Client } from 'pg';
-import { toHstoreLiteral } from '../src/common/utils/hstore.codec';
+import { toHstoreLiteral } from './support/hstore-legacy';
 import {
   assertSchemaShape,
-  REQUIRED_HSTORE_COLUMN_TYPE,
+  REQUIRED_COLUMN_TYPE,
   schemaShapeSql,
   type SchemaColumnShape,
 } from '../src/prisma/schema-shape.guard';
@@ -306,15 +306,16 @@ describe('Phase 9 step 6 — hstore -> jsonb', () => {
      * The unit cells score `assertSchemaShape` on hand-built rows; this one proves the SQL
      * that feeds it returns what those cells assume.
      */
-    it('the boot guard sees jsonb here and refuses a Release A boot', async () => {
+    it('the boot guard sees jsonb here — which is what this build (Release B) requires', async () => {
       const rows = await client.query<SchemaColumnShape>(schemaShapeSql(`'${STEP6_SCHEMA}'`));
       expect(rows.rows).toEqual([
         { table_name: 'fondo_api_notificationsubscriptions', udt_name: 'jsonb' },
         { table_name: 'fondo_api_schedulertask', udt_name: 'jsonb' },
       ]);
-      expect(() => assertSchemaShape(rows.rows, REQUIRED_HSTORE_COLUMN_TYPE)).toThrow(
-        /deploy Release B instead/,
-      );
+      // Release B boots on this.
+      expect(() => assertSchemaShape(rows.rows, REQUIRED_COLUMN_TYPE)).not.toThrow();
+      // And the Release A image — same file, `'hstore'` in the constant — refuses.
+      expect(() => assertSchemaShape(rows.rows, 'hstore')).toThrow(/deploy Release B instead/);
     });
 
     it('is a one-way door for writers: an hstore write into the converted column fails', async () => {

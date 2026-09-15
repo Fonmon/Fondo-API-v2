@@ -9,9 +9,10 @@
  * `Int` and answer 500, so a value above int4 maps to `-1`, an id no row holds (the pattern
  * admits no sign, and the sequence starts at 1).
  *
- * ⚠️ Two older copies of this rule live in feature modules (`loans/loan-path-id.ts`,
- * `activities/activity-path-id.ts`, counted 2026-09-12). They are left in place rather than
- * re-pointed from an approved phase; `docs/phase-8-deviations.md` §7 proposes the hoist.
+ * ✅ **C83 closed (Phase 9 stage 2a).** Two feature modules used to carry byte-identical
+ * copies of this function. `loans/loan-path-id.ts` and `activities/activity-path-id.ts` now
+ * delegate here and keep only their route-specific documentation, so the rule has one
+ * implementation and three call sites instead of three implementations.
  */
 export function parseDjangoIntPathId(raw: string): number {
   const value = BigInt(raw);

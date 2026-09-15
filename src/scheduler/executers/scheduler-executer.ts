@@ -1,4 +1,4 @@
-import type { HstoreMap } from '../../common/utils/hstore.codec';
+import type { SchedulerPayload } from '../scheduler-payload';
 
 /**
  * What an executer reports back about a run that did **not** throw.
@@ -108,5 +108,5 @@ export interface SchedulerExecuterOutcome {
  * see `SchedulerExecuterOutcome.ok` for which failures belong on which channel, and why.
  */
 export interface SchedulerExecuter {
-  run(payload: HstoreMap): Promise<SchedulerExecuterOutcome>;
+  run(payload: SchedulerPayload): Promise<SchedulerExecuterOutcome>;
 }

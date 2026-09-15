@@ -62,7 +62,7 @@ describe('Phase 2 — HTTP edge parity (F1-F4, N1-N3)', () => {
 
   async function storedEndpoints(): Promise<(string | null)[]> {
     const rows = await prisma.$queryRawUnsafe<{ endpoint: string | null }[]>(
-      "SELECT subscription -> 'endpoint' AS endpoint FROM fondo_api_notificationsubscriptions",
+      "SELECT subscription ->> 'endpoint' AS endpoint FROM fondo_api_notificationsubscriptions",
     );
     return rows.map((row) => row.endpoint);
   }

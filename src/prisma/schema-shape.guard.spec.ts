@@ -1,6 +1,6 @@
 import {
   assertSchemaShape,
-  REQUIRED_HSTORE_COLUMN_TYPE,
+  REQUIRED_COLUMN_TYPE,
   SchemaShapeError,
   STEP6_COLUMNS,
 } from './schema-shape.guard';
@@ -24,8 +24,8 @@ describe('assertSchemaShape', () => {
     expect(() => assertSchemaShape(jsonb, 'jsonb')).not.toThrow();
   });
 
-  it('this build requires hstore — it is the pre-cutover Release A', () => {
-    expect(REQUIRED_HSTORE_COLUMN_TYPE).toBe('hstore');
+  it('this build requires jsonb — it is Release B, after step 6', () => {
+    expect(REQUIRED_COLUMN_TYPE).toBe('jsonb');
     expect(STEP6_COLUMNS.map((c) => `${c.table}.${c.column}`)).toEqual([
       'fondo_api_notificationsubscriptions.subscription',
       'fondo_api_schedulertask.payload',

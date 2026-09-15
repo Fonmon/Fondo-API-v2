@@ -1,7 +1,7 @@
 # Phase 9 — step 6 design, measurements and proof
 
-**Status:** stage 1, **fix round** after `nestjs-reviewer`'s CHANGES REQUESTED on `de17e97`,
-and after the operator answers Q56–Q62 that landed during it. The conversion SQL, the mutation
+**Status:** stage 1 **approved with conditions** at `4db69fb`; the conditions (C94, C95, C96,
+N3, N4, m4, m8) landed at `5d019d9`, and **stage 2a** — Release B's code — landed on top. The conversion SQL, the mutation
 controls and the C39 finding stood; the runbook and the release ordering did not, and under
 **Q56** they sat on the one-way door.
 
@@ -10,7 +10,7 @@ controls and the C39 finding stood; the runbook and the release ordering did not
 | stage | contents | when |
 |---|---|---|
 | **1** | measurements, the four step-6 migrations, the clone proof, the mutation controls, the Release A boot guard, this design | now |
-| **2a** | Release B's code: hstore codec deleted, the two raw-SQL repositories on Prisma models, `Json @db.JsonB` + the two `@unique`s, the guard's `jsonb` half, **C91's `p256dh, auth` pin on the SQS emit path**, **the provisioner's second `migrate deploy`** (C94); C83, C90 | **before cutover step 3** (C93) |
+| **2a** | ✅ **landed.** Release B's code: hstore codec deleted, the two raw-SQL repositories on Prisma models, `Json @db.JsonB` + the two `@unique`s, the guard's `jsonb` half, **C91's `p256dh, auth` pin on the SQS emit path**, **the provisioner's second `migrate deploy`** (C94); C83, C90 | **before cutover step 3** (C93) |
 | **2b** | move `prisma/migrations-step6/*` into `prisma/migrations/` and delete `PRISMA_MIGRATIONS_PATH` — **that is all of stage 2b** (C94) | **after step 6 has run in production** (C92) |
 
 **Nothing here touched production or `fondodev`.** Every measurement against `fondodev` ran
@@ -766,7 +766,7 @@ Baselines at `de17e97`. Each step's own exit code, on this branch.
 | fixture diff vs `~/.fondo-parity-harness/p8/out/BASELINE-fondodev-2026-09-12.txt` | 0 | see §7.1 | — |
 | fixture control `DB=fondo_api_test` | 1 | see §7.1 | — |
 
-### 7.1 Measured — stage 1 fix round #2 (C94–C96, N3, N4, m4, m8)
+### 7.1 Measured — stage 1 conditions (C94–C96, N3, N4, m4, m8)
 
 | step | baseline (`4db69fb`) | measured | Δ |
 |---|---|---|---|
@@ -777,11 +777,29 @@ Baselines at `de17e97`. Each step's own exit code, on this branch.
 | fixture diff | 0 | **0** | — |
 | fixture control `DB=fondo_api_test` | 1 | **1** | — |
 
-Every delta is a cell this round added. One existing cell changed its expected text — *"refuses
+Every delta is a cell that round added. One existing cell changed its expected text — *"refuses
 a dependent index … by name"* now expects `index step6_dependent_probe` rather than
 `index step6_dependent_probe on fondo_api_schedulertask.payload`, because the `pg_depend` sweep
-names objects through `pg_describe_object`. The e2e run is on the **hstore** schema, which is
-what Release A deploys.
+names objects through `pg_describe_object`. That run was on the **hstore** schema, which is what
+Release A deploys.
+
+### 7.2 Measured — stage 2a (Release B)
+
+| step | before (`5d019d9`) | after | Δ |
+|---|---|---|---|
+| `npm run lint` | 0 | **0** | — |
+| `npm run typecheck` | 0 | **0** | — |
+| `npm test` | 2619 / 82 | **2617 / 84** | **−52, +50 cells; +3, −1 suites.** Deleted `hstore.codec.spec.ts` (**−52**). Added `django-str.spec.ts` (**+25** — the `str()`/`repr()` cells that survived the codec), `push-subscription.spec.ts` (**+15** — C91's pin, including 5 mutation controls) and `jsonb-storage.spec.ts` (**+10** — the storage rule, including 5 mutation controls). 2619 − 52 + 25 + 15 + 10 = **2617** |
+| `npm run test:e2e` | 1386 + 2 skipped; 23 + 1 of 24 | **1387 + 2 skipped; 23 + 1 of 24** | **+1 cell** — *"C91: stores keys as auth,p256dh and emits them as p256dh,auth"* in `notification.e2e-spec.ts` |
+| fixture diff | 0 | **0** | — |
+| fixture control `DB=fondo_api_test` | 1 | **1** | — |
+
+⚠️ **The e2e run is now on the *converted* schema**, because `test/test-database.ts` applies
+both ledgers (C94). That is the point: Release B's suites exercise Release B's database. **No
+existing e2e cell was deleted and none was skipped** — 24 changed what they assert, from hstore
+text to jsonb members, and the list is the `->` → `->>` sweep of §9.2 plus the payload and
+subscription fixtures. Against `4db69fb`, the coordinator's stated baseline, the totals are
+unit **2601 → 2617** and e2e **1382 → 1387**; every step of both is in this table and §7.1.
 
 Every delta is a cell this round added; no existing cell changed meaning. The e2e run is on the
 **hstore** schema, which is what Release A deploys.
@@ -812,9 +830,51 @@ runbook 6.10).
 
 ---
 
-## 9. Not in this stage
+## 9. Stage 2a — what Release B actually is
 
-Stage 2a — Release B's code (codec deletion, Prisma models, the `schema.prisma` change of §4.7,
-the guard's `jsonb` half, C91's emit-side pin, **and the provisioner's second `migrate deploy`**
-— C94), C83, C90 — **before cutover**. Stage 2b — moving the migration directories and deleting
-`PRISMA_MIGRATIONS_PATH` — **after step 6 has run in production**.
+Landed in one commit, as the reviewer asked. Every item is verifiable from the tree:
+
+| change | where | note |
+|---|---|---|
+| hstore codec **deleted** | `src/common/utils/hstore.codec.ts` (gone) | nothing in `src/` speaks hstore |
+| Django's `str()` coercion **kept** | `src/common/utils/django-str.ts` (new) | not an encoding detail — it is the **value rule** the 720 migrated rows embody. `{"endpoint": 123}` is a 200 that stores `"123"` in v1 and still is; dropping it would either 500 that request or store a JSON number the dedupe cannot match |
+| the storage rule | `src/common/utils/jsonb-storage.ts` (new) | `encodeJsonbColumn(source, nativeKeys)`: `user_ids` / `keys` keep their JSON type, everything else is `str()`-ed. **`owner_id` stays `"53"`** |
+| both repositories on Prisma models | `notification-subscription.repository.ts`, `scheduler-task.repository.ts` | `create` / `delete` / `deleteMany` / `updateMany` / `findMany` / JSON `path` filters |
+| `schema.prisma` | `Json @db.JsonB` ×2, `@unique` ×3 | **`migrate diff` against the migrated clone is empty** — the five statements of §4.7, resolved |
+| the boot guard flipped | `REQUIRED_COLUMN_TYPE = 'jsonb'` | the Release A image is the same file with `'hstore'`; both directions, Q57 |
+| **C91's pin** | `src/notifications/push-subscription.ts` (new) | `pinKeysMemberOrder`, applied where every SQS body passes |
+| the provisioner's second deploy | `test/test-database.ts` | C94 — two sequential `migrate deploy` runs, with `STEP6_CONFIRM` computed, never written down |
+| C83 | `loans/loan-path-id.ts`, `activities/activity-path-id.ts` | both delegate to `common/http/django-int-path-id.ts`; three implementations became one |
+| C90 | `src/scheduler/zone-single-source.spec.ts` | the self-comparing line removed with its reason; the dev credential replaced by a placeholder and a non-`fondodev` name |
+
+### 9.1 Two things that did **not** change, and why
+
+- **`existsUnprocessedOnDay` and `findDueUnprocessed` are still raw SQL.** Not because of
+  hstore — that is gone — but because both compare `run_date AT TIME ZONE 'America/Bogota'`,
+  which Prisma's query API cannot express. Rewriting them as an instant-range filter is a
+  behaviour-preserving change *in theory* to the fund's only reminder path, measured on the
+  SQL form in Phase 7b, and it buys nothing that step 6 required. Their hstore-specific halves
+  did change: `payload -> 'x'` became `payload ->> 'x'`, because on jsonb `->` yields a jsonb
+  value and would compare `"53"` against `53`.
+- **The hstore codec survives as `test/support/hstore-legacy.ts`.** Step 6 has not run in
+  production, so `test/step6-hstore-jsonb.e2e-spec.ts` still has to build hstore fixtures and
+  decode them with **v1's** semantics — scoring the conversion against its own SQL would prove
+  nothing. It is deleted in **stage 2b**, with the directory move.
+
+### 9.2 The `->` → `->>` sweep
+
+Seven call sites, each measured by a failing cell before it was changed: the two repository
+predicates, `saving-account.e2e-spec.ts`'s close-task count, `http-edge.e2e-spec.ts`'s stored
+endpoints, and `scheduler-task.e2e-spec.ts`'s remaining-tasks read. On hstore `->` returned
+`text`; on jsonb it returns `jsonb`, so every one of them silently matched **nothing** until
+the operator was fixed. That is the single most likely mistake in this conversion and it is
+why the e2e suite was run against a converted `fondo_api_test` rather than reasoned about.
+
+---
+
+## 10. Not in this stage
+
+**Stage 2b**, after step 6 has run in production: move `prisma/migrations-step6/*` into
+`prisma/migrations/`, delete `PRISMA_MIGRATIONS_PATH` and `src/config/step6-migrations-path.ts`,
+collapse `test/test-database.ts` back to one `migrate deploy`, and delete
+`test/support/hstore-legacy.ts` with the step-6 mutation suite it serves. Nothing else.

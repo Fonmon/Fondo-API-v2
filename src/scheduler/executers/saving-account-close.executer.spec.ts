@@ -1,5 +1,5 @@
 import type { SavingAccountService } from '../../saving-accounts/saving-account.service';
-import type { HstoreMap } from '../../common/utils/hstore.codec';
+import type { SchedulerPayload } from '../scheduler-payload';
 import { SavingAccountCloseExecuter } from './saving-account-close.executer';
 
 /**
@@ -10,7 +10,7 @@ import { SavingAccountCloseExecuter } from './saving-account-close.executer';
  * only `type == 0`. The cells are written from the operator answers (**Q20**, **Q22**,
  * **Q38**, **Q39**) and from conditions **C74**, **C77** and **C78**.
  */
-function payload(overrides: Partial<HstoreMap> = {}): HstoreMap {
+function payload(overrides: Partial<SchedulerPayload> = {}): SchedulerPayload {
   // Every hstore value is text — `HStoreField.get_prep_value` calls `str()` on the way in.
   return { type: 'saving_account_close', saving_account_id: '3', ...overrides };
 }

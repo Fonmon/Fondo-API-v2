@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { Client } from 'pg';
 import { assertDisposableDatabase } from './shared-database-guard';
+import { todayInBogotaIso } from '../src/config/step6-migrations-path';
 
 /**
  * The e2e suite never touches the shared dev database. It provisions its own from the
@@ -13,12 +14,16 @@ import { assertDisposableDatabase } from './shared-database-guard';
  * Everything in here TRUNCATEs, and the shared `fondodev` holds the irreplaceable parity
  * fixture.
  */
+/** The Prisma baseline — the schema Django created, and nothing else. */
+export const BASELINE_MIGRATIONS_PATH = 'prisma/migrations';
+
 /**
- * The ledger Release A provisions with: the Prisma baseline and nothing else.
- * `prisma/migrations-step6` is deliberately not here — see the note in
- * `provisionTestDatabase` and `docs/phase-9-design.md` §3.1.
+ * Phase 9 step 6. **Deliberately a second directory, not folded into the baseline** — under
+ * operator answer **Q56** production deploys run `migrate deploy`, so a one-way conversion in
+ * the default ledger fires on the next routine deploy (**C92**). It moves in only in stage 2b,
+ * after step 6 has run in production.
  */
-export const RELEASE_A_MIGRATIONS_PATH = 'prisma/migrations';
+export const STEP6_MIGRATIONS_PATH = 'prisma/migrations-step6';
 
 export const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL ??
@@ -58,34 +63,34 @@ export async function provisionTestDatabase(): Promise<void> {
     await admin.end();
   }
 
-  // ⚠️ `PRISMA_MIGRATIONS_PATH` is pinned, not inherited — review finding **m3**. A developer
-  // with the Phase 9 step-6 path exported in their shell would otherwise have the e2e suite
-  // convert `fondo_api_test` to jsonb on its next run, and Release A cannot read jsonb
-  // (measured: 25 of 38 cells fail in two suites). The ambient value must not reach here.
+  // ⚠️ `PRISMA_MIGRATIONS_PATH` is pinned on each run, not inherited — review finding **m3**.
+  // The ambient value must not decide which ledgers a test database gets.
   //
-  // ⚠️ **Stage 2a note (conditions C92, C94).** The step-6 directory stays outside
-  // `prisma/migrations` — through Release B and past cutover — because moving it would put
-  // the one-way door back into the ledger every production deploy applies (Q56).
+  // ⚠️ **Two sequential deploys, not one, and not a moved directory (C92, C94).** This is
+  // Release B's code: the hstore codec is gone and `SchemaShapeGuard` requires `jsonb`, so a
+  // test database built from the baseline alone makes **every** e2e suite die at bootstrap on
+  // `SchemaShapeError`. The fix is the second run below. The tempting alternative —
+  // `git mv prisma/migrations-step6/* prisma/migrations/` — re-arms the one-way door in the
+  // ledger every production deploy applies, which is the thing C92 exists to prevent.
   //
-  // So when **Release B's code lands (stage 2a)**, this provisioner needs **two sequential
-  // `migrate deploy` runs** — `prisma/migrations`, then `prisma/migrations-step6` — added in
-  // **the same commit** as the hstore codec's deletion. Not before: until that commit the
-  // suites are Release A's, they read hstore, and a second run here converts `fondo_api_test`
-  // and stops them passing.
-  //
-  // ⚠️ Getting the stage wrong here is not cosmetic — it is **C94**. A developer who starts
-  // stage 2a and finds every e2e suite dying at bootstrap on `SchemaShapeError` has one
-  // obvious-looking way out — `git mv prisma/migrations-step6/* prisma/migrations/` — and that
-  // is precisely the move C92 exists to prevent. The fix is the second run below, not the move.
-  //
-  // **Stage 2b** — after step 6 has run in production — is the directory move and deleting
+  // **Stage 2b** — after step 6 has run in production — is that move, plus deleting
   // `PRISMA_MIGRATIONS_PATH`, and nothing else.
-  execFileSync('npx', ['prisma', 'migrate', 'deploy'], {
-    env: {
-      ...process.env,
-      DATABASE_URL: TEST_DATABASE_URL,
-      PRISMA_MIGRATIONS_PATH: RELEASE_A_MIGRATIONS_PATH,
-    },
-    stdio: 'inherit',
-  });
+  const deploy = (migrationsPath: string, confirm?: string): void => {
+    execFileSync('npx', ['prisma', 'migrate', 'deploy'], {
+      env: {
+        ...process.env,
+        DATABASE_URL: TEST_DATABASE_URL,
+        PRISMA_MIGRATIONS_PATH: migrationsPath,
+        ...(confirm === undefined ? {} : { STEP6_CONFIRM: confirm }),
+      },
+      stdio: 'inherit',
+    });
+  };
+
+  deploy(BASELINE_MIGRATIONS_PATH);
+  // ⚠️ **The second run is what makes the e2e database Release B's** (C94). `STEP6_CONFIRM`
+  // is C96's gate: a non-default ledger is refused unless a variable carries today's date in
+  // Bogotá. It is computed here rather than written down, so this provisioner keeps working
+  // tomorrow and can never be the thing that leaves a stale confirmation behind.
+  deploy(STEP6_MIGRATIONS_PATH, todayInBogotaIso());
 }

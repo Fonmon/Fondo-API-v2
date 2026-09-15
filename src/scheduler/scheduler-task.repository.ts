@@ -1,11 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { AppConfigService } from '../config/app-config.service';
-import {
-  parseHstore,
-  toHstoreLiteral,
-  type HstoreMap,
-  type PythonEncodable,
-} from '../common/utils/hstore.codec';
+import { encodeJsonbColumn, type StorableValue } from '../common/utils/jsonb-storage';
+import type { SchedulerPayload } from './scheduler-payload';
 import type { PlainDate } from '../common/utils/date.util';
 import type { Prisma } from '../prisma';
 import { PrismaService } from '../prisma/prisma.service';
@@ -19,11 +15,19 @@ import { PrismaService } from '../prisma/prisma.service';
  * there instead would leave an orphaned birthday task behind every failed edit.
  */
 export type SchedulerSqlClient =
-  | Pick<PrismaService, '$queryRaw' | '$executeRaw'>
-  | Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
+  | Pick<PrismaService, 'schedulerTask' | '$queryRaw'>
+  | Pick<Prisma.TransactionClient, 'schedulerTask' | '$queryRaw'>;
 
 /** `SchedulerTask.TASK_TYPES` — the only member v1 ever writes. */
 export const SCHEDULER_TASK_NOTIFICATIONS = 0;
+
+/**
+ * The payload members that hold structured JSON after Phase 9 step 6. Everything else is
+ * stored as a JSON **string**, because that is what v1 stored and what all 626 migrated rows
+ * contain — see `common/utils/jsonb-storage.ts` for why `owner_id` in particular must stay
+ * a string.
+ */
+export const SCHEDULER_PAYLOAD_NATIVE_KEYS = ['user_ids'] as const;
 
 /**
  * **Phase 6 / D12** — the CAP auto-close. The **second** `SchedulerTask.type`, and the first
@@ -55,7 +59,7 @@ export const CLOSE_SAVING_ACCOUNT_PAYLOAD_TYPE = 'saving_account_close';
  * `HStoreField.get_prep_value` on the way to the column; `user_ids` becomes a Python list
  * repr (`'[2, 4, 3]'`), which is why the reader `json.loads`es exactly that one key.
  */
-export interface SchedulerTaskPayload extends Record<string, PythonEncodable> {
+export interface SchedulerTaskPayload extends Record<string, StorableValue> {
   type: string;
   owner_id: number;
 }
@@ -75,13 +79,13 @@ export interface SchedulerTaskPayload extends Record<string, PythonEncodable> {
  * Every value still goes through `HStoreField.get_prep_value`'s `str()` on the way to the
  * column, so `saving_account_id` is stored as text and read back as text.
  */
-export interface CloseSavingAccountTaskPayload extends Record<string, PythonEncodable> {
+export interface CloseSavingAccountTaskPayload extends Record<string, StorableValue> {
   type: typeof CLOSE_SAVING_ACCOUNT_PAYLOAD_TYPE;
   saving_account_id: number;
 }
 
 /**
- * A row the runner loaded, with `payload` already parsed out of its hstore rendering.
+ * A row the runner loaded.
  *
  * `payloadText` is kept alongside because `create_repeat_instance` writes
  * `payload = task.payload` **verbatim** — v1 hands Django the dict it read back (all values
@@ -93,8 +97,7 @@ export interface DueSchedulerTask {
   readonly type: number;
   readonly run_date: Date;
   readonly repeat: number;
-  readonly payload: HstoreMap;
-  readonly payloadText: string;
+  readonly payload: SchedulerPayload;
 }
 
 /**
@@ -196,8 +199,8 @@ export class SchedulerTaskRepository {
     const rows = await client.$queryRaw<{ id: number }[]>`
       SELECT id
       FROM fondo_api_schedulertask
-      WHERE payload -> 'owner_id' = ${String(ownerId)}
-        AND payload -> 'type' = ${taskType}
+      WHERE payload ->> 'owner_id' = ${String(ownerId)}
+        AND payload ->> 'type' = ${taskType}
         AND EXTRACT(YEAR FROM run_date AT TIME ZONE ${zone}) = ${localYear}
         AND EXTRACT(MONTH FROM run_date AT TIME ZONE ${zone}) = ${localMonth}
         AND EXTRACT(DAY FROM run_date AT TIME ZONE ${zone}) = ${localDay}
@@ -219,11 +222,15 @@ export class SchedulerTaskRepository {
     repeat: number,
     client: SchedulerSqlClient = this.prisma,
   ): Promise<void> {
-    const literal = toHstoreLiteral(payload);
-    await client.$executeRaw`
-      INSERT INTO fondo_api_schedulertask (type, run_date, payload, processed, repeat)
-      VALUES (${SCHEDULER_TASK_NOTIFICATIONS}, ${runDate}, ${literal}::hstore, false, ${repeat})
-    `;
+    await client.schedulerTask.create({
+      data: {
+        type: SCHEDULER_TASK_NOTIFICATIONS,
+        run_date: runDate,
+        payload: encodeJsonbColumn(payload, SCHEDULER_PAYLOAD_NATIVE_KEYS) as Prisma.InputJsonValue,
+        processed: false,
+        repeat,
+      },
+    });
   }
 
   /**
@@ -263,13 +270,17 @@ export class SchedulerTaskRepository {
     payload: CloseSavingAccountTaskPayload,
     client: SchedulerSqlClient = this.prisma,
   ): Promise<number> {
-    const literal = toHstoreLiteral(payload);
-    const rows = await client.$queryRaw<{ id: number }[]>`
-      INSERT INTO fondo_api_schedulertask (type, run_date, payload, processed, repeat)
-      VALUES (${SCHEDULER_TASK_CLOSE_SAVING_ACCOUNT}, ${runDate}, ${literal}::hstore, false, 0)
-      RETURNING id
-    `;
-    return rows[0].id;
+    const row = await client.schedulerTask.create({
+      data: {
+        type: SCHEDULER_TASK_CLOSE_SAVING_ACCOUNT,
+        run_date: runDate,
+        payload: encodeJsonbColumn(payload, SCHEDULER_PAYLOAD_NATIVE_KEYS) as Prisma.InputJsonValue,
+        processed: false,
+        repeat: 0,
+      },
+      select: { id: true },
+    });
+    return row.id;
   }
 
   /**
@@ -289,11 +300,15 @@ export class SchedulerTaskRepository {
     taskType: string,
     client: SchedulerSqlClient = this.prisma,
   ): Promise<number> {
-    return client.$executeRaw`
-      DELETE FROM fondo_api_schedulertask
-      WHERE payload -> 'owner_id' = ${String(ownerId)}
-        AND payload -> 'type' = ${taskType}
-    `;
+    const { count } = await client.schedulerTask.deleteMany({
+      where: {
+        AND: [
+          { payload: { path: ['owner_id'], equals: String(ownerId) } },
+          { payload: { path: ['type'], equals: taskType } },
+        ],
+      },
+    });
+    return count;
   }
 
   /**
@@ -335,9 +350,9 @@ export class SchedulerTaskRepository {
   async findDueUnprocessed(today: PlainDate): Promise<DueSchedulerTask[]> {
     const zone = this.config.timeZone;
     const rows = await this.prisma.$queryRaw<
-      { id: number; type: number; run_date: Date; repeat: number; payload: string }[]
+      { id: number; type: number; run_date: Date; repeat: number; payload: SchedulerPayload }[]
     >`
-      SELECT id, type, run_date, repeat, payload::text AS payload
+      SELECT id, type, run_date, repeat, payload
       FROM fondo_api_schedulertask
       WHERE processed = false
         AND (run_date AT TIME ZONE ${zone})::date
@@ -348,8 +363,7 @@ export class SchedulerTaskRepository {
       type: row.type,
       run_date: row.run_date,
       repeat: row.repeat,
-      payload: parseHstore(row.payload),
-      payloadText: row.payload,
+      payload: row.payload,
     }));
   }
 
@@ -372,12 +386,11 @@ export class SchedulerTaskRepository {
    * @returns `true` if this call won the row.
    */
   async claim(id: number, client: SchedulerSqlClient = this.prisma): Promise<boolean> {
-    const updated = await client.$executeRaw`
-      UPDATE fondo_api_schedulertask
-      SET processed = true
-      WHERE id = ${id} AND processed = false
-    `;
-    return updated === 1;
+    const { count } = await client.schedulerTask.updateMany({
+      where: { id, processed: false },
+      data: { processed: true },
+    });
+    return count === 1;
   }
 
   /**
@@ -388,11 +401,10 @@ export class SchedulerTaskRepository {
    * 10:00/14:00 pass tries it again. Only called on the error path.
    */
   async release(id: number, client: SchedulerSqlClient = this.prisma): Promise<void> {
-    await client.$executeRaw`
-      UPDATE fondo_api_schedulertask
-      SET processed = false
-      WHERE id = ${id}
-    `;
+    await client.schedulerTask.updateMany({
+      where: { id },
+      data: { processed: false },
+    });
   }
 
   /**
@@ -404,8 +416,14 @@ export class SchedulerTaskRepository {
    * ```
    *
    * `processed` is not passed and takes Django's `default=False`; the column has no database
-   * default, so v2 supplies it (plan §4 rule 5). `payload` is written from the source row's
-   * stored text, for the reason {@link DueSchedulerTask.payloadText} gives.
+   * default, so v2 supplies it (plan §4 rule 5).
+   *
+   * ⚠️ **`payload` is the source row's payload, passed through unchanged** — no re-encoding.
+   * Before Phase 9 step 6 that meant re-inserting the row's stored hstore *text*, because
+   * re-encoding a decoded map would have had to rebuild a Python repr. Now it is the jsonb
+   * object Prisma read, written straight back: the clone is byte-identical to its parent by
+   * construction, which is what the plan predicted — *"in the 7b runner the whole change is
+   * one cast"*.
    *
    * ⚠️ **The clone does not go through `schedule_notification`**, so the same-day dedupe does
    * **not** apply to it. Two rows for the same owner/type on the same day are reachable this
@@ -418,22 +436,33 @@ export class SchedulerTaskRepository {
     runDate: Date,
     client: SchedulerSqlClient = this.prisma,
   ): Promise<number> {
-    const rows = await client.$queryRaw<{ id: number }[]>`
-      INSERT INTO fondo_api_schedulertask (type, run_date, payload, processed, repeat)
-      VALUES (${task.type}, ${runDate}, ${task.payloadText}::hstore, false, ${task.repeat})
-      RETURNING id
-    `;
-    return rows[0].id;
+    const row = await client.schedulerTask.create({
+      data: {
+        type: task.type,
+        run_date: runDate,
+        payload: task.payload as Prisma.InputJsonValue,
+        processed: false,
+        repeat: task.repeat,
+      },
+      select: { id: true },
+    });
+    return row.id;
   }
 
   /**
-   * Reads one row's raw hstore rendering, for the Phase 3 parity comparison described in the
-   * class comment. Not used in production.
+   * Reads one row's stored payload, for the parity comparisons described in the class
+   * comment. Not used in production.
+   *
+   * Before Phase 9 step 6 this returned the raw hstore *text*, because the whole point was to
+   * compare v2's Python-repr encoding byte for byte with v1's. The column is jsonb now, so it
+   * returns the parsed object: there is no encoding left to compare, and the member order a
+   * caller sees is jsonb's canonical (length, bytes) — the same order hstore emitted.
    */
-  async findRawPayloadById(id: number): Promise<string | null> {
-    const rows = await this.prisma.$queryRaw<{ payload: string }[]>`
-      SELECT payload::text AS payload FROM fondo_api_schedulertask WHERE id = ${id}
-    `;
-    return rows.length === 0 ? null : rows[0].payload;
+  async findPayloadById(id: number): Promise<SchedulerPayload | null> {
+    const row = await this.prisma.schedulerTask.findUnique({
+      where: { id },
+      select: { payload: true },
+    });
+    return row === null ? null : (row.payload as SchedulerPayload);
   }
 }
