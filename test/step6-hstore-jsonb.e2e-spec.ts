@@ -1,5 +1,11 @@
 import { Client } from 'pg';
 import { toHstoreLiteral } from '../src/common/utils/hstore.codec';
+import {
+  assertSchemaShape,
+  REQUIRED_HSTORE_COLUMN_TYPE,
+  schemaShapeSql,
+  type SchemaColumnShape,
+} from '../src/prisma/schema-shape.guard';
 import { assertDisposableDatabase } from './shared-database-guard';
 import { TEST_DATABASE_URL } from './test-database';
 import {
@@ -148,6 +154,17 @@ describe('Phase 9 step 6 — hstore -> jsonb', () => {
     await subscription(3, `"endpoint"=>"https://x/1", "keys"=>NULL`);
     // No `keys` key at all.
     await subscription(4, `"endpoint"=>"https://x/2"`);
+    // Review finding m6 — the repair path carries a backslash, a newline and non-ASCII.
+    // ⚠️ A double quote is deliberately NOT here: the preflight *stops* on one (measured 0 of
+    // 94 on fondodev), and a cell below asserts that stop. What this row proves is that the
+    // other three characters survive hstore -> jsonb -> the quote repair unchanged.
+    await subscription(
+      5,
+      toHstoreLiteral({
+        endpoint: 'https://x/3',
+        keys: { auth: 'con\\barra y salto\nde línea — áéíóú', p256dh: 'ñÑ-_ABC' },
+      }),
+    );
   }
 
   async function freshCorpus(): Promise<void> {
@@ -192,8 +209,8 @@ describe('Phase 9 step 6 — hstore -> jsonb', () => {
       expect(result.equal).toBe(true);
       // The corpus is only evidence if it is actually populated, and pinning its shape is
       // what stops a seed being dropped without anyone noticing (rule 15b).
-      expect(before.rows).toHaveLength(14);
-      expect(before.entries).toHaveLength(39);
+      expect(before.rows).toHaveLength(15);
+      expect(before.entries).toHaveLength(41);
     });
 
     it('leaves both columns jsonb', async () => {
@@ -231,6 +248,73 @@ describe('Phase 9 step 6 — hstore -> jsonb', () => {
       // array + number (the scalar row) + null (the SQL NULL row) + object (the keys) —
       // and crucially no `string`, which is what "still doubly stringified" would look like.
       expect(repaired.rows[0].types).toBe('array,null,number,object');
+    });
+
+    /**
+     * **C91 — the nested `keys` member order. ✅ Ruled Q60: preserve `p256dh, auth`.**
+     *
+     * Before step 6, `keys` is an opaque hstore *string* holding a Python dict repr, and v1
+     * `json.loads`es it into a dict whose order is the repr's — `p256dh, auth` in all 94 live
+     * rows, which is the browser's own `PushSubscription.toJSON()` order. After step 6 it is a
+     * jsonb *object*, and jsonb sorts members by (length, bytes), so what is **stored** becomes
+     * `auth, p256dh`. The proof pins top-level key order; this is one level down, and the
+     * project holds SQS bodies to a byte-identical criterion.
+     *
+     * The operator ruled **preserve `p256dh, auth`** (Q60). jsonb cannot hold a non-canonical
+     * member order, so the conversion is unchanged and the order is pinned on the **emit**
+     * side in Release B — **stage 2a**, with its own cell that fails if it flips.
+     *
+     * ⚠️ **Scope of this cell, stated precisely.** The 94/94 live measurement is
+     * `business-analyst`'s (`docs/ba-phase-9-step6-questions.md`) and cannot run here — the
+     * corpus row is seeded. What this cell pins is the pair that has to keep agreeing with it:
+     * that v2's own write path (`toHstoreLiteral`, the shipped codec) stores the object in the
+     * order it was given, `p256dh` first; and that the conversion then moves it. After step 6
+     * the stored order does not exist anywhere, so this is asserted **now**, while the column
+     * is still hstore.
+     */
+    it('C91: the nested `keys` member order — ruled Q60, preserve `p256dh, auth`', async () => {
+      await freshCorpus();
+
+      const before = await client.query<{ raw: string }>(
+        `SELECT subscription -> 'keys' AS raw FROM fondo_api_notificationsubscriptions
+          WHERE id = 1`,
+      );
+      // The Python repr Django wrote, in the order v1's json.loads would yield.
+      const storedOrder = [...before.rows[0].raw.matchAll(/'([A-Za-z0-9_]+)':/g)].map((m) => m[1]);
+
+      // The ruling, asserted while it is still observable.
+      expect(storedOrder).toEqual(['p256dh', 'auth']);
+
+      expect(await run(PREFLIGHT)).toBeNull();
+      expect(await run(CONVERT)).toBeNull();
+
+      const after = await client.query<{ keys: Record<string, string> }>(
+        `SELECT subscription -> 'keys' AS keys FROM fondo_api_notificationsubscriptions
+          WHERE id = 1`,
+      );
+      const storedOrderAfter = Object.keys(after.rows[0].keys);
+
+      // What the conversion does to it — recorded, because Release B's pin exists to undo it.
+      expect(storedOrderAfter).toEqual(['auth', 'p256dh']);
+      expect(storedOrderAfter).not.toEqual(storedOrder);
+      // Content is untouched either way; only the member order moves.
+      expect(new Set(storedOrderAfter)).toEqual(new Set(storedOrder));
+    });
+
+    /**
+     * The boot guard's shipped query, run against a genuinely converted schema (review M7).
+     * The unit cells score `assertSchemaShape` on hand-built rows; this one proves the SQL
+     * that feeds it returns what those cells assume.
+     */
+    it('the boot guard sees jsonb here and refuses a Release A boot', async () => {
+      const rows = await client.query<SchemaColumnShape>(schemaShapeSql(`'${STEP6_SCHEMA}'`));
+      expect(rows.rows).toEqual([
+        { table_name: 'fondo_api_notificationsubscriptions', udt_name: 'jsonb' },
+        { table_name: 'fondo_api_schedulertask', udt_name: 'jsonb' },
+      ]);
+      expect(() => assertSchemaShape(rows.rows, REQUIRED_HSTORE_COLUMN_TYPE)).toThrow(
+        /deploy Release B instead/,
+      );
     });
 
     it('is a one-way door for writers: an hstore write into the converted column fails', async () => {
@@ -279,6 +363,52 @@ describe('Phase 9 step 6 — hstore -> jsonb', () => {
       const message = await run(PREFLIGHT);
       expect(message).toContain('already contains a double quote in 1 row(s)');
       expect(message).toContain('{2}');
+    });
+
+    it('refuses a user_ids that parses but is still a JSON string (M2)', async () => {
+      await freshCorpus();
+      await client.query(
+        `UPDATE fondo_api_schedulertask SET payload = payload || hstore('user_ids', '"[1,2]"') WHERE id = 3`,
+      );
+      const message = await run(PREFLIGHT);
+      expect(message).toContain('is a JSON string even after one unwrapping in 1 row(s)');
+      expect(message).toContain('{3}');
+    });
+
+    it('accepts a scalar user_ids — json.loads does, so the port does (not a stop)', async () => {
+      await freshCorpus();
+      // Corpus row 4 already carries `"user_ids"=>"7"`.
+      expect(await run(PREFLIGHT)).toBeNull();
+    });
+
+    it('refuses a keys value that repairs into something other than an object (M2)', async () => {
+      await freshCorpus();
+      await client.query(
+        `UPDATE fondo_api_notificationsubscriptions SET subscription = subscription || hstore('keys', '[''a'', ''b'']') WHERE id = 2`,
+      );
+      const message = await run(PREFLIGHT);
+      expect(message).toContain('does not repair into a JSON object in 1 row(s)');
+      expect(message).toContain('{2}');
+    });
+
+    it('refuses a dependent index on a column being converted, by name (M3)', async () => {
+      await freshCorpus();
+      await client.query(
+        `CREATE INDEX step6_dependent_probe ON fondo_api_schedulertask USING gin (payload)`,
+      );
+      const message = await run(PREFLIGHT);
+      expect(message).toContain('dependent object(s) on the columns being converted');
+      expect(message).toContain('index step6_dependent_probe on fondo_api_schedulertask.payload');
+    });
+
+    it('refuses a view that reads a column being converted, by name (M3)', async () => {
+      await freshCorpus();
+      await client.query(
+        `CREATE VIEW step6_dependent_view AS SELECT id, payload FROM fondo_api_schedulertask`,
+      );
+      const message = await run(PREFLIGHT);
+      expect(message).toContain('dependent object(s) on the columns being converted');
+      expect(message).toContain('step6_dependent_view');
     });
 
     it('refuses duplicates that would block D6 and D11 — before the one-way door, not after', async () => {

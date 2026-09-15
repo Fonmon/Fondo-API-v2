@@ -104,7 +104,18 @@ SELECT 'fondo_api_notificationsubscriptions', id,
 ORDER BY 1, 2;
 SQL
 
+# ⚠️ **Content digests, not `count(DISTINCT xmin)` — review finding M6.** xmin cardinality is
+# 1 for every table straight after a `pg_restore`, and it is *still* 1 after a transaction
+# rewrites the whole table, so as a "nothing else changed" probe it is nearly blind. This
+# digests every row instead: `row_to_json` per row, sorted by its own text so no primary key
+# is assumed, then one md5 per table. Control 3 below touches a row in an unrelated table and
+# is expected to move it.
+#
+# The two converted tables are excluded from the digest and only counted: their content is
+# *supposed* to change shape, and the entries / rows / keyorder comparisons cover it in
+# detail. `_prisma_migrations` is the ledger this step writes, and is reported separately.
 read -r -d '' REVERSE_SQL <<'SQL' || true
+SET TIME ZONE 'UTC';
 SELECT 'count' AS kind, c.relname AS name, n.n::text AS value
   FROM pg_class c
   JOIN pg_namespace ns ON ns.oid = c.relnamespace AND ns.nspname = 'public'
@@ -112,16 +123,30 @@ SELECT 'count' AS kind, c.relname AS name, n.n::text AS value
       query_to_xml(format('SELECT count(*) AS c FROM public.%I', c.relname), false, true, '')))[1]::text::bigint AS n) n
  WHERE c.relkind = 'r'
 UNION ALL
-SELECT 'xmin', c.relname, x.n::text
+SELECT 'digest', c.relname, d.h
   FROM pg_class c
   JOIN pg_namespace ns ON ns.oid = c.relnamespace AND ns.nspname = 'public'
   CROSS JOIN LATERAL (SELECT (xpath('/row/c/text()',
-      query_to_xml(format('SELECT count(DISTINCT xmin::text) AS c FROM public.%I', c.relname), false, true, '')))[1]::text::bigint AS n) x
+      query_to_xml(format(
+        'SELECT md5(coalesce(string_agg(r, chr(10) ORDER BY r), '''')) AS c'
+        ' FROM (SELECT row_to_json(t)::text AS r FROM public.%I t) s', c.relname),
+        false, true, '')))[1]::text AS h) d
  WHERE c.relkind = 'r'
+   AND c.relname NOT IN ('fondo_api_schedulertask', 'fondo_api_notificationsubscriptions',
+                         '_prisma_migrations')
 UNION ALL
 SELECT 'sequence', sequencename, coalesce(last_value::text, '<unread>')
   FROM pg_sequences WHERE schemaname = 'public'
 ORDER BY 1, 2;
+SQL
+
+# Recorded in the artifacts so a proof can be attributed to a server version (Q59).
+read -r -d '' SERVER_SQL <<'SQL' || true
+SELECT 'server_version', current_setting('server_version')
+UNION ALL SELECT 'hstore_extversion', coalesce((SELECT extversion FROM pg_extension WHERE extname = 'hstore'), '<absent>')
+UNION ALL SELECT 'hstore_to_jsonb', coalesce(to_regprocedure('hstore_to_jsonb(hstore)')::text, '<unresolvable>')
+UNION ALL SELECT 'search_path', current_setting('search_path')
+ORDER BY 1;
 SQL
 
 q() { psql -d "$1" -At -F'|' -v ON_ERROR_STOP=1 -c "$2"; }
@@ -129,6 +154,9 @@ q() { psql -d "$1" -At -F'|' -v ON_ERROR_STOP=1 -c "$2"; }
 echo "== 0. build $RUN from $PRISTINE =="
 if psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$RUN'" | grep -q 1; then dropdb "$RUN"; fi
 createdb -T "$PRISTINE" "$RUN"
+
+q "$PRISTINE" "$SERVER_SQL" > "$OUT/server.txt"
+echo "   target server: $(grep '^server_version|' "$OUT/server.txt" | cut -d'|' -f2)"
 
 echo "== 1. snapshot BEFORE (from the pristine hstore clone) =="
 q "$PRISTINE" "$BEFORE_ENTRIES"   > "$OUT/entries.before"
@@ -155,7 +183,7 @@ redact() { sed "s/$STEP6_PW/REDACTED/g"; }
 set +e
 DATABASE_URL="postgresql://${PGUSER:-fondouser}:${STEP6_PW}@${PGHOST:-localhost}:${PGPORT:-5432}/$RUN?schema=public" \
 PRISMA_MIGRATIONS_PATH="$MIGRATIONS" \
-  npx prisma migrate deploy 2>&1 | redact | grep -E 'Applying|applied|Error|error'
+  npx prisma migrate deploy 2>&1 | redact | grep -iE 'applying|applied|error|phase 9 step 6|migration name|P3[0-9]{3}'
 deploy_status=${PIPESTATUS[0]}
 set -e
 if [ "$deploy_status" -ne 0 ]; then
@@ -186,14 +214,10 @@ report rows     "$OUT/rows.before"     "$OUT/rows.after"
 report keyorder "$OUT/keyorder.before" "$OUT/keyorder.after"
 
 # Reverse check. The ONLY table excluded is `_prisma_migrations`, whose growth is the
-# migration itself; it is printed rather than hidden. Everything else — including the two
-# converted tables' row counts, every sequence's last_value, and every table's xmin
-# cardinality — must be byte-identical.
-#
-# ⚠️ The converted tables' xmin cardinality is deliberately NOT excused. Measured 1 -> 1:
-# `ALTER TABLE ... TYPE` plus the repair UPDATEs run in one transaction, so every rewritten
-# row carries that single xid. A cardinality of 2 would mean something ran outside it.
-MASK='^count|_prisma_migrations|\|^xmin|_prisma_migrations|'
+# migration itself; it is printed rather than hidden. Everything else — the two converted
+# tables' row counts, every other table's content digest, and every sequence's last_value —
+# must be byte-identical.
+MASK='^count|_prisma_migrations|\|^digest|_prisma_migrations|'
 grep -v "$MASK" "$OUT/reverse.before" > "$OUT/reverse.before.masked"
 grep -v "$MASK" "$OUT/reverse.after"  > "$OUT/reverse.after.masked"
 report reverse "$OUT/reverse.before.masked" "$OUT/reverse.after.masked"
@@ -201,20 +225,91 @@ echo "  note  the migration ledger, the one table this step is supposed to chang
 grep "$MASK" "$OUT/reverse.before" | sed 's/^/          before /'
 grep "$MASK" "$OUT/reverse.after"  | sed 's/^/          after  /'
 
-# A check that can only say "nothing found" is not a check (C67). Corrupt one value in the
-# migrated database and confirm the entry comparison notices.
-echo "== 5. positive control — mutate one row in $RUN and re-run the entry check =="
-psql -d "$RUN" -q -v ON_ERROR_STOP=1 -c \
-  "UPDATE fondo_api_schedulertask SET payload = jsonb_set(payload,'{message}','\"CONTROL\"') WHERE id = (SELECT min(id) FROM fondo_api_schedulertask)"
-q "$RUN" "$AFTER_ENTRIES" > "$OUT/entries.after.control"
-if diff -q "$OUT/entries.before" "$OUT/entries.after.control" >/dev/null; then
-  echo "  CONTROL FAILED — the entry comparison did not notice a changed value. The probe is blind."
+# ---------------------------------------------------------------------------
+# Controls. A check that can only say "nothing found" is not a check (C67), and that applies
+# to each of the four comparisons separately — review finding m1/M6. Each control below
+# corrupts the migrated database in one specific way and asserts that the matching comparison
+# reports it.
+# ---------------------------------------------------------------------------
+echo "== 5. controls — each comparison is shown to be able to fail =="
+
+# ⚠️ Each control starts from a freshly rebuilt, freshly migrated $RUN, so a control's diff
+# is caused by that control alone. Running them cumulatively was the first version, and it
+# made control 4's diff include control 2's deleted row — a control whose evidence is partly
+# somebody else's corruption proves less than it appears to.
+rebuild_run() {
+  dropdb "$RUN"
+  createdb -T "$PRISTINE" "$RUN"
+  DATABASE_URL="postgresql://${PGUSER:-fondouser}:${STEP6_PW}@${PGHOST:-localhost}:${PGPORT:-5432}/$RUN?schema=public" \
+  PRISMA_MIGRATIONS_PATH="$MIGRATIONS" \
+    npx prisma migrate deploy > "$OUT/rebuild.log" 2>&1
+}
+
+control() { # name, sql, snapshot-sql, before-file
+  local name="$1" sql="$2" snap="$3" before="$4"
+  rebuild_run
+  psql -d "$RUN" -q -v ON_ERROR_STOP=1 -c "$sql"
+  q "$RUN" "$snap" > "$OUT/$name.control"
+  if diff -q "$before" "$OUT/$name.control" >/dev/null; then
+    echo "  CONTROL FAILED  $name — the comparison did not notice. The probe is blind."
+    fail=1
+  else
+    echo "  PASS  control $name: $(diff "$before" "$OUT/$name.control" | grep -c '^[<>]') differing line(s), as expected"
+  fi
+}
+
+# 1. entries — a changed value.
+control entries \
+  "UPDATE fondo_api_schedulertask SET payload = jsonb_set(payload,'{message}','\"CONTROL\"') WHERE id = (SELECT min(id) FROM fondo_api_schedulertask)" \
+  "$AFTER_ENTRIES" "$OUT/entries.before"
+
+# 2. rows — a deleted row. This is the one the entries comparison alone cannot see when the
+#    row is an empty hstore, which is why row identity is checked separately.
+control rows \
+  "DELETE FROM fondo_api_schedulertask WHERE id = (SELECT max(id) FROM fondo_api_schedulertask)" \
+  "$ROWS_SQL" "$OUT/rows.before"
+
+# 3. keyorder — a key renamed to a shorter one, which moves it in jsonb's (length, bytes)
+#    ordering. ⚠️ Stated as a measurement, not a claim of isolation: jsonb's key order is a
+#    function of the key SET, so a pure reordering with the same keys is unconstructible, and
+#    this control necessarily moves the entries comparison too. What it shows is that the
+#    keyorder comparison reports a changed order rather than passing on it.
+control keyorder \
+  "UPDATE fondo_api_schedulertask SET payload = (payload - 'message') || jsonb_build_object('msg', payload->'message') WHERE id = (SELECT min(id) FROM fondo_api_schedulertask)" \
+  "$KEYORDER_AFTER" "$OUT/keyorder.before"
+
+# 4. reverse — a row touched in an UNRELATED table. The count does not move, so this is the
+#    control the old `count(DISTINCT xmin)` probe could not pass (M6).
+#    Compared against the post-migration snapshot, not the pre-migration one, so the only
+#    line that may differ is the unrelated table's digest.
+control reverse_digest \
+  "UPDATE fondo_api_loan SET value = value + 1 WHERE id = (SELECT min(id) FROM fondo_api_loan)" \
+  "$REVERSE_SQL" "$OUT/reverse.after"
+
+# ---------------------------------------------------------------------------
+# The controls have deliberately corrupted $RUN. Rebuild it so the database that is left
+# behind is the one the artifacts describe — review finding m7.
+# ---------------------------------------------------------------------------
+echo "== 6. rebuild $RUN so it matches the artifacts again =="
+set +e
+rebuild_run
+rebuild_status=$?
+set -e
+if [ "$rebuild_status" -ne 0 ]; then
+  echo "  WARNING: the rebuild deploy exited $rebuild_status — $RUN does NOT match the artifacts." >&2
   fail=1
 else
-  echo "  PASS  control: $(diff "$OUT/entries.before" "$OUT/entries.after.control" | grep -c '^[<>]') differing line(s), as expected"
+  q "$RUN" "$AFTER_ENTRIES" > "$OUT/entries.after.rebuilt"
+  if diff -q "$OUT/entries.before" "$OUT/entries.after.rebuilt" >/dev/null; then
+    echo "  PASS  $RUN rebuilt and equal to the BEFORE snapshot again"
+  else
+    echo "  FAIL  rebuilt $RUN does not match the BEFORE snapshot"
+    fail=1
+  fi
 fi
 
 echo
+echo "server: $(grep '^server_version|' "$OUT/server.txt" | cut -d'|' -f2), hstore $(grep '^hstore_extversion|' "$OUT/server.txt" | cut -d'|' -f2)"
 if [ "$fail" -eq 0 ]; then
   echo "STEP6 PROOF: PASS   (artifacts in $OUT)"
 else

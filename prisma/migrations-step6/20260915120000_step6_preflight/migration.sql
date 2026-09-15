@@ -110,7 +110,7 @@ BEGIN
   IF array_length(preserialised, 1) IS NOT NULL THEN
     RAISE EXCEPTION 'PHASE 9 STEP 6 PREFLIGHT: subscription->''keys'' already contains a double quote in % row(s); ids %',
       array_length(preserialised, 1), preserialised
-      USING HINT = 'Measured 0 of 94 rows on fondodev 2026-09-15. A double quote means the value was not written by Django''s repr path, so its decoded form has not been measured.';
+      USING HINT = 'Measured 0 of 94 rows on fondodev 2026-09-15. Such a value cannot come from Django''s repr path, and v1''s blunt quote replace on it yields either valid-but-wrong JSON (that device silently never receives push again) or invalid JSON, which raises inside send_notification and loses the notification for EVERY recipient in the batch. STOP, inspect the row and tell the member; delete it only if the value cannot be decoded. Under Q62 the PWA subscribes on explicit opt-in only, so the browser will NOT re-register on its own. Runbook 6.10.';
   END IF;
 END $$;
 
@@ -138,5 +138,123 @@ BEGIN
     RAISE EXCEPTION 'PHASE 9 STEP 6 PREFLIGHT: duplicate keys block D6/D11 — loandetail.loan_id % group(s), userfinance.user_id % group(s), userpreference.user_id % group(s)',
       dup_loan, dup_finance, dup_preference
       USING HINT = 'D6/D11 say which row wins is an operator decision; v2 reads the lowest id. Resolve the duplicates, then re-run.';
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- 5. A value that PARSES but is still a JSON string — review finding M2.
+--
+--    `json.loads('"[1,2]"')` returns the *string* `[1,2]`, not a list. Such a row survives
+--    check 2 and the repair pass, and the result looks structurally fine while being one
+--    unwrapping short. Measured 0 of 626 on fondodev 2026-09-15 — and "0 today" is exactly
+--    why it belongs here rather than in a comment: production's shapes are unmeasured.
+--
+--    A scalar (`json.loads('7')` -> 7) is NOT rejected: that is what v1 would hand the
+--    application, and reproducing v1 is the rule. Only the still-a-string case is a stop.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  r record;
+  bad bigint[] := '{}';
+BEGIN
+  FOR r IN
+    SELECT id::bigint AS id, payload -> 'user_ids' AS v
+      FROM fondo_api_schedulertask
+     WHERE payload ? 'user_ids' AND payload -> 'user_ids' IS NOT NULL
+  LOOP
+    BEGIN
+      IF jsonb_typeof(r.v::jsonb) = 'string' THEN
+        bad := bad || r.id;
+      END IF;
+    EXCEPTION WHEN others THEN
+      NULL;  -- check 2 above owns the unparseable case and has already raised.
+    END;
+  END LOOP;
+
+  IF array_length(bad, 1) IS NOT NULL THEN
+    RAISE EXCEPTION 'PHASE 9 STEP 6 PREFLIGHT: payload->''user_ids'' is a JSON string even after one unwrapping in % row(s); ids %',
+      array_length(bad, 1), bad
+      USING HINT = 'The value is stringified twice over. Unwrapping it once leaves a string where the application expects a list; how many times to unwrap is an operator decision.';
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- 6. A `keys` value whose repaired form is not an object — review finding M2.
+--
+--    v1 does `subscription['keys'] = json.loads(...)` and then hands the result to the push
+--    layer as a mapping. A repaired value that parses to an array, a string or a number is a
+--    shape nothing downstream has ever seen. Measured 94 of 94 objects on fondodev.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  r record;
+  bad bigint[] := '{}';
+BEGIN
+  FOR r IN
+    SELECT id::bigint AS id, subscription -> 'keys' AS v
+      FROM fondo_api_notificationsubscriptions
+     WHERE subscription ? 'keys' AND subscription -> 'keys' IS NOT NULL
+  LOOP
+    BEGIN
+      IF jsonb_typeof(replace(r.v, '''', '"')::jsonb) <> 'object' THEN
+        bad := bad || r.id;
+      END IF;
+    EXCEPTION WHEN others THEN
+      NULL;  -- check 3 above owns the unparseable case and has already raised.
+    END;
+  END LOOP;
+
+  IF array_length(bad, 1) IS NOT NULL THEN
+    RAISE EXCEPTION 'PHASE 9 STEP 6 PREFLIGHT: subscription->''keys'' does not repair into a JSON object in % row(s); ids %',
+      array_length(bad, 1), bad
+      USING HINT = 'v1 hands this to the push layer as a mapping. An array, string or number there is a shape nothing downstream has seen.';
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- 7. Dependent objects on the two columns — review finding M3.
+--
+--    `ALTER TABLE ... ALTER COLUMN ... TYPE` rebuilds dependent indexes and REFUSES outright
+--    when a view or rule reads the column ("cannot alter type of a column used by a view or
+--    rule"). Both failures land inside the wrapped conversion, where the message is masked by
+--    the trailing COMMIT — which is precisely what this two-file split exists to avoid. So
+--    they are detected here, by name, while the error is still readable.
+--
+--    Measured on fondodev 2026-09-15 (and independently by nestjs-reviewer): no index on
+--    either column beyond the primary key, and no view or rule referencing them.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  offenders text[] := '{}';
+  r record;
+BEGIN
+  FOR r IN
+    SELECT 'index ' || ic.relname || ' on ' || tc.relname || '.' || a.attname AS what
+      FROM pg_index i
+      JOIN pg_class tc ON tc.oid = i.indrelid
+      JOIN pg_class ic ON ic.oid = i.indexrelid
+      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey::smallint[])
+     WHERE i.indrelid IN (to_regclass('fondo_api_schedulertask')::oid,
+                          to_regclass('fondo_api_notificationsubscriptions')::oid)
+       AND a.attname IN ('payload', 'subscription')
+    UNION ALL
+    SELECT 'view/rule ' || rw.rulename || ' on ' || cl.relname
+      FROM pg_depend d
+      JOIN pg_rewrite rw ON rw.oid = d.objid
+      JOIN pg_class cl ON cl.oid = rw.ev_class
+      JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+     WHERE d.classid = 'pg_rewrite'::regclass
+       AND d.refclassid = 'pg_class'::regclass
+       AND d.refobjid IN (to_regclass('fondo_api_schedulertask')::oid,
+                          to_regclass('fondo_api_notificationsubscriptions')::oid)
+       AND a.attname IN ('payload', 'subscription')
+  LOOP
+    offenders := offenders || r.what;
+  END LOOP;
+
+  IF array_length(offenders, 1) IS NOT NULL THEN
+    RAISE EXCEPTION 'PHASE 9 STEP 6 PREFLIGHT: % dependent object(s) on the columns being converted: %',
+      array_length(offenders, 1), array_to_string(offenders, ', ')
+      USING HINT = 'An index is rebuilt (and an hstore-specific opclass cannot be); a view or rule makes ALTER COLUMN TYPE refuse outright. Drop them deliberately, then re-run.';
   END IF;
 END $$;
