@@ -181,9 +181,13 @@ if [ -z "$STEP6_PW" ]; then echo "REFUSING: empty database password." >&2; exit 
 redact() { sed "s/$STEP6_PW/REDACTED/g"; }
 
 set +e
+# ⚠️ `STEP6_CONFIRM` is the second half of C96's gate: a non-default ledger is refused unless
+# a variable carries TODAY's date in Bogotá. It is computed here rather than hard-coded, so
+# this script keeps working tomorrow and still cannot be what leaves a stale one behind.
 DATABASE_URL="postgresql://${PGUSER:-fondouser}:${STEP6_PW}@${PGHOST:-localhost}:${PGPORT:-5432}/$RUN?schema=public" \
 PRISMA_MIGRATIONS_PATH="$MIGRATIONS" \
-  npx prisma migrate deploy 2>&1 | redact | grep -iE 'applying|applied|error|phase 9 step 6|migration name|P3[0-9]{3}'
+STEP6_CONFIRM="$(TZ=America/Bogota date +%F)" \
+  npx prisma migrate deploy 2>&1 | redact | grep -iE 'applying|applied|error|refusing|phase 9 step 6|migration name|P3[0-9]{3}'
 deploy_status=${PIPESTATUS[0]}
 set -e
 if [ "$deploy_status" -ne 0 ]; then
@@ -242,6 +246,7 @@ rebuild_run() {
   createdb -T "$PRISTINE" "$RUN"
   DATABASE_URL="postgresql://${PGUSER:-fondouser}:${STEP6_PW}@${PGHOST:-localhost}:${PGPORT:-5432}/$RUN?schema=public" \
   PRISMA_MIGRATIONS_PATH="$MIGRATIONS" \
+  STEP6_CONFIRM="$(TZ=America/Bogota date +%F)" \
     npx prisma migrate deploy > "$OUT/rebuild.log" 2>&1
 }
 

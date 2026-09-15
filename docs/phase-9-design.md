@@ -10,8 +10,8 @@ controls and the C39 finding stood; the runbook and the release ordering did not
 | stage | contents | when |
 |---|---|---|
 | **1** | measurements, the four step-6 migrations, the clone proof, the mutation controls, the Release A boot guard, this design | now |
-| **2a** | Release B's code: hstore codec deleted, the two raw-SQL repositories on Prisma models, `Json @db.JsonB` + the two `@unique`s, the guard's `jsonb` half, **C91's `p256dh, auth` pin on the SQS emit path**; C83, C90 | **before cutover step 3** (C93) |
-| **2b** | move `prisma/migrations-step6/*` into `prisma/migrations/`, delete `PRISMA_MIGRATIONS_PATH`, add the second `migrate deploy` to `test/test-database.ts` | **after step 6 has run in production** (C92) |
+| **2a** | Release B's code: hstore codec deleted, the two raw-SQL repositories on Prisma models, `Json @db.JsonB` + the two `@unique`s, the guard's `jsonb` half, **C91's `p256dh, auth` pin on the SQS emit path**, **the provisioner's second `migrate deploy`** (C94); C83, C90 | **before cutover step 3** (C93) |
+| **2b** | move `prisma/migrations-step6/*` into `prisma/migrations/` and delete `PRISMA_MIGRATIONS_PATH` — **that is all of stage 2b** (C94) | **after step 6 has run in production** (C92) |
 
 **Nothing here touched production or `fondodev`.** Every measurement against `fondodev` ran
 with `SET default_transaction_read_only = on`; every migration ran on a clone
@@ -152,16 +152,42 @@ read go in an unwrapped, write-free migration; anything that writes goes inside
    list. A *scalar* (`json.loads('7') → 7`) is **not** rejected: that is what v1 hands the
    application;
 6. **(added, M2)** no `keys` whose repaired value is not a JSON **object**;
-7. **(added, M3)** no dependent object on either column — an index beyond the primary key, or
-   a view/rule via `pg_rewrite`. Both make `ALTER COLUMN … TYPE` fail *inside* the wrapped
-   conversion, where M-D34-6 masks the message; detecting them here is the whole point of the
-   two-file split.
+7. **(added, M3; rewritten, C95)** no dependent object on either column. Both an index and a
+   view/rule make `ALTER COLUMN … TYPE` fail *inside* the wrapped conversion, where M-D34-6
+   masks the message; detecting them here is the whole point of the two-file split.
+
+   ⚠️ **C95 — the first version could not see an expression index.** It joined `pg_attribute`
+   on `a.attnum = ANY(i.indkey)`, and `indkey` holds **0** for an expression column, so
+   `CREATE INDEX … (akeys(payload))` returned nothing from the preflight and then aborted the
+   conversion with the masked message (measured by `nestjs-reviewer` on a scratch 17 clone).
+   The check is now a **`pg_depend` sweep** on the column itself
+   (`refclassid = 'pg_class'`, `refobjsubid = attnum`, `deptype <> 'i'`), with the `pg_rewrite`
+   branch kept only so a view is named as *"view/rule X on Y"* rather than as an anonymous
+   rewrite rule. Measured to catch four kinds where the old one caught one:
+
+   | seeded object | old check | new sweep |
+   |---|---|---|
+   | `USING gin (payload)` — a plain column index | caught | `index step6_dependent_probe` |
+   | `(akeys(payload))` — an **expression** index | **missed** | `index step6_expr_probe` |
+   | `(id) WHERE payload ? 'type'` — a **predicate** reference | **missed** | `index step6_partial_probe` |
+   | `CHECK (akeys(payload) IS NOT NULL)` | **missed** | `constraint step6_check_probe on table …` |
+   | `CREATE VIEW … SELECT id, payload` | caught | `view/rule _RETURN on step6_view_probe` |
+
+   ⚠️ **One deliberate exclusion, and it is version-dependent.** **PostgreSQL 18 materialises
+   `NOT NULL` as a `pg_constraint` row** (`contype = 'n'`, `deptype = 'a'`) that depends on the
+   column; **17 does not**. Measured 2026-09-15 on the reference clones: the unfiltered sweep
+   returns `constraint fondo_api_schedulertask_payload_not_null` and the subscription one on
+   **18.6**, and **nothing on 17.11**. `ALTER COLUMN … TYPE` carries a NOT NULL across without
+   complaint, so `contype = 'n'` is excluded — a correct exclusion, not a convenient one, and a
+   cell pins that it was not widened to "ignore constraints", which would hide the CHECK above.
+   This is the first cross-version difference the 17-vs-18 work has actually turned up.
 
 ### 3.1 Where the directory lives, and why — condition C92, operator answer Q56
 
 **`prisma/migrations-step6` stays outside `prisma/migrations` through Release B.** Step 6 is an
 **operator-run `migrate deploy` against that directory**, never something a deploy performs.
-The directories move in only in **stage 2b**, after step 6 has run in production.
+The directories move in only in **stage 2b**, after step 6 has run in production — and that
+move is *all* stage 2b is (C94).
 
 Three reasons, in order of weight:
 
@@ -178,27 +204,64 @@ Three reasons, in order of weight:
    passed, 38 total**. (`fondo_api_test` was dropped and re-provisioned afterwards.)
 
 So `prisma.config.ts` resolves the ledger from `PRISMA_MIGRATIONS_PATH`, default
-`prisma/migrations`, **prints the resolved path on every invocation**, and prints a
-**WARNING** when it is not the default — measured in both directions:
+`prisma/migrations`, and **prints the resolved path on every invocation** so a leftover is
+visible in a deploy log rather than inferable from which migrations ran.
 
+⚠️ **A warning was not enough — condition C96.** The reviewer accepted the warn-on-non-default
+shape as correct but named a residual that is real: a `PRISMA_MIGRATIONS_PATH` left behind in a
+task definition or a parameter store converts **production** on a routine deploy; and because
+Release A carries the step-6 directory through cutover by design, that same build's
+`SchemaShapeGuard` then refuses to start. The door fires, the service is down, rollback is
+dead — from a deploy nobody was watching.
+
+A non-default ledger therefore now needs a **second** variable carrying **today's date in
+Bogotá**, or the CLI refuses:
+
+```bash
+PRISMA_MIGRATIONS_PATH=prisma/migrations-step6 \
+  STEP6_CONFIRM=$(TZ=America/Bogota date +%F) \
+  npx prisma migrate deploy
 ```
-prisma migrations ledger: prisma/migrations
-WARNING: PRISMA_MIGRATIONS_PATH is set to "prisma/migrations-step6". This is NOT the default
-ledger (prisma/migrations). …
-```
 
-(The review asked for a warning whenever the variable is *set*. `test/test-database.ts` now
-**pins** it to the default deliberately — review m3, so that a developer with the step-6 path
-exported cannot have the e2e suite convert `fondo_api_test` — and warning on "set" alone would
-then fire on every e2e run and train people to ignore it. Warning on "not the default" is the
-dangerous case; the always-printed line covers the rest, so a leftover is visible in a deploy
-log either way.)
+Two properties, both deliberate: **a leftover goes stale at the next Bogotá midnight**, so the
+failure mode is "a deploy errors tomorrow" rather than "a deploy converts production next
+month"; and **the door needs two correct variables set on purpose**, one of which cannot be
+copied from yesterday's runbook without editing. The zone is Bogotá for the same reason
+everything else here pins it (§4 rule 5): `date +%F` on a UTC host after 19:00 Bogotá already
+reads tomorrow, and the gate would refuse a correct operator.
 
-⚠️ **Stage 2b's provisioner change, recorded now so it is not improvised later.** When Release
-B's code lands, `fondo_api_test` must be built by **two sequential `migrate deploy` runs** —
-`prisma/migrations`, then `prisma/migrations-step6` — *not* by moving the directory. Moving it
-would put the one-way door back into the ledger every production deploy applies. The note is
-in `test/test-database.ts` beside the call.
+The decision is a pure function in `src/config/step6-migrations-path.ts` — no clock, no
+`process.env`, no `console` — so each refusal shape has a cell. Measured through the real CLI
+against a clone:
+
+| variables | result |
+|---|---|
+| neither set | `prisma migrations ledger: prisma/migrations`, exit 0 |
+| `PRISMA_MIGRATIONS_PATH=prisma/migrations` (what `test-database.ts` pins) | same; **no confirmation demanded**, or every e2e run would need one |
+| step-6 path, no `STEP6_CONFIRM` | `REFUSING: … STEP6_CONFIRM is not set`, exit 1, with the exact command |
+| step-6 path, `STEP6_CONFIRM=2026-09-14` | `REFUSING: STEP6_CONFIRM="2026-09-14" is not today in America/Bogota (2026-09-15)`, exit 1 |
+| step-6 path, malformed (`2026-9-15`, ` 2026-09-15`, `today`, `true`, …) | `REFUSING: … is not a YYYY-MM-DD date`, exit 1 |
+| step-6 path + today | proceeds, with `WARNING: … confirmed for 2026-09-15 … ONE-WAY` |
+
+`test/test-database.ts` **pins** the variable to `prisma/migrations` (review m3) rather than
+inheriting it, so a developer with the step-6 path exported cannot have the e2e suite convert
+`fondo_api_test`; that pin is the reason the gate exempts the default value explicitly.
+
+⚠️ **The provisioner's second run is stage 2a, not 2b — condition C94.** When Release B's code
+lands, `fondo_api_test` must be built by **two sequential `migrate deploy` runs** —
+`prisma/migrations`, then `prisma/migrations-step6` — **in the same commit as the codec
+deletion**, and *not* by moving the directory.
+
+The trigger and the label have to agree, because the failure mode is specific: a developer
+starting stage 2a finds **every e2e suite dying at bootstrap on `SchemaShapeError`** — Release
+B's guard requires `jsonb`, and `fondo_api_test` is still provisioned from `prisma/migrations`
+alone — and the shortest visible way out is `git mv prisma/migrations-step6/* prisma/migrations/`.
+That re-arms the one-way door in the ledger every production deploy applies: **C92 defeated by
+the document written to enforce it.** The fix is the second run, not the move.
+
+The "until then it must NOT be added, or Release A's own suites stop passing" caveat stays, and
+is exactly why it belongs in that commit rather than earlier. The note is in
+`test/test-database.ts` beside the call.
 
 ### 3.2 What the conversion does to each value
 
@@ -355,8 +418,13 @@ measures.
 | `UPDATE … SET payload = '{"a":"b"}'::jsonb` on the **unmigrated** clone | `ERROR: column "payload" is of type hstore but expression is of type jsonb` — the mirror image |
 | Release A read `SELECT payload::text` on a converted column | returns JSON text; `parseHstore` throws `SyntaxError` — pinned in `src/common/utils/hstore.codec.spec.ts` |
 
-So there is **no silent-corruption window**: a writer that survives into step 6 fails at the
-type level on its first write. The exposure is availability, not integrity.
+**Measured on those four probes: every one is a type-level refusal, and the row count did not
+move.** A writer that survives into step 6 is rejected by PostgreSQL before it can write a
+half-encoded row, so on the shapes measured the exposure is availability, not integrity. (It is
+written this way on purpose — rule 15. The universal *"there is no silent-corruption window"*
+sat directly above the four rows that are its only evidence; four probes are not a proof about
+every writer, and the two that matter — Django's `HStoreField` and v2's repositories — are
+exactly the two measured.)
 
 **The quiesce step is still load-bearing, for a different reason.** `ALTER TABLE … TYPE` takes
 `ACCESS EXCLUSIVE`, so nothing can interleave *within* the conversion. The window that matters
@@ -379,12 +447,22 @@ run on the 17.11 clone in both states, from a pre-image taken on that same datab
 | state | result |
 |---|---|
 | pre-image captured on the un-migrated clone, then `verify` **before** migrating | **exit 1**, 9 FAILs — the column types, the five content probes (which error on an hstore column and read as empty), the missing constraints and the missing ledger rows |
-| the same clone after `migrate deploy` | **exit 0**, **20 PASSes, 0 FAILs** |
+| the same clone after `migrate deploy` | **exit 0**, **21 PASSes, 0 FAILs** |
+| the same clone after **one** post-migration write (`UPDATE … SET subscription = subscription`) | **exit 1, exactly 1 FAIL**: `xmin cardinality: fondo_api_notificationsubscriptions got 2, expected 1` — the N4 shelf life, measured rather than asserted |
 
-So it can fail, and it fails for the right reasons (C67). Note the two halves must run against
-the **same** database: the pre-image records `current_database()` and the server port, and
-`verify` compares them — a verification pointed at the wrong database fails on its first two
-lines, which is review blocker **B3**'s failure mode caught rather than assumed.
+So it can fail, and it fails for the right reasons (C67). The two halves must run against the
+**same** database: the pre-image records `current_database()`, **`inet_server_addr()`** and the
+server port, and `verify` compares all three — a verification pointed at the wrong database
+fails on its first lines, which is review blocker **B3**'s failure mode caught rather than
+assumed. ⚠️ The host comparison is new this round (**N3**): the pre-image captured `host` and
+nothing compared it, so a same-named database on a *different* server — a restored copy, a
+replica, a staging clone — passed the two identity lines that did exist.
+
+🔴 **The two xmin checks have a shelf life — N4.** They say "one transaction wrote all of this",
+which is true between the migration and the Release B rollout and **stops being true the moment
+Release B serves a subscribe or runs a scheduler pass**. That rise is correct behaviour, not a
+fault. The script says so at the check, and runbook §6.7 says so too, because an operator
+mid-incident reads the script.
 
 ### 4.7 Drift, and stage 2a's schema worklist
 
@@ -509,10 +587,12 @@ a remembered one.
 | what a production deploy migrates | nothing (`0_init` is already applied — a no-op) | nothing |
 | step 6 itself | — | an **operator-run** `migrate deploy` with `PRISMA_MIGRATIONS_PATH` set inline, between A and B |
 
+**Stage 2a** adds the second `migrate deploy` to `test/test-database.ts`, in the same commit as
+the codec deletion (**C94** — its trigger is "Release B's code lands", which is 2a).
 **Stage 2b**, after step 6 has run in production, moves the four directories into
-`prisma/migrations`, deletes `PRISMA_MIGRATIONS_PATH`, and adds the second `migrate deploy` to
-`test/test-database.ts`. Migration names and file contents — and therefore checksums — survive
-the move, so production then reports `No pending migrations to apply`.
+`prisma/migrations` and deletes `PRISMA_MIGRATIONS_PATH` — and nothing else. Migration names
+and file contents — and therefore checksums — survive the move, so production then reports
+`No pending migrations to apply`.
 
 ### 6.2 The boot guard — `src/prisma/schema-shape.guard.ts`
 
@@ -582,13 +662,17 @@ fund's only payment-reminder path. The operator chose the guard in **both** dire
 >    `inet_server_port()` report the **server's** address, so on a managed instance they are
 >    the instance's, not the client's; `<local socket>` means you are on the database host.
 >    ```bash
->    PRISMA_MIGRATIONS_PATH=prisma/migrations-step6 npx prisma migrate deploy
+>    PRISMA_MIGRATIONS_PATH=prisma/migrations-step6 \
+>    STEP6_CONFIRM=$(TZ=America/Bogota date +%F) \
+>      npx prisma migrate deploy
 >    ```
->    ⚠️ **Inline, on this one command.** Never in a task definition, an `.env` file or a
->    parameter store: under **Q56** every deploy runs `migrate deploy`, and a leftover variable
->    turns the next routine deploy into a one-way conversion. The CLI prints
->    `WARNING: PRISMA_MIGRATIONS_PATH is set to …` whenever it is not the default, so a
->    leftover shows up in the deploy log.
+>    ⚠️ **Both variables, inline, on this one command.** Never in a task definition, an `.env`
+>    file or a parameter store: under **Q56** every deploy runs `migrate deploy`. `STEP6_CONFIRM`
+>    must be **today's date in Bogotá** or the CLI refuses and exits 1 (**C96**) — which is what
+>    makes a forgotten variable stale within a day instead of dangerous for a month. If you see
+>    `REFUSING: … is not today in America/Bogota`, re-read the date, do not edit the check. The
+>    CLI also prints `WARNING: PRISMA_MIGRATIONS_PATH is set to …` on the successful path, so a
+>    leftover shows up in the deploy log either way.
 >
 >    Four migrations apply in order: `step6_preflight` (assertions only), `hstore_to_jsonb`
 >    (conversion + data repair, one transaction), `loandetail_unique_loan_id` (**D6**),
@@ -599,7 +683,7 @@ fund's only payment-reminder path. The operator chose the guard in **both** dire
 >    ```bash
 >    scripts/parity/step6-verify.sh verify ~/step6-preimage.txt   # must exit 0
 >    ```
->    Twenty checks: same database and port as the pre-image; both columns `jsonb`; both tables'
+>    Twenty-one checks: same database, **host** and port as the pre-image (N3); both columns `jsonb`; both tables'
 >    `count(*)` and `max(id)` equal to the pre-image; nothing still doubly stringified; no
 >    `user_ids` present but not an array; no `keys` that is not an object; **every `keys`
 >    object's fields exactly `{auth, p256dh}`**; no non-string value outside `user_ids`/`keys`;
@@ -634,14 +718,18 @@ fund's only payment-reminder path. The operator chose the guard in **both** dire
 >    | `P3009 … migration started at … failed` on a later attempt | whatever the previous failure left | A previous run left a failed ledger row. Confirm the schema state with 6.4's column check **before** anything else, then 6.8. |
 >    | Release B refuses to boot: *"requires the step-6 columns to be jsonb"* | both columns still `hstore` | The conversion did not run. **Redeploy the Release A image** — it boots on hstore — and start again at 6.3. |
 >    | Release A refuses to boot: *"already had the step-6 migration applied; deploy Release B instead"* | both columns `jsonb` | Expected. Deploy Release B; do not try to get Release A up. |
+>    | `step6-verify.sh verify` FAILs **only** on the two `xmin cardinality` lines, during a later incident | both columns `jsonb`, everything else PASS | 🔴 **Not a fault — review N4.** Those two lines mean "one transaction wrote all of this", which stops being true the moment Release B serves a subscribe or runs a scheduler pass. `step6-verify.sh` is a **step 6.4 instrument**, valid between the migration and the Release B rollout. Ignore those two lines after that point; every other check still holds. |
 >
 >    **6.8 Clearing a failed ledger row.** Prisma blocks every later `migrate deploy` until the
 >    row is resolved (`P3009`). After confirming with 6.4's column check that the schema is in
 >    the state the table above says:
 >    ```bash
 >    PRISMA_MIGRATIONS_PATH=prisma/migrations-step6 \
+>    STEP6_CONFIRM=$(TZ=America/Bogota date +%F) \
 >      npx prisma migrate resolve --rolled-back 20260915120100_hstore_to_jsonb
 >    ```
+>    (the confirmation gate is on the config, so **every** `prisma` command against that ledger
+>    needs it, `resolve` included.)
 >    (substitute the migration name the error printed).
 >
 >    **6.9 ⚠️ A succeeded preflight is never re-run.** Prisma skips applied migrations, so a
@@ -678,16 +766,22 @@ Baselines at `de17e97`. Each step's own exit code, on this branch.
 | fixture diff vs `~/.fondo-parity-harness/p8/out/BASELINE-fondodev-2026-09-12.txt` | 0 | see §7.1 | — |
 | fixture control `DB=fondo_api_test` | 1 | see §7.1 | — |
 
-### 7.1 Measured
+### 7.1 Measured — stage 1 fix round #2 (C94–C96, N3, N4, m4, m8)
 
-| step | result |
-|---|---|
-| `npm run lint` | **0** |
-| `npm run typecheck` | **0** |
-| `npm test` | **2601 passed / 81 suites**, exit 0 |
-| `npm run test:e2e` | **1382 passed + 2 skipped / 23 + 1 of 24 suites**, exit 0 |
-| fixture diff | **0** |
-| fixture control `DB=fondo_api_test` | **1** |
+| step | baseline (`4db69fb`) | measured | Δ |
+|---|---|---|---|
+| `npm run lint` | 0 | **0** | — |
+| `npm run typecheck` | 0 | **0** | — |
+| `npm test` | 2601 / 81 | **2619 / 82** | **+18 cells, +1 suite** — `src/config/step6-migrations-path.spec.ts` (C96: 3 default-ledger, 2 missing, 2 stale, 7 malformed, 1 correct, 1 message-shape, 2 zone) |
+| `npm run test:e2e` | 1382 + 2 skipped; 23 + 1 of 24 | **1386 + 2 skipped; 23 + 1 of 24** | **+4 cells** in `test/step6-hstore-jsonb.e2e-spec.ts` — C95's expression index, predicate index, CHECK constraint, and the NOT NULL non-exclusion |
+| fixture diff | 0 | **0** | — |
+| fixture control `DB=fondo_api_test` | 1 | **1** | — |
+
+Every delta is a cell this round added. One existing cell changed its expected text — *"refuses
+a dependent index … by name"* now expects `index step6_dependent_probe` rather than
+`index step6_dependent_probe on fondo_api_schedulertask.payload`, because the `pg_depend` sweep
+names objects through `pg_describe_object`. The e2e run is on the **hstore** schema, which is
+what Release A deploys.
 
 Every delta is a cell this round added; no existing cell changed meaning. The e2e run is on the
 **hstore** schema, which is what Release A deploys.
@@ -721,6 +815,6 @@ runbook 6.10).
 ## 9. Not in this stage
 
 Stage 2a — Release B's code (codec deletion, Prisma models, the `schema.prisma` change of §4.7,
-the guard's `jsonb` half, C91's emit-side pin), C83, C90 — **before cutover**. Stage 2b —
-moving the migration directories, deleting `PRISMA_MIGRATIONS_PATH`, the second provisioner
-deploy — **after step 6 has run in production**.
+the guard's `jsonb` half, C91's emit-side pin, **and the provisioner's second `migrate deploy`**
+— C94), C83, C90 — **before cutover**. Stage 2b — moving the migration directories and deleting
+`PRISMA_MIGRATIONS_PATH` — **after step 6 has run in production**.

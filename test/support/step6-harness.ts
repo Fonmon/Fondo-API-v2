@@ -182,6 +182,23 @@ function canonical(value: unknown): string {
     .join(',')}}`;
 }
 
+/**
+ * ⚠️ **`Object.keys` hoists integer-like keys — review m8.** Both `snapshotHstore` and
+ * `snapshotJsonb` read member order from `Object.keys`, and JavaScript objects enumerate
+ * array-index-like keys ("0", "7", "42") first, in numeric order, ahead of every string key
+ * whatever the insertion order. So a payload key that is a decimal integer string would be
+ * reported in an order neither hstore nor jsonb emits, and the `keyOrder` comparison could
+ * pass or fail for that reason alone.
+ *
+ * It does not bite here, and that is a measurement rather than an assumption: every key in
+ * both columns on `fondodev` 2026-09-15 is alphabetic (`message, owner_id, target, type,
+ * user_ids`; `endpoint, expirationTime, keys`), and the corpus adds only `code`, `flag`,
+ * `amount` and `extra`. If a numeric key ever appears, this pair of functions must switch to
+ * a `Map` or to reading the order from SQL (`each()` / `jsonb_object_keys()`, which
+ * `step6-prove.sh` already does — and which is why the shell proof is the authority on key
+ * order and this harness is the authority on values).
+ */
+
 /** Reads the hstore side and decodes it the way v1 does. */
 export async function snapshotHstore(client: Client): Promise<Snapshot> {
   const entries: DecodedEntry[] = [];

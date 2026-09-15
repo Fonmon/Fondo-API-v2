@@ -212,13 +212,29 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
--- 7. Dependent objects on the two columns — review finding M3.
+-- 7. Dependent objects on the two columns — review findings M3 and **C95**.
 --
 --    `ALTER TABLE ... ALTER COLUMN ... TYPE` rebuilds dependent indexes and REFUSES outright
 --    when a view or rule reads the column ("cannot alter type of a column used by a view or
 --    rule"). Both failures land inside the wrapped conversion, where the message is masked by
 --    the trailing COMMIT — which is precisely what this two-file split exists to avoid. So
 --    they are detected here, by name, while the error is still readable.
+--
+--    ⚠️ **C95 — the first version of this check joined `pg_attribute` on
+--    `a.attnum = ANY(i.indkey)` and could not see an expression index.** `indkey` holds **0**
+--    for an expression column, so `CREATE INDEX ... ON fondo_api_schedulertask (akeys(payload))`
+--    returned nothing here and then aborted the conversion with the masked
+--    `ERROR: current transaction is aborted` — the exact failure this file exists to prevent.
+--    Measured by `nestjs-reviewer` on a scratch 17 clone.
+--
+--    The replacement sweeps **`pg_depend`** instead: any object that depends on the column
+--    itself (`refclassid = 'pg_class'`, `refobjsubid` = the column's `attnum`). That catches
+--    an expression index, a *predicate* reference in a partial index, a CHECK constraint and a
+--    generated column, none of which `indkey` reports. `deptype <> 'i'` drops the internal
+--    self-dependency a column has on its own table.
+--
+--    The `pg_rewrite` branch is kept as well, purely for wording: a view or rule is reported
+--    as "view/rule <name> on <table>" rather than as an anonymous rewrite rule.
 --
 --    Measured on fondodev 2026-09-15 (and independently by nestjs-reviewer): no index on
 --    either column beyond the primary key, and no view or rule referencing them.
@@ -229,25 +245,33 @@ DECLARE
   r record;
 BEGIN
   FOR r IN
-    SELECT 'index ' || ic.relname || ' on ' || tc.relname || '.' || a.attname AS what
-      FROM pg_index i
-      JOIN pg_class tc ON tc.oid = i.indrelid
-      JOIN pg_class ic ON ic.oid = i.indexrelid
-      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey::smallint[])
-     WHERE i.indrelid IN (to_regclass('fondo_api_schedulertask')::oid,
-                          to_regclass('fondo_api_notificationsubscriptions')::oid)
-       AND a.attname IN ('payload', 'subscription')
-    UNION ALL
-    SELECT 'view/rule ' || rw.rulename || ' on ' || cl.relname
+    SELECT DISTINCT
+           coalesce(
+             -- a rewrite rule (a view is a rule on its own relation): name the relation.
+             (SELECT 'view/rule ' || rw.rulename || ' on ' || cl.relname
+                FROM pg_rewrite rw JOIN pg_class cl ON cl.oid = rw.ev_class
+               WHERE d.classid = 'pg_rewrite'::regclass AND rw.oid = d.objid),
+             -- anything else: its catalog and its name, via the generic description.
+             pg_describe_object(d.classid, d.objid, d.objsubid)
+           ) AS what
       FROM pg_depend d
-      JOIN pg_rewrite rw ON rw.oid = d.objid
-      JOIN pg_class cl ON cl.oid = rw.ev_class
-      JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
-     WHERE d.classid = 'pg_rewrite'::regclass
-       AND d.refclassid = 'pg_class'::regclass
+      JOIN pg_attribute a
+        ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+     WHERE d.refclassid = 'pg_class'::regclass
        AND d.refobjid IN (to_regclass('fondo_api_schedulertask')::oid,
                           to_regclass('fondo_api_notificationsubscriptions')::oid)
        AND a.attname IN ('payload', 'subscription')
+       AND d.deptype <> 'i'
+       -- ⚠️ **A NOT NULL constraint is not a blocker, and PostgreSQL 18 catalogues one.**
+       -- Measured 2026-09-15: on 18.6 this sweep returns
+       -- `constraint fondo_api_schedulertask_payload_not_null` and
+       -- `..._subscription_not_null` (`pg_constraint.contype = 'n'`, `deptype = 'a'`) for the
+       -- untouched reference data, while on 17.11 it returns nothing — PG18 materialises
+       -- NOT NULL in `pg_constraint` and 17 does not. `ALTER COLUMN ... TYPE` carries a NOT
+       -- NULL across without complaint, so excluding `contype = 'n'` is correct rather than
+       -- convenient. A CHECK constraint (`contype = 'c'`) is still reported.
+       AND NOT (d.classid = 'pg_constraint'::regclass
+                AND (SELECT c.contype FROM pg_constraint c WHERE c.oid = d.objid) = 'n')
   LOOP
     offenders := offenders || r.what;
   END LOOP;
@@ -255,6 +279,6 @@ BEGIN
   IF array_length(offenders, 1) IS NOT NULL THEN
     RAISE EXCEPTION 'PHASE 9 STEP 6 PREFLIGHT: % dependent object(s) on the columns being converted: %',
       array_length(offenders, 1), array_to_string(offenders, ', ')
-      USING HINT = 'An index is rebuilt (and an hstore-specific opclass cannot be); a view or rule makes ALTER COLUMN TYPE refuse outright. Drop them deliberately, then re-run.';
+      USING HINT = 'An index is rebuilt (and an expression or hstore-opclass index cannot be); a view or rule makes ALTER COLUMN TYPE refuse outright. Drop them deliberately, then re-run.';
   END IF;
 END $$;

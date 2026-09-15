@@ -76,6 +76,10 @@ case "$MODE" in
     # a. same database, same server as the pre-image. A verification run against a different
     #    database than the one that was converted is the failure mode B3 is about.
     check "identity: database" "$(val "SELECT current_database()")" "$(pre database)"
+    # ⚠️ review N3 — the pre-image captured `host` and nothing compared it. A verification run
+    # against a same-named database on a *different* server (a restored copy, a replica, a
+    # staging clone) passed the two remaining identity lines.
+    check "identity: host"     "$(val "SELECT coalesce(host(inet_server_addr())::text,'<local socket>')")" "$(pre host)"
     check "identity: port"     "$(val "SELECT coalesce(inet_server_port()::text,'<local socket>')")" "$(pre port)"
 
     # b. both columns converted.
@@ -123,6 +127,14 @@ case "$MODE" in
     #    means something touched the table outside the migration — e.g. a writer that was not
     #    quiesced. (It is a weak probe in general — see step6-prove.sh's M6 note — but here it
     #    is being used for the one thing it does say: "one transaction wrote all of this".)
+    #
+    # 🔴 **This check has a shelf life — review N4.** It is only true while nothing has written
+    # since the conversion. The moment Release B serves a subscribe, an unsubscribe or a
+    # scheduler pass, the cardinality rises and **that is correct behaviour, not a fault**. So
+    # this script is a *step 6.4* instrument, run between the migration and the Release B
+    # rollout. Re-running it during a later incident will report these two lines as FAIL for a
+    # healthy system; runbook §6.7 says so, and so does this comment, because an operator at
+    # 3am reads the script, not the document.
     for t in "${TABLES[@]}"; do
       check "xmin cardinality: $t" "$(val "SELECT count(DISTINCT xmin::text) FROM $t")" 1
     done

@@ -63,12 +63,23 @@ export async function provisionTestDatabase(): Promise<void> {
   // convert `fondo_api_test` to jsonb on its next run, and Release A cannot read jsonb
   // (measured: 25 of 38 cells fail in two suites). The ambient value must not reach here.
   //
-  // ⚠️ **Stage 2b note (condition C92).** The step-6 directory stays outside
-  // `prisma/migrations` until step 6 has run in production. When Release B's code lands, this
-  // provisioner needs **two sequential `migrate deploy` runs** — `prisma/migrations`, then
-  // `prisma/migrations-step6` — rather than the directory being moved: moving it would put
-  // the one-way door back into the path every production deploy applies. Until then the
-  // second run must NOT be added, or Release A's own suites stop passing.
+  // ⚠️ **Stage 2a note (conditions C92, C94).** The step-6 directory stays outside
+  // `prisma/migrations` — through Release B and past cutover — because moving it would put
+  // the one-way door back into the ledger every production deploy applies (Q56).
+  //
+  // So when **Release B's code lands (stage 2a)**, this provisioner needs **two sequential
+  // `migrate deploy` runs** — `prisma/migrations`, then `prisma/migrations-step6` — added in
+  // **the same commit** as the hstore codec's deletion. Not before: until that commit the
+  // suites are Release A's, they read hstore, and a second run here converts `fondo_api_test`
+  // and stops them passing.
+  //
+  // ⚠️ Getting the stage wrong here is not cosmetic — it is **C94**. A developer who starts
+  // stage 2a and finds every e2e suite dying at bootstrap on `SchemaShapeError` has one
+  // obvious-looking way out — `git mv prisma/migrations-step6/* prisma/migrations/` — and that
+  // is precisely the move C92 exists to prevent. The fix is the second run below, not the move.
+  //
+  // **Stage 2b** — after step 6 has run in production — is the directory move and deleting
+  // `PRISMA_MIGRATIONS_PATH`, and nothing else.
   execFileSync('npx', ['prisma', 'migrate', 'deploy'], {
     env: {
       ...process.env,

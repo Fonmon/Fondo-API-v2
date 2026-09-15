@@ -398,7 +398,68 @@ describe('Phase 9 step 6 — hstore -> jsonb', () => {
       );
       const message = await run(PREFLIGHT);
       expect(message).toContain('dependent object(s) on the columns being converted');
-      expect(message).toContain('index step6_dependent_probe on fondo_api_schedulertask.payload');
+      expect(message).toContain('index step6_dependent_probe');
+    });
+
+    /**
+     * **C95 — the shape the first version of check 7 could not see.**
+     *
+     * It joined `pg_attribute` on `a.attnum = ANY(i.indkey)`, and `indkey` holds **0** for an
+     * expression column, so an expression index returned nothing from the preflight and then
+     * aborted the *conversion* with the masked `current transaction is aborted` — the exact
+     * failure the two-file split exists to prevent. The check is now a `pg_depend` sweep.
+     */
+    it('C95: refuses an EXPRESSION index, which indkey cannot report', async () => {
+      await freshCorpus();
+      await client.query(
+        `CREATE INDEX step6_expr_probe ON fondo_api_schedulertask (akeys(payload))`,
+      );
+      const message = await run(PREFLIGHT);
+      expect(message).toContain('dependent object(s) on the columns being converted');
+      expect(message).toContain('index step6_expr_probe');
+    });
+
+    it('C95: refuses a partial index whose PREDICATE mentions the column', async () => {
+      await freshCorpus();
+      await client.query(
+        `CREATE INDEX step6_partial_probe ON fondo_api_schedulertask (id) WHERE payload ? 'type'`,
+      );
+      expect(await run(PREFLIGHT)).toContain('index step6_partial_probe');
+    });
+
+    it('C95: refuses a CHECK constraint on the column', async () => {
+      await freshCorpus();
+      await client.query(
+        // Satisfied by every corpus row, the empty hstore included — the point of the cell is
+        // that the constraint is *detected*, not that it is violated.
+        `ALTER TABLE fondo_api_schedulertask ADD CONSTRAINT step6_check_probe CHECK (akeys(payload) IS NOT NULL)`,
+      );
+      expect(await run(PREFLIGHT)).toContain('constraint step6_check_probe');
+    });
+
+    /**
+     * ⚠️ The sweep's one deliberate exclusion, and it is version-dependent.
+     *
+     * **PostgreSQL 18 materialises `NOT NULL` as a `pg_constraint` row** (`contype = 'n'`,
+     * `deptype = 'a'`) that depends on the column; **17 does not**. Measured 2026-09-15 on the
+     * reference clones: the unfiltered sweep returns
+     * `constraint fondo_api_schedulertask_payload_not_null` + the subscription one on 18.6 and
+     * nothing on 17.11. `ALTER COLUMN ... TYPE` carries a NOT NULL across without complaint,
+     * so this is a correct exclusion rather than a convenient one — and this cell is what
+     * stops it being widened to "ignore constraints", which would hide the CHECK above.
+     */
+    it('C95: does NOT refuse the column’s own NOT NULL constraint', async () => {
+      await freshCorpus();
+      // Both corpus columns are already NOT NULL, exactly as in `fondodev`.
+      const notNull = await client.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM information_schema.columns
+          WHERE table_schema = $1 AND is_nullable = 'NO'
+            AND (table_name, column_name) IN (('fondo_api_schedulertask','payload'),
+                                              ('fondo_api_notificationsubscriptions','subscription'))`,
+        [STEP6_SCHEMA],
+      );
+      expect(notNull.rows[0].n).toBe('2');
+      expect(await run(PREFLIGHT)).toBeNull();
     });
 
     it('refuses a view that reads a column being converted, by name (M3)', async () => {
