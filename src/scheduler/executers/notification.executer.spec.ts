@@ -7,10 +7,15 @@ import { NotificationExecuter } from './notification.executer';
 /**
  * `fondo_api/scheduler/executers/notification_executer.py`, unit level.
  *
- * The payload is a **real** one — the hstore rendering of `fondodev` row 2458, the birthday
- * task v1 wrote for owner 5 — parsed into the map `parseHstore` produces. Every value is a
- * string, which is the whole point: `user_ids` is a Python list repr that happens to be valid
- * JSON, and `owner_id` is text.
+ * The payload is a **real** one — `fondodev` row 2458, the birthday task v1 wrote for owner 5,
+ * **as Phase 9 step 6 left it**: `user_ids` a real JSON array, every other member still a JSON
+ * string, `owner_id` included.
+ *
+ * ⚠️ **Do not "restore" `user_ids` to `'[2, 4, …]'`.** That was its shape while the column was
+ * `hstore` and v1 `json.loads`-ed it on every read; the migration's repair pass did that once,
+ * in all 626 rows, so the string form no longer exists in any database this code runs against.
+ * Writing it back here would make the fixture stop being the live row it claims to be — and
+ * `requireUserIds` would throw on it, which is the behaviour C99 documents on both sides.
  *
  * v1 has **no** test for this class.
  */

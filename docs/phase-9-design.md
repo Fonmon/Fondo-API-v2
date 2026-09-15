@@ -115,15 +115,27 @@ The plan's rule is *"`0_init` stays at `applied_steps_count = 0` — do not repa
 | **M-D34-5** | the same file wrapped in `BEGIN; … COMMIT;` | exit 1 and **the column is gone** — atomic | **same** (`zz_probe_columns=0`) |
 | **M-D34-6** | `RAISE EXCEPTION` *inside* `BEGIN; … COMMIT;` | the operator sees `ERROR: current transaction is aborted…` — the RAISE text is **lost** | **same** |
 | **M-D34-7** | the same `RAISE` as the first statement, no explicit transaction | `P3018 … P0001 … ERROR: STEP6 PREFLIGHT FAILED: 3 unparseable rows: {1,2,3}` — verbatim | **same** |
-| **M-D34-8** | edit an **already-applied** migration file (append a comment) and re-run `migrate deploy` | `No pending migrations to apply.`, **exit 0** — `deploy` keys on the migration *name* and does **not** verify the checksum of an applied migration | — |
+| **M-D34-8a** | edit an **already-applied** migration file and re-run `migrate status` / `migrate deploy` — both an appended comment **and a total replacement of the body** | `Database schema is up to date!` / `No pending migrations to apply.`, **exit 0** in every case, and the ledger `checksum` is **untouched** (`3582d8db7f5b930b` before and after). `deploy` keys on the migration *name*; it does not verify an applied migration's checksum | — |
+| **M-D34-8b** | deploy that **same replaced file** into a database that had never seen it | `Applying migration '…_step6_preflight'` → `Error: P3018`, `Database error code: P0001`, the `P0001` text verbatim, **exit 1**, and a failed ledger row | — |
 
-⚠️ **M-D34-8 cuts both ways.** It is why a documentation-only edit to
-`_step6_preflight/migration.sql` (condition **C99**) is safe against every database that has
-already applied it — measured on `fondo_api_test`, not assumed. It is also why **a change to
-that file's SQL would not be noticed either**: a database that ran the old version reports
-itself up to date. Before step 6 runs in production that is harmless, because no production
-database has applied anything; after it, treat these four files as frozen and add a new
-migration instead.
+🔴 **M-D34-8 is not "the change is lost" — it is a silent divergence between two populations.**
+Reproduced here 2026-09-15 and independently by `nestjs-reviewer`, on the same file in the same
+minute: exit **0** against a database that already ran the migration, exit **1** against one
+that had not.
+
+So after step 6 commits, **production keeps whatever it actually ran**, while **every database
+built afterwards gets the new text** — CI, `fondo_api_test`, a parity clone, a
+disaster-recovery rebuild. Nothing compares the two. The proof suite would be scoring SQL that
+production does not contain, and it would pass.
+
+⚠️ **The instruction, and it is not negotiable after step 6 commits: these four files are
+frozen. A change is a new migration, never an edit.** That is also what makes condition
+**C99**'s documentation-only edit safe *now* — no production database has applied anything yet.
+
+⚠️ **`migrate dev` is the only Prisma command that detects this divergence, and it is
+forbidden here** (plan §5 D34, standing since Phase 0: it drops and recreates on drift, and it
+reads Django's 38 tables as drift from `0_init`). It must not be offered as a mitigation. The
+mitigation is the freeze.
 
 **Finding: no conflict with the plan.** Prisma treats a migration as applied when
 `finished_at IS NOT NULL AND rolled_back_at IS NULL`; `applied_steps_count` is informational
@@ -561,8 +573,10 @@ holds SQS bodies to a byte-identical criterion.
 - **The conversion is unchanged.** jsonb cannot hold a non-canonical member order, so the
   order cannot be preserved in storage. It is preserved on the **emit** side.
 - **Release B pins the order where the SQS body is built** — `p256dh` first, then `auth` —
-  with a cell that fails if it flips. **Implementation belongs to stage 2a**, on Release B's
-  emit path; it is listed there in this document's stage table.
+  with cells that fail if it flips. ✅ **Landed in stage 2a**: `pinKeysMemberOrder`
+  (`src/notifications/push-subscription.ts`), applied inside
+  `NotificationSubscriptionRepository.findPushSubscriptionsByUserIds`, which every SQS body
+  passes through; 15 unit cells including 5 mutation controls, plus the e2e cell in §9.
 - ⚠️ **After step 6 the stored order no longer exists.** Today the pin can be checked against
   the database; afterwards **the pin is the only thing holding it**, and the only evidence that
   it is the right order is the measurement recorded here and in
@@ -583,18 +597,30 @@ a remembered one.
 
 ### 6.1 Release A, Release B, and where the migrations live
 
-|  | **Release A** — the cutover build (runbook step 3) | **Release B** — after step 6 |
+⚠️ **Release A is an artifact, not a state of this branch.** It is the tag
+**`release-a-cutover`** at commit **`5d019d9`** — annotated, frozen, and gated on an **hstore**
+test database (lint 0, `tsc` 0, 2619 / 82 unit, 1386 + 2 skipped e2e, fixture 0 / control 1).
+Cutover step 3 deploys that tag. Head is Release B. The column below is written in the past
+tense because nothing on head is Release A any more.
+
+|  | **Release A** — tag `release-a-cutover` (`5d019d9`), deployed at runbook step 3 | **Release B** — head, after step 6 |
 |---|---|---|
 | schema it runs on | **hstore** | **jsonb** |
 | `schema.prisma` | `Unsupported("hstore")` ×2, no unique constraints | `Json @db.JsonB` ×2, `@unique` on `loan_id` and `user_id` ×2 |
 | hstore codec | present | **deleted** |
 | the two repositories | raw SQL with `::text` / `::hstore` casts | ordinary Prisma models |
-| nested `keys` order on SQS | comes from the stored repr (`p256dh, auth`) | **pinned explicitly** (C91 / Q60) |
-| boot guard | `SchemaShapeGuard`, requires **hstore** — **ships in this commit** (Q57, C93) | same guard, one constant flipped to **jsonb** |
+| nested `keys` order on SQS | came from the stored repr (`p256dh, auth`) | **pinned explicitly** (C91 / Q60) |
+| boot guard | `SchemaShapeGuard`, required **hstore** — shipped **in the tag** (Q57, C93) | same guard, one constant flipped to **jsonb** |
+| `test/test-database.ts` | **one** `migrate deploy` (`prisma/migrations`) — the test database is hstore | **two**, the second `prisma/migrations-step6` (C94) |
 | `prisma/migrations` holds | `0_init` only | **`0_init` only** — unchanged |
 | `prisma/migrations-step6` | present, **outside** the default ledger | present, **still outside** it |
 | what a production deploy migrates | nothing (`0_init` is already applied — a no-op) | nothing |
 | step 6 itself | — | an **operator-run** `migrate deploy` with `PRISMA_MIGRATIONS_PATH` set inline, between A and B |
+
+🔴 **A fix to Release A is made on the tag, and must not carry head's second `migrate deploy`.**
+Cherry-picking it into a Release A build converts that build's hstore test database to jsonb, so
+its own suites then exercise a schema the artifact cannot boot on — a green gate for the wrong
+database. §7.3 is the measurement of what that looks like from the other side.
 
 **Stage 2a** adds the second `migrate deploy` to `test/test-database.ts`, in the same commit as
 the codec deletion (**C94** — its trigger is "Release B's code lands", which is 2a).
@@ -688,6 +714,17 @@ fund's only payment-reminder path. The operator chose the guard in **both** dire
 >    `userfinance_userpreference_unique_user_id` (**D11**). Expect `applied_steps_count = 1` on
 >    each new row and **`0_init` still at 0** (**D34**, C39). If anything stops, go to **6.7**.
 >
+>    🔴 **From the moment this commits, the four files under `prisma/migrations-step6` are
+>    frozen. A change is a new migration, never an edit.** Measured (M-D34-8): editing an
+>    applied migration — a comment *or* a total replacement of its body — leaves
+>    `migrate status` and `migrate deploy` at **exit 0** with the ledger checksum untouched
+>    (`3582d8db7f5b930b` before and after), while **the same file on a database that never ran
+>    it is executed** and raised `P3018` / `P0001`, exit 1. So an edit does not get lost — it
+>    splits the estate: production keeps what it ran, every database built afterwards (CI,
+>    `fondo_api_test`, a clone, a DR rebuild) gets the new text, and nothing compares them.
+>    ⚠️ `migrate dev` is the only command that would detect it and is **forbidden against any
+>    database this project touches**; the freeze is the mitigation, not a tool.
+>
 >    **6.4 Verify — with an exit code, not by eye.**
 >    ```bash
 >    scripts/parity/step6-verify.sh verify ~/step6-preimage.txt   # must exit 0
@@ -725,7 +762,7 @@ fund's only payment-reminder path. The operator chose the guard in **both** dire
 >    | `ERROR: current transaction is aborted, commands ignored…` | both columns still `hstore`; the failed row is `…_hstore_to_jsonb` | The conversion's own post-conditions failed inside its transaction and the real message is masked (measured — M-D34-6). **Nothing was changed.** Get the readable reason from 6.9, then 6.8. |
 >    | `could not create unique index "fondo_api_…_key"` | both columns **`jsonb`** (the conversion committed); the failed row is one of the two `unique` migrations | The door is already shut; this is not a rollback situation. Resolve the duplicate rows by hand, then 6.8, then re-run 6.3 — the applied migrations are skipped. |
 >    | `P3009 … migration started at … failed` on a later attempt | whatever the previous failure left | A previous run left a failed ledger row. Confirm the schema state with 6.4's column check **before** anything else, then 6.8. |
->    | Release B refuses to boot: *"requires the step-6 columns to be jsonb"* | both columns still `hstore` | The conversion did not run. **Redeploy the Release A image** — it boots on hstore — and start again at 6.3. |
+>    | Release B refuses to boot: *"requires the step-6 columns to be jsonb"* | both columns still `hstore` | The conversion did not run. **Redeploy the `release-a-cutover` tag** (commit `5d019d9`) — it is the build that boots on hstore — and start again at 6.3. |
 >    | Release A refuses to boot: *"already had the step-6 migration applied; deploy Release B instead"* | both columns `jsonb` | Expected. Deploy Release B; do not try to get Release A up. |
 >    | `step6-verify.sh verify` FAILs **only** on the two `xmin cardinality` lines, during a later incident | both columns `jsonb`, everything else PASS | 🔴 **Not a fault — review N4.** Those two lines mean "one transaction wrote all of this", which stops being true the moment Release B serves a subscribe or runs a scheduler pass. `step6-verify.sh` is a **step 6.4 instrument**, valid between the migration and the Release B rollout. Ignore those two lines after that point; every other check still holds. |
 >
@@ -873,7 +910,7 @@ Landed in one commit, as the reviewer asked. Every item is verifiable from the t
 | the storage rule | `src/common/utils/jsonb-storage.ts` (new) | `encodeJsonbColumn(source, nativeKeys)`: `user_ids` / `keys` keep their JSON type, everything else is `str()`-ed. **`owner_id` stays `"53"`** |
 | both repositories on Prisma models | `notification-subscription.repository.ts`, `scheduler-task.repository.ts` | `create` / `delete` / `deleteMany` / `updateMany` / `findMany` / JSON `path` filters |
 | `schema.prisma` | `Json @db.JsonB` ×2, `@unique` ×3 | **`migrate diff` against the migrated clone is empty** — the five statements of §4.7, resolved |
-| the boot guard flipped | `REQUIRED_COLUMN_TYPE = 'jsonb'` | the Release A image is the same file with `'hstore'`; both directions, Q57 |
+| the boot guard flipped | `REQUIRED_COLUMN_TYPE = 'jsonb'` | the same file on tag **`release-a-cutover`** (`5d019d9`) has `'hstore'`; both directions, Q57. ⚠️ **That tag is frozen.** A fix to Release A is made **on the tag**, and must **not** carry head's second `migrate deploy` in `test/test-database.ts`: it would convert that build's hstore test database to jsonb and gate the artifact against a schema it cannot boot on |
 | **C91's pin** | `src/notifications/push-subscription.ts` (new) | `pinKeysMemberOrder`, applied where every SQS body passes |
 | the provisioner's second deploy | `test/test-database.ts` | C94 — two sequential `migrate deploy` runs, with `STEP6_CONFIRM` computed, never written down |
 | C83 | `loans/loan-path-id.ts`, `activities/activity-path-id.ts` | both delegate to `common/http/django-int-path-id.ts`; three implementations became one |
