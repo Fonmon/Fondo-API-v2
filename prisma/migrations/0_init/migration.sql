@@ -1,5 +1,42 @@
-◇ injected env (13) from .env // tip: ⌘ custom filepath { path: '/custom/path/.env' }
-prisma migrations ledger: prisma/migrations
+-- Fondo-API v2 — BASELINE migration.
+--
+-- A *snapshot* of the schema Django (v1) created, taken at Django migration
+-- `0019_auto_20220313_1225`. On every database v1 created it is marked as already-applied
+-- (`prisma migrate resolve --applied 0_init`) and never executed; it only ever runs against
+-- a brand-new database, e.g. the CI test database.
+--
+-- Generated with:
+--   npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script \
+--     --output prisma/migrations/0_init/migration.sql
+-- then hand-edited. If you ever regenerate it, RE-APPLY ALL THREE EDITS:
+--
+--   1. `CREATE EXTENSION IF NOT EXISTS hstore` (prepended). Required by the two hstore
+--      columns. Django's migration `0002` installs it via `HStoreExtension()`; Prisma cannot
+--      express an extension dependency for an `Unsupported()` column type.
+--
+--   2. Every FOREIGN KEY gained `DEFERRABLE INITIALLY DEFERRED`. That is how Django created
+--      all 21 FKs in this database and Prisma's datamodel cannot express deferrability.
+--      Without it a CI-provisioned database enforces FKs at statement time while production
+--      enforces them at commit time — a difference that only ever surfaces as a flaky
+--      integration test.
+--
+--   3. The five Django `%_like` indexes gained their operator classes
+--      (`varchar_pattern_ops` / `text_pattern_ops`). Prisma *can* express these with
+--      `ops: raw(...)`, but `prisma db pull` does not read them back, so putting them in
+--      schema.prisma produces permanent phantom drift. Keeping them here instead leaves
+--      `migrate diff` empty in both directions while still reproducing Django's indexes.
+--
+-- Known, accepted cosmetic differences from a Django-built database (verified with pg_dump):
+--   * Prisma writes `timestamp(6) with time zone`, Django writes `timestamp with time zone`.
+--     Identical: 6 is the PostgreSQL default precision.
+--   * Prisma enforces uniqueness with `CREATE UNIQUE INDEX`, Django with
+--     `ALTER TABLE ... ADD CONSTRAINT ... UNIQUE`. Enforcement and index names are
+--     identical; only `ON CONFLICT ON CONSTRAINT <name>` would tell them apart, and no
+--     code uses that form.
+
+-- CreateExtension
+CREATE EXTENSION IF NOT EXISTS "hstore";
+
 -- CreateSchema
 CREATE SCHEMA IF NOT EXISTS "public";
 
@@ -205,7 +242,7 @@ CREATE TABLE "fondo_api_activityuser" (
 -- CreateTable
 CREATE TABLE "fondo_api_notificationsubscriptions" (
     "id" SERIAL NOT NULL,
-    "subscription" JSONB NOT NULL,
+    "subscription" hstore NOT NULL,
     "user_id" INTEGER NOT NULL,
 
     CONSTRAINT "fondo_api_notificationsubscriptions_pkey" PRIMARY KEY ("id")
@@ -216,7 +253,7 @@ CREATE TABLE "fondo_api_schedulertask" (
     "id" SERIAL NOT NULL,
     "type" INTEGER NOT NULL,
     "run_date" TIMESTAMPTZ(6) NOT NULL,
-    "payload" JSONB NOT NULL,
+    "payload" hstore NOT NULL,
     "processed" BOOLEAN NOT NULL,
     "repeat" INTEGER NOT NULL,
 
@@ -260,7 +297,7 @@ CREATE TABLE "fondo_api_savingaccount" (
 CREATE UNIQUE INDEX "auth_group_name_key" ON "auth_group"("name");
 
 -- CreateIndex
-CREATE INDEX "auth_group_name_a6ea08ec_like" ON "auth_group"("name");
+CREATE INDEX "auth_group_name_a6ea08ec_like" ON "auth_group"("name" varchar_pattern_ops);
 
 -- CreateIndex
 CREATE INDEX "auth_group_permissions_group_id_b120cbf9" ON "auth_group_permissions"("group_id");
@@ -281,7 +318,7 @@ CREATE UNIQUE INDEX "auth_permission_content_type_id_codename_01ab375a_uniq" ON 
 CREATE UNIQUE INDEX "auth_user_username_key" ON "auth_user"("username");
 
 -- CreateIndex
-CREATE INDEX "auth_user_username_6821ab7c_like" ON "auth_user"("username");
+CREATE INDEX "auth_user_username_6821ab7c_like" ON "auth_user"("username" varchar_pattern_ops);
 
 -- CreateIndex
 CREATE INDEX "auth_user_groups_group_id_97559544" ON "auth_user_groups"("group_id");
@@ -305,7 +342,7 @@ CREATE UNIQUE INDEX "auth_user_user_permissions_user_id_permission_id_14a6b632_u
 CREATE UNIQUE INDEX "authtoken_token_user_id_key" ON "authtoken_token"("user_id");
 
 -- CreateIndex
-CREATE INDEX "authtoken_token_key_10f0b77e_like" ON "authtoken_token"("key");
+CREATE INDEX "authtoken_token_key_10f0b77e_like" ON "authtoken_token"("key" varchar_pattern_ops);
 
 -- CreateIndex
 CREATE UNIQUE INDEX "django_content_type_app_label_model_76bd3d3b_uniq" ON "django_content_type"("app_label", "model");
@@ -314,7 +351,7 @@ CREATE UNIQUE INDEX "django_content_type_app_label_model_76bd3d3b_uniq" ON "djan
 CREATE INDEX "django_session_expire_date_a5c62663" ON "django_session"("expire_date");
 
 -- CreateIndex
-CREATE INDEX "django_session_session_key_c0390e0f_like" ON "django_session"("session_key");
+CREATE INDEX "django_session_session_key_c0390e0f_like" ON "django_session"("session_key" varchar_pattern_ops);
 
 -- CreateIndex
 CREATE UNIQUE INDEX "fondo_api_userprofile_identification_key" ON "fondo_api_userprofile"("identification");
@@ -323,13 +360,7 @@ CREATE UNIQUE INDEX "fondo_api_userprofile_identification_key" ON "fondo_api_use
 CREATE INDEX "fondo_api_userpreference_user_id_c39c1264" ON "fondo_api_userpreference"("user_id");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "fondo_api_userpreference_user_id_key" ON "fondo_api_userpreference"("user_id");
-
--- CreateIndex
 CREATE INDEX "fondo_api_userfinance_user_id_9645b2bd" ON "fondo_api_userfinance"("user_id");
-
--- CreateIndex
-CREATE UNIQUE INDEX "fondo_api_userfinance_user_id_key" ON "fondo_api_userfinance"("user_id");
 
 -- CreateIndex
 CREATE INDEX "fondo_api_loan_prev_loan_id_9235a32d" ON "fondo_api_loan"("prev_loan_id");
@@ -339,9 +370,6 @@ CREATE INDEX "fondo_api_loan_user_id_f4df893f" ON "fondo_api_loan"("user_id");
 
 -- CreateIndex
 CREATE INDEX "fondo_api_loandetail_loan_id_6a9fa8c0" ON "fondo_api_loandetail"("loan_id");
-
--- CreateIndex
-CREATE UNIQUE INDEX "fondo_api_loandetail_loan_id_key" ON "fondo_api_loandetail"("loan_id");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "fondo_api_activityyear_year_key" ON "fondo_api_activityyear"("year");
@@ -362,7 +390,7 @@ CREATE INDEX "fondo_api_notificationsubscriptions_user_id_5954476e" ON "fondo_ap
 CREATE UNIQUE INDEX "fondo_api_file_display_name_key" ON "fondo_api_file"("display_name");
 
 -- CreateIndex
-CREATE INDEX "fondo_api_file_display_name_4fdf1fd2_like" ON "fondo_api_file"("display_name");
+CREATE INDEX "fondo_api_file_display_name_4fdf1fd2_like" ON "fondo_api_file"("display_name" text_pattern_ops);
 
 -- CreateIndex
 CREATE INDEX "fondo_api_power_requestee_id_e5f04cf8" ON "fondo_api_power"("requestee_id");
@@ -374,65 +402,64 @@ CREATE INDEX "fondo_api_power_requester_id_59064a2c" ON "fondo_api_power"("reque
 CREATE INDEX "fondo_api_savingaccount_user_id_b7105f36" ON "fondo_api_savingaccount"("user_id");
 
 -- AddForeignKey
-ALTER TABLE "auth_group_permissions" ADD CONSTRAINT "auth_group_permissio_permission_id_84c5c92e_fk_auth_perm" FOREIGN KEY ("permission_id") REFERENCES "auth_permission"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "auth_group_permissions" ADD CONSTRAINT "auth_group_permissio_permission_id_84c5c92e_fk_auth_perm" FOREIGN KEY ("permission_id") REFERENCES "auth_permission"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "auth_group_permissions" ADD CONSTRAINT "auth_group_permissions_group_id_b120cbf9_fk_auth_group_id" FOREIGN KEY ("group_id") REFERENCES "auth_group"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "auth_group_permissions" ADD CONSTRAINT "auth_group_permissions_group_id_b120cbf9_fk_auth_group_id" FOREIGN KEY ("group_id") REFERENCES "auth_group"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "auth_permission" ADD CONSTRAINT "auth_permission_content_type_id_2f476e4b_fk_django_co" FOREIGN KEY ("content_type_id") REFERENCES "django_content_type"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "auth_permission" ADD CONSTRAINT "auth_permission_content_type_id_2f476e4b_fk_django_co" FOREIGN KEY ("content_type_id") REFERENCES "django_content_type"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "auth_user_groups" ADD CONSTRAINT "auth_user_groups_group_id_97559544_fk_auth_group_id" FOREIGN KEY ("group_id") REFERENCES "auth_group"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "auth_user_groups" ADD CONSTRAINT "auth_user_groups_group_id_97559544_fk_auth_group_id" FOREIGN KEY ("group_id") REFERENCES "auth_group"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "auth_user_groups" ADD CONSTRAINT "auth_user_groups_user_id_6a12ed8b_fk_auth_user_id" FOREIGN KEY ("user_id") REFERENCES "auth_user"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "auth_user_groups" ADD CONSTRAINT "auth_user_groups_user_id_6a12ed8b_fk_auth_user_id" FOREIGN KEY ("user_id") REFERENCES "auth_user"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "auth_user_user_permissions" ADD CONSTRAINT "auth_user_user_permi_permission_id_1fbb5f2c_fk_auth_perm" FOREIGN KEY ("permission_id") REFERENCES "auth_permission"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "auth_user_user_permissions" ADD CONSTRAINT "auth_user_user_permi_permission_id_1fbb5f2c_fk_auth_perm" FOREIGN KEY ("permission_id") REFERENCES "auth_permission"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "auth_user_user_permissions" ADD CONSTRAINT "auth_user_user_permissions_user_id_a95ead1b_fk_auth_user_id" FOREIGN KEY ("user_id") REFERENCES "auth_user"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "auth_user_user_permissions" ADD CONSTRAINT "auth_user_user_permissions_user_id_a95ead1b_fk_auth_user_id" FOREIGN KEY ("user_id") REFERENCES "auth_user"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "authtoken_token" ADD CONSTRAINT "authtoken_token_user_id_35299eff_fk_auth_user_id" FOREIGN KEY ("user_id") REFERENCES "auth_user"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "authtoken_token" ADD CONSTRAINT "authtoken_token_user_id_35299eff_fk_auth_user_id" FOREIGN KEY ("user_id") REFERENCES "auth_user"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_userprofile" ADD CONSTRAINT "fondo_api_userprofile_user_ptr_id_9438f85d_fk_auth_user_id" FOREIGN KEY ("user_ptr_id") REFERENCES "auth_user"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_userprofile" ADD CONSTRAINT "fondo_api_userprofile_user_ptr_id_9438f85d_fk_auth_user_id" FOREIGN KEY ("user_ptr_id") REFERENCES "auth_user"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_userpreference" ADD CONSTRAINT "fondo_api_userprefer_user_id_c39c1264_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_userpreference" ADD CONSTRAINT "fondo_api_userprefer_user_id_c39c1264_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_userfinance" ADD CONSTRAINT "fondo_api_userfinanc_user_id_9645b2bd_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_userfinance" ADD CONSTRAINT "fondo_api_userfinanc_user_id_9645b2bd_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_loan" ADD CONSTRAINT "fondo_api_loan_prev_loan_id_9235a32d_fk_fondo_api_loan_id" FOREIGN KEY ("prev_loan_id") REFERENCES "fondo_api_loan"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_loan" ADD CONSTRAINT "fondo_api_loan_prev_loan_id_9235a32d_fk_fondo_api_loan_id" FOREIGN KEY ("prev_loan_id") REFERENCES "fondo_api_loan"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_loan" ADD CONSTRAINT "fondo_api_loan_user_id_f4df893f_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_loan" ADD CONSTRAINT "fondo_api_loan_user_id_f4df893f_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_loandetail" ADD CONSTRAINT "fondo_api_loandetail_loan_id_6a9fa8c0_fk_fondo_api_loan_id" FOREIGN KEY ("loan_id") REFERENCES "fondo_api_loan"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_loandetail" ADD CONSTRAINT "fondo_api_loandetail_loan_id_6a9fa8c0_fk_fondo_api_loan_id" FOREIGN KEY ("loan_id") REFERENCES "fondo_api_loan"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_activity" ADD CONSTRAINT "fondo_api_activity_year_id_aed3b367_fk_fondo_api" FOREIGN KEY ("year_id") REFERENCES "fondo_api_activityyear"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_activity" ADD CONSTRAINT "fondo_api_activity_year_id_aed3b367_fk_fondo_api" FOREIGN KEY ("year_id") REFERENCES "fondo_api_activityyear"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_activityuser" ADD CONSTRAINT "fondo_api_activityus_activity_id_d8912768_fk_fondo_api" FOREIGN KEY ("activity_id") REFERENCES "fondo_api_activity"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_activityuser" ADD CONSTRAINT "fondo_api_activityus_activity_id_d8912768_fk_fondo_api" FOREIGN KEY ("activity_id") REFERENCES "fondo_api_activity"("id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_activityuser" ADD CONSTRAINT "fondo_api_activityus_user_id_b53bb1a7_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_activityuser" ADD CONSTRAINT "fondo_api_activityus_user_id_b53bb1a7_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_notificationsubscriptions" ADD CONSTRAINT "fondo_api_notificati_user_id_5954476e_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_notificationsubscriptions" ADD CONSTRAINT "fondo_api_notificati_user_id_5954476e_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_power" ADD CONSTRAINT "fondo_api_power_requestee_id_e5f04cf8_fk_fondo_api" FOREIGN KEY ("requestee_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_power" ADD CONSTRAINT "fondo_api_power_requestee_id_e5f04cf8_fk_fondo_api" FOREIGN KEY ("requestee_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_power" ADD CONSTRAINT "fondo_api_power_requester_id_59064a2c_fk_fondo_api" FOREIGN KEY ("requester_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "fondo_api_power" ADD CONSTRAINT "fondo_api_power_requester_id_59064a2c_fk_fondo_api" FOREIGN KEY ("requester_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- AddForeignKey
-ALTER TABLE "fondo_api_savingaccount" ADD CONSTRAINT "fondo_api_savingacco_user_id_b7105f36_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION;
-
+ALTER TABLE "fondo_api_savingaccount" ADD CONSTRAINT "fondo_api_savingacco_user_id_b7105f36_fk_fondo_api" FOREIGN KEY ("user_id") REFERENCES "fondo_api_userprofile"("user_ptr_id") ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED;

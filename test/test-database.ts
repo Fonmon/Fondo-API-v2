@@ -57,13 +57,8 @@ export async function provisionTestDatabase(): Promise<void> {
   const admin = new Client({ connectionString: adminUrl });
   await admin.connect();
   try {
-    const existing = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [
-      databaseName,
-    ]);
-    if (existing.rowCount === 0) {
-      // Identifier, not a value - cannot be parameterised.
-      await admin.query(`CREATE DATABASE "${databaseName.replace(/"/g, '""')}"`);
-    }
+    await admin.query(`DROP DATABASE IF EXISTS "${databaseName.replace(/"/g, '""')}"`);
+    await admin.query(`CREATE DATABASE "${databaseName.replace(/"/g, '""')}"`);
   } finally {
     await admin.end();
   }
