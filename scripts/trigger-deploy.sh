@@ -20,7 +20,7 @@ if [ "$CODEBUILD_WEBHOOK_EVENT" == 'PUSH' ] && [ "$CODEBUILD_WEBHOOK_HEAD_REF" =
 		--document-name "AWS-RunShellScript" \
 		--comment "Deploying api layer" \
 		--instance-ids "i-06e827f552c3f56a0" \
-		--parameters commands="entrypoint_deploy master api master" \
+		--parameters commands="entrypoint_deploy main api-v2 master" \
 		--output text
 	echo 'Deploying in background'
 	exit 0

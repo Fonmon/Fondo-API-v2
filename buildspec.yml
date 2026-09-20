@@ -1,8 +1,6 @@
 version: 0.2
 env:
   shell: bash
-  parameter-store:
-    DOCKER_PASSWORD: /fonmon/DOCKER_PASSWORD
   variables:
     # Throwaway PostgreSQL for the test run. v1 used the same container-per-build shape.
     POSTGRES_DATABASE: "fondo_api_test"
@@ -25,7 +23,6 @@ phases:
     runtime-versions:
       nodejs: 24
     commands:
-      # - docker login -u minmiguelm -p $DOCKER_PASSWORD
       - docker pull postgres
       - docker run -d -p $POSTGRES_PORT:$POSTGRES_PORT --name fondo_db -e POSTGRES_PASSWORD=$POSTGRES_PASSWORD -e POSTGRES_USER=$POSTGRES_USER -e POSTGRES_DB=$POSTGRES_DATABASE postgres
       - npm ci
@@ -46,6 +43,6 @@ phases:
       - npm run typecheck
       - npm test
       - npm run test:e2e
-  post_build:
-    commands:
-      - bash scripts/trigger-deploy.sh
+  # post_build:
+  #   commands:
+  #     - bash scripts/trigger-deploy.sh
