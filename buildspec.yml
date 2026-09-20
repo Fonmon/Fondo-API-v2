@@ -13,7 +13,6 @@ env:
     TEST_DATABASE_URL: "postgresql://postgres:pwd@localhost:5432/fondo_api_test?schema=public"
     NODE_ENV: "test"
     ENVIRONMENT: "test"
-    # Same values v1's buildspec used, so ported email assertions keep passing.
     DEFAULT_FROM_EMAIL: "Fondo Montanez <no-reply@fonmon.minagle.com>"
     AWS_REGION: "us-east-2"
     HOST_URL_APP: "http://localhost:3000"
@@ -35,6 +34,7 @@ phases:
       # explicit step keeps v1's shape and fails loudly if the role cannot install it.
       # Drop this once Phase 9 converts both columns to jsonb.
       - docker exec -t fondo_db psql -c "CREATE EXTENSION IF NOT EXISTS hstore;" -U $POSTGRES_USER -d $POSTGRES_DATABASE
+      - npx prisma migrate resolve --applied 0_init
       - npx prisma migrate deploy
   build:
     commands:
