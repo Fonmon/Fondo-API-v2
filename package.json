@@ -8,13 +8,14 @@
     "node": ">=24"
   },
   "scripts": {
+    "prebuild": "DATABASE_URL=\"postgresql://dummy:dummy@localhost:5432/dummy\" npm run prisma:generate",
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/main",
     "prestart:prod": "npm run prisma:deploy",
+    "start:prod": "node dist/main",
     "lint": "eslint \"{src,test}/**/*.ts\"",
     "typecheck": "tsc --noEmit",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
@@ -23,8 +24,7 @@
     "test:e2e": "NODE_OPTIONS=--experimental-vm-modules jest --config ./test/jest-e2e.json --runInBand",
     "prisma:generate": "prisma generate",
     "prisma:pull": "prisma db pull",
-    "prisma:deploy": "prisma migrate deploy",
-    "postinstall": "prisma generate"
+    "prisma:deploy": "prisma migrate deploy"
   },
   "dependencies": {
     "@aws-sdk/client-ses": "^3.1121.0",
