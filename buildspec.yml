@@ -42,6 +42,6 @@ phases:
       - npm run typecheck
       - npm test
       - npm run test:e2e
-  # post_build:
-  #   commands:
-  #     - bash scripts/trigger-deploy.sh
+  post_build:
+    commands:
+      - bash scripts/trigger-deploy.sh
