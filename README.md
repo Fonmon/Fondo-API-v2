@@ -1,4 +1,4 @@
-# Fondo-API v2
+# Fondo-API v2 [![](https://codebuild.us-east-2.amazonaws.com/badges?uuid=eyJlbmNyeXB0ZWREYXRhIjoiZjBmNTM2a1VPTUw3MDlIa2VMemVYazhzZUtsSTF3N255MWE2cmNtZERydCtXRytlODlhZzFZU3IrSUFFaktxV1A4QTd4VzNoc29FbUNpMXpuVkhKVVlvPSIsIml2UGFyYW1ldGVyU3BlYyI6IkhHTlVMSVUxUWtpL2RFSnkiLCJtYXRlcmlhbFNldFNlcmlhbCI6MX0%3D&branch=main)]()
 
 NestJS + Prisma rewrite of the Fondo Montañez Django/DRF service.
 
