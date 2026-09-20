@@ -35,6 +35,7 @@ phases:
       # explicit step keeps v1's shape and fails loudly if the role cannot install it.
       # Drop this once Phase 9 converts both columns to jsonb.
       - docker exec -t fondo_db psql -c "CREATE EXTENSION IF NOT EXISTS hstore;" -U $POSTGRES_USER -d $POSTGRES_DATABASE
+      - npx prisma migrate resolve --applied 0_init
       - npx prisma migrate deploy
   build:
     commands:
