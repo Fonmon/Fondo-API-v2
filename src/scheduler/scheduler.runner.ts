@@ -19,6 +19,8 @@ import { SchedulerTaskRepository, type DueSchedulerTask } from './scheduler-task
  * `cronTime` against it instead of against a copy of itself.
  */
 export const SCHEDULER_CRON_EXPRESSION = '0 10,14 * * *';
+// export const SCHEDULER_CRON_EXPRESSION = '* * * * *';
+
 
 /** The `SchedulerRegistry` key, so tests and ops can find the job. */
 export const SCHEDULER_CRON_JOB = 'fondo:scheduler';
