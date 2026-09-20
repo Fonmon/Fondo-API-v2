@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/nest-cli",
+  "collection": "@nestjs/schematics",
+  "sourceRoot": "src",
+  "compilerOptions": {
+    "deleteOutDir": true,
+    "tsConfigPath": "tsconfig.build.json",
+    "assets": [
+      { "include": "mail/templates/**/*.eta", "outDir": "dist" },
+      { "include": "mail/templates/**/*.txt", "outDir": "dist" },
+      { "include": "password-reset/templates/**/*.eta", "outDir": "dist" }
+    ],
+    "watchAssets": true
+  }
+}

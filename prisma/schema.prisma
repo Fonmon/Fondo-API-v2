@@ -1,0 +1,405 @@
+// Fondo-API v2 — Prisma schema.
+//
+// This schema is a *mapping* of the PostgreSQL schema Django created (v1, frozen at
+// migration `0019_auto_20220313_1225`). It is NOT a redesign:
+//   * every model carries an `@@map` to its Django table name;
+//   * every field keeps its Django column name (snake_case) so DRF-compatible payloads
+//     line up 1:1 and no `@map` noise is needed;
+//   * indexes/constraints keep Django's generated names via `map:`.
+//
+// Rules that MUST be respected while Django owns the schema (through Phase 8):
+//   * NEVER run `prisma migrate dev` against a database v1 also uses. Introspect + baseline only.
+//   * Django declares `on_delete=CASCADE` in Python; the physical FKs are `NO ACTION`
+//     `DEFERRABLE INITIALLY DEFERRED`. Cascading deletes therefore have to be performed
+//     explicitly in v2 service code — the database will not do it for you.
+//   * `auto_now` / `auto_now_add` are application-set in Django, not DB defaults. There are
+//     no DEFAULTs on `created_at` / `last_modified` / `date_joined`: v2 must always supply
+//     them (America/Bogota semantics) or hit a NOT NULL violation.
+//   * The two `Unsupported("hstore")` columns cannot be read or written by Prisma Client.
+//     All access goes through the two dedicated raw-SQL repositories (Phases 2 and 7) and
+//     the Phase 0 hstore codec. They become `jsonb` in Phase 9, after cutover.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Django auth / contrib tables
+// ---------------------------------------------------------------------------
+
+model AuthGroup {
+  id          Int                   @id @default(autoincrement())
+  name        String                @unique @db.VarChar(150)
+  permissions AuthGroupPermission[]
+  users       AuthUserGroup[]
+
+  @@index([name], map: "auth_group_name_a6ea08ec_like")
+  @@map("auth_group")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model AuthGroupPermission {
+  id            Int            @id @default(autoincrement())
+  group_id      Int
+  permission_id Int
+  permission    AuthPermission @relation(fields: [permission_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_group_permissio_permission_id_84c5c92e_fk_auth_perm")
+  group         AuthGroup      @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_group_permissions_group_id_b120cbf9_fk_auth_group_id")
+
+  @@unique([group_id, permission_id], map: "auth_group_permissions_group_id_permission_id_0cd325b0_uniq")
+  @@index([group_id], map: "auth_group_permissions_group_id_b120cbf9")
+  @@index([permission_id], map: "auth_group_permissions_permission_id_84c5c92e")
+  @@map("auth_group_permissions")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model AuthPermission {
+  id              Int                      @id @default(autoincrement())
+  name            String                   @db.VarChar(255)
+  content_type_id Int
+  codename        String                   @db.VarChar(100)
+  group_links     AuthGroupPermission[]
+  content_type    DjangoContentType        @relation(fields: [content_type_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_permission_content_type_id_2f476e4b_fk_django_co")
+  user_links      AuthUserUserPermission[]
+
+  @@unique([content_type_id, codename], map: "auth_permission_content_type_id_codename_01ab375a_uniq")
+  @@index([content_type_id], map: "auth_permission_content_type_id_2f476e4b")
+  @@map("auth_permission")
+}
+
+/// Physical half #1 of Django's multi-table inheritance for `UserProfile(User)`.
+/// `username` is always kept equal to `email` (v1 sets `USERNAME_FIELD = 'email'` but
+/// still populates `username`). Passwords are `pbkdf2_sha256$<iterations>$<salt>$<b64hash>`.
+model AuthUser {
+  id               Int                      @id @default(autoincrement())
+  password         String                   @db.VarChar(128)
+  last_login       DateTime?                @db.Timestamptz(6)
+  is_superuser     Boolean
+  username         String                   @unique @db.VarChar(150)
+  first_name       String                   @db.VarChar(30)
+  last_name        String                   @db.VarChar(150)
+  email            String                   @db.VarChar(254)
+  is_staff         Boolean
+  is_active        Boolean
+  date_joined      DateTime                 @db.Timestamptz(6)
+  groups           AuthUserGroup[]
+  user_permissions AuthUserUserPermission[]
+  auth_token       AuthToken?
+  profile          UserProfile?
+
+  @@index([username], map: "auth_user_username_6821ab7c_like")
+  @@map("auth_user")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model AuthUserGroup {
+  id       Int       @id @default(autoincrement())
+  user_id  Int
+  group_id Int
+  group    AuthGroup @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_user_groups_group_id_97559544_fk_auth_group_id")
+  user     AuthUser  @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_user_groups_user_id_6a12ed8b_fk_auth_user_id")
+
+  @@unique([user_id, group_id], map: "auth_user_groups_user_id_group_id_94350c0c_uniq")
+  @@index([group_id], map: "auth_user_groups_group_id_97559544")
+  @@index([user_id], map: "auth_user_groups_user_id_6a12ed8b")
+  @@map("auth_user_groups")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model AuthUserUserPermission {
+  id            Int            @id @default(autoincrement())
+  user_id       Int
+  permission_id Int
+  permission    AuthPermission @relation(fields: [permission_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_user_user_permi_permission_id_1fbb5f2c_fk_auth_perm")
+  user          AuthUser       @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "auth_user_user_permissions_user_id_a95ead1b_fk_auth_user_id")
+
+  @@unique([user_id, permission_id], map: "auth_user_user_permissions_user_id_permission_id_14a6b632_uniq")
+  @@index([permission_id], map: "auth_user_user_permissions_permission_id_1fbb5f2c")
+  @@index([user_id], map: "auth_user_user_permissions_user_id_a95ead1b")
+  @@map("auth_user_user_permissions")
+}
+
+/// DRF token table. `key` is the 40-hex-char PK; header scheme is `Token`, not `Bearer`.
+/// Login is get-or-create — v1 never rotates an existing token.
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model AuthToken {
+  key     String   @id @db.VarChar(40)
+  created DateTime @db.Timestamptz(6)
+  user_id Int      @unique
+  user    AuthUser @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "authtoken_token_user_id_35299eff_fk_auth_user_id")
+
+  @@index([key], map: "authtoken_token_key_10f0b77e_like")
+  @@map("authtoken_token")
+}
+
+model DjangoContentType {
+  id          Int              @id @default(autoincrement())
+  app_label   String           @db.VarChar(100)
+  model       String           @db.VarChar(100)
+  permissions AuthPermission[]
+
+  @@unique([app_label, model], map: "django_content_type_app_label_model_76bd3d3b_uniq")
+  @@map("django_content_type")
+}
+
+/// Django's own migration ledger. v2 never writes it; kept mapped so `migrate diff`
+/// against the live database produces no spurious drift.
+model DjangoMigration {
+  id      Int      @id @default(autoincrement())
+  app     String   @db.VarChar(255)
+  name    String   @db.VarChar(255)
+  applied DateTime @db.Timestamptz(6)
+
+  @@map("django_migrations")
+}
+
+model DjangoSession {
+  session_key  String   @id @db.VarChar(40)
+  session_data String
+  expire_date  DateTime @db.Timestamptz(6)
+
+  @@index([expire_date], map: "django_session_expire_date_a5c62663")
+  @@index([session_key], map: "django_session_session_key_c0390e0f_like")
+  @@map("django_session")
+}
+
+// ---------------------------------------------------------------------------
+// fondo_api domain tables
+// ---------------------------------------------------------------------------
+
+/// Physical half #2 of `UserProfile(User)`. The PK *is* the FK to `auth_user.id`
+/// (`user_ptr_id`), which is what makes this a true 1:1. Every "user" read needs both
+/// halves — always `include: { auth_user: true }` (or the reverse).
+/// Roles: 0 ADMIN, 1 PRESIDENT, 2 TREASURER, 3 MEMBER (Django default 3).
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model UserProfile {
+  user_ptr_id         Int                        @id
+  identification      BigInt                     @unique
+  role                Int
+  key_activation      String?                    @db.VarChar(100)
+  birthdate           DateTime?                  @db.Date
+  auth_user           AuthUser                   @relation(fields: [user_ptr_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_userprofile_user_ptr_id_9438f85d_fk_auth_user_id")
+  activity_users      ActivityUser[]
+  loans               Loan[]
+  notification_subs   NotificationSubscription[]
+  powers_as_requestee Power[]                    @relation("power_requestee")
+  powers_as_requester Power[]                    @relation("power_requester")
+  saving_accounts     SavingAccount[]
+  // **D11, both halves now landed.** Django models these as plain ForeignKeys, not OneToOne,
+  // so v1's schema had no unique constraint on `user_id` while `UserFinance.objects.get(
+  // user_id=...)` assumed one. Phase 9 step 6 added `UNIQUE (user_id)` to both tables, so the
+  // relations below are single-valued in the database as well as in v1's intent. They stay
+  // typed as lists here because Prisma derives that from the relation side, and changing it
+  // would ripple through every `include`; the constraint is what closes D11.
+  finances            UserFinance[]
+  preferences         UserPreference[]
+
+  @@map("fondo_api_userprofile")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model UserPreference {
+  id              Int         @id @default(autoincrement())
+  notifications   Boolean
+  user_id         Int
+  primary_color   String      @db.VarChar(15)
+  secondary_color String      @db.VarChar(15)
+  user            UserProfile @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_userprefer_user_id_c39c1264_fk_fondo_api")
+
+  /// **D11**, physical half, landed by Phase 9 step 6.
+  @@unique([user_id], map: "fondo_api_userpreference_user_id_key")
+  @@index([user_id], map: "fondo_api_userpreference_user_id_c39c1264")
+  @@map("fondo_api_userpreference")
+}
+
+/// `last_modified` is Django `auto_now` on a DateField — application-set, no DB default.
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model UserFinance {
+  id                    Int         @id @default(autoincrement())
+  contributions         BigInt
+  balance_contributions BigInt
+  total_quota           BigInt
+  utilized_quota        BigInt
+  available_quota       BigInt
+  last_modified         DateTime    @db.Date
+  user_id               Int
+  user                  UserProfile @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_userfinanc_user_id_9645b2bd_fk_fondo_api")
+
+  /// **D11**, physical half, landed by Phase 9 step 6.
+  @@unique([user_id], map: "fondo_api_userfinance_user_id_key")
+  @@index([user_id], map: "fondo_api_userfinance_user_id_9645b2bd")
+  @@map("fondo_api_userfinance")
+}
+
+/// states: 0 WAITING_APPROVAL, 1 APPROVED, 2 DENIED, 3 PAID_OUT
+/// fee:    0 MONTHLY, 1 UNIQUE
+/// payment: 0 CASH, 1 BANK_ACCOUNT, 2 REFINANCED
+/// `rate` is Decimal(5,3) — never let it become a float.
+/// `refinanced_loan` is a bare BigInt, not an FK (post-migration cleanup backlog).
+/// `created_at` is `auto_now_add` — application-set, no DB default.
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model Loan {
+  id                 Int          @id @default(autoincrement())
+  value              BigInt
+  timelimit          Int
+  disbursement_date  DateTime     @db.Date
+  payment            Int
+  created_at         DateTime     @db.Timestamptz(6)
+  fee                Int
+  comments           String?
+  state              Int
+  rate               Decimal      @db.Decimal(5, 3)
+  user_id            Int
+  prev_loan_id       Int?
+  refinanced_loan    BigInt?
+  disbursement_value BigInt?
+  prev_loan          Loan?        @relation("loan_refinance_chain", fields: [prev_loan_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_loan_prev_loan_id_9235a32d_fk_fondo_api_loan_id")
+  next_loans         Loan[]       @relation("loan_refinance_chain")
+  user               UserProfile  @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_loan_user_id_f4df893f_fk_fondo_api")
+  details            LoanDetail[]
+
+  @@index([prev_loan_id], map: "fondo_api_loan_prev_loan_id_9235a32d")
+  @@index([user_id], map: "fondo_api_loan_user_id_f4df893f")
+  @@map("fondo_api_loan")
+}
+
+/// ⚠️ `loan_id` is a plain FK in v1, so a loan can accumulate several detail rows and
+/// `LoanDetail.objects.get(loan_id=...)` then 500s permanently (§5 D6). The unique
+/// constraint is a Phase 4 / post-cutover change — NOT applied here, because Django still
+/// owns the schema.
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model LoanDetail {
+  id              Int      @id @default(autoincrement())
+  total_payment   BigInt
+  minimum_payment BigInt
+  payday_limit    DateTime @db.Date
+  loan_id         Int
+  capital_balance BigInt
+  from_date       DateTime @db.Date
+  interests       BigInt
+  loan            Loan     @relation(fields: [loan_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_loandetail_loan_id_6a9fa8c0_fk_fondo_api_loan_id")
+
+  /// **D6**, physical half, landed by Phase 9 step 6. Django's non-unique index
+  /// `fondo_api_loandetail_loan_id_6a9fa8c0` is kept alongside (operator answer Q58).
+  @@unique([loan_id], map: "fondo_api_loandetail_loan_id_key")
+
+  @@index([loan_id], map: "fondo_api_loandetail_loan_id_6a9fa8c0")
+  @@map("fondo_api_loandetail")
+}
+
+model ActivityYear {
+  id         Int        @id @default(autoincrement())
+  year       BigInt     @unique
+  enable     Boolean
+  activities Activity[]
+
+  @@map("fondo_api_activityyear")
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model Activity {
+  id      Int            @id @default(autoincrement())
+  name    String
+  value   BigInt
+  date    DateTime       @db.Date
+  year_id Int
+  year    ActivityYear   @relation(fields: [year_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_activity_year_id_aed3b367_fk_fondo_api")
+  users   ActivityUser[]
+
+  @@index([year_id], map: "fondo_api_activity_year_id_aed3b367")
+  @@map("fondo_api_activity")
+}
+
+/// state: 0 NOT_PAID, 1 PAID_OUT, 2 EXEMPTED
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model ActivityUser {
+  id          Int         @id @default(autoincrement())
+  state       Int
+  activity_id Int
+  user_id     Int
+  activity    Activity    @relation(fields: [activity_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_activityus_activity_id_d8912768_fk_fondo_api")
+  user        UserProfile @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_activityus_user_id_b53bb1a7_fk_fondo_api")
+
+  @@index([activity_id], map: "fondo_api_activityuser_activity_id_d8912768")
+  @@index([user_id], map: "fondo_api_activityuser_user_id_b53bb1a7")
+  @@map("fondo_api_activityuser")
+}
+
+/// ⚠️ `subscription` is `hstore`. Prisma Client CANNOT select or write this column —
+/// reads must cast (`subscription::text`) and go through `NotificationSubscriptionRepository`
+/// + the hstore codec. hstore values are strings only: the nested `keys` object is stored as
+/// a Python `repr` and needs the `'` → `"` repair on read.
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model NotificationSubscription {
+  id           Int                   @id @default(autoincrement())
+  /// Phase 9 step 6 (stage 2a): `hstore` -> `jsonb`. Every member is a JSON string except
+  /// `keys`, which the migration's repair pass unwrapped from its Python repr into an object.
+  subscription Json                  @db.JsonB
+  user_id      Int
+  user         UserProfile           @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_notificati_user_id_5954476e_fk_fondo_api")
+
+  @@index([user_id], map: "fondo_api_notificationsubscriptions_user_id_5954476e")
+  @@map("fondo_api_notificationsubscriptions")
+}
+
+/// type:   0 NOTIFICATIONS
+/// repeat: 0 NONE, 1 DAILY, 2 WEEKLY, 3 MONTHLY, 4 YEARLY
+/// ⚠️ Phase 9 step 6 (stage 2a): `payload` is `jsonb`. `user_ids` is a real JSON array —
+/// the migration's repair pass did v1's `json.loads` once and permanently. Every other
+/// member is still a JSON **string**, `owner_id` included: that is what v1 stored and reads.
+model SchedulerTask {
+  id        Int      @id @default(autoincrement())
+  type      Int
+  run_date  DateTime @db.Timestamptz(6)
+  payload   Json     @db.JsonB
+  processed Boolean
+  repeat    Int
+
+  @@map("fondo_api_schedulertask")
+}
+
+/// type: 0 proceeding, 1 presentations. `created_at` is `auto_now_add`.
+model File {
+  id           Int      @id @default(autoincrement())
+  type         Int
+  display_name String   @unique
+  created_at   DateTime @db.Timestamptz(6)
+
+  @@index([display_name], map: "fondo_api_file_display_name_4fdf1fd2_like")
+  @@map("fondo_api_file")
+}
+
+/// state: 0 PENDING, 1 APPROVED, 2 REJECTED
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model Power {
+  id           Int         @id @default(autoincrement())
+  meeting_date DateTime    @db.Date
+  state        Int
+  requestee_id Int
+  requester_id Int
+  requestee    UserProfile @relation("power_requestee", fields: [requestee_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_power_requestee_id_e5f04cf8_fk_fondo_api")
+  requester    UserProfile @relation("power_requester", fields: [requester_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_power_requester_id_59064a2c_fk_fondo_api")
+
+  @@index([requestee_id], map: "fondo_api_power_requestee_id_e5f04cf8")
+  @@index([requester_id], map: "fondo_api_power_requester_id_59064a2c")
+  @@map("fondo_api_power")
+}
+
+/// state: 0 ACTIVE, 1 CLOSED. `created_at` is `auto_now_add`.
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model SavingAccount {
+  id         Int         @id @default(autoincrement())
+  created_at DateTime    @db.Timestamptz(6)
+  end_date   DateTime    @db.Date
+  state      Int
+  value      BigInt
+  user_id    Int
+  user       UserProfile @relation(fields: [user_id], references: [user_ptr_id], onDelete: NoAction, onUpdate: NoAction, map: "fondo_api_savingacco_user_id_b7105f36_fk_fondo_api")
+
+  @@index([user_id], map: "fondo_api_savingaccount_user_id_b7105f36")
+  @@map("fondo_api_savingaccount")
+}

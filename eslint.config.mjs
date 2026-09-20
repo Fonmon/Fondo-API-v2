@@ -1,0 +1,165 @@
+// @ts-check
+import eslint from '@eslint/js';
+import tseslint from 'typescript-eslint';
+import eslintPluginPrettierRecommended from 'eslint-plugin-prettier/recommended';
+import globals from 'globals';
+
+export default tseslint.config(
+  {
+    ignores: ['eslint.config.mjs', 'dist/**', 'coverage/**', 'generated/**', 'node_modules/**'],
+  },
+  eslint.configs.recommended,
+  ...tseslint.configs.recommendedTypeChecked,
+  eslintPluginPrettierRecommended,
+  {
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        ...globals.jest,
+      },
+      sourceType: 'commonjs',
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
+  {
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'error',
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-unsafe-argument': 'error',
+      '@typescript-eslint/explicit-function-return-type': [
+        'error',
+        { allowExpressions: true, allowTypedFunctionExpressions: true },
+      ],
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
+    },
+  },
+  {
+    // ⚠️ Condition B2. `Date.UTC` maps a `year` argument in [0, 99] to `1900 + year`
+    // (ECMAScript `MakeFullYear`); Python's `datetime.date` and `strptime` do not. That
+    // divergence was silent -- `end_date: "0050-06-15"` answered 200 on BOTH stacks and stored
+    // a different year -- and one of its forms wrote a row v1 would never have created.
+    //
+    // The first fix round routed four call sites through `utcMillisFromParts` and wrote
+    // "every `Date.UTC` call in this codebase must go through here" in a docblock. FOUR MORE
+    // SITES were live at that moment: `parseBirthdate` and `strptimeIsoDate` (both reachable,
+    // both v1 200 / v2 500 for a two-digit year) and two in `relativedelta.util.ts`. The prose
+    // invariant was false the day it was written, and nothing could tell us.
+    //
+    // This rule is that same claim in the only form that cannot go stale.
+    // Production paths only. Spec files legitimately construct fixtures with literal
+    // four-digit years, and the B2 cells deliberately name the raw behaviour they pin.
+    files: ['src/**/*.ts'],
+    ignores: ['src/common/utils/date.util.ts', 'src/**/*.spec.ts'],
+    rules: {
+      // ⚠️ FOUR selectors, not one. The first version of this rule banned `Date.UTC(...)`
+      // and nothing else, and the control recorded for it -- "a fresh raw Date.UTC reports
+      // exactly one error" -- proved the rule FIRES, not that the class is CLOSED. That is
+      // C67 one level up: a control that exercises only the case you already thought of.
+      // `nestjs-reviewer` planted five bypass forms and four of them passed clean.
+      //
+      // ⚠️ SCOPE — a measurement, not a guarantee (plan §4 rule 15). Measured when this comment
+      // was written, on a one-plant-per-line probe: 17 planted escapes caught, 0 missed; 6
+      // legitimate forms clean (`new Date()`, `new Date(ms)`, `Date.now()`, `d: Date`,
+      // `typeof Date`, `x instanceof Date`); repo lint clean. One named survivor, which no AST
+      // selector can see because the name is never spelled:
+      // `(globalThis as any)['Da' + 'te'].UTC(50, 0, 1)`.
+      //
+      // The previous version of this comment said the negation below banned "every lexical
+      // Date except a short allowlist". It did not: it matched `Date` by parent node rather than
+      // by role, so `new Proxy(Date, {})`, `new Box(Date)` and `Date.bind(null)` were lint-clean,
+      // and the proxied constructor returns 1950. Expect further bypass forms. The rule raises
+      // the cost of the accident; it does not make the remap unreachable.
+      //
+      // `new Date(y, m, d)` is the important one: it runs the same `MakeFullYear`
+      // (measured: `new Date(50,0,1).getFullYear() === 1950`), it is the MORE idiomatic
+      // spelling, and it carries a local-time-zone bug on top. The single-argument forms
+      // (`new Date(millis)`, `new Date(iso)`, `new Date()`) are untouched.
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "MemberExpression[object.name='Date'][property.name='UTC']",
+          message:
+            'Use utcMillisFromParts from src/common/utils/date.util.ts. Raw Date.UTC maps years 0-99 to 1900+year, which datetime.date does not (condition B2).',
+        },
+        {
+          selector: "MemberExpression[object.name='Date'][property.value='UTC']",
+          message:
+            "Date['UTC'] is Date.UTC spelled differently, and carries the same years 0-99 remap (B2). Use utcMillisFromParts.",
+        },
+        {
+          selector: "VariableDeclarator[init.name='Date']",
+          message:
+            'Aliasing or destructuring Date defeats the Date.UTC ban (B2). Use utcMillisFromParts from src/common/utils/date.util.ts.',
+        },
+        {
+          selector: "NewExpression[callee.name='Date'][arguments.length>=2]",
+          message:
+            'new Date(y, m, d) runs the same MakeFullYear remap as Date.UTC (years 0-99 become 1900+year) AND interprets the parts in the local time zone. Use utcMillisFromParts (B2).',
+        },
+        {
+          // ⚠️ Minor 9 — the FIFTH member of the class, and not a spelling of Date.UTC at all:
+          // a separate API with the identical remap. Measured:
+          //   new Date(0).setYear(50) -> getFullYear() === 1950
+          // The commit that added this rule is titled "close the class, not the instance", and
+          // it was still one member short. `getYear` is banned alongside it: it returns
+          // `year - 1900`, the same legacy convention read backwards.
+          selector: "MemberExpression[property.name=/^(setYear|getYear)$/]",
+          message:
+            'Date.prototype.setYear/getYear use the same legacy 1900 base as the Date.UTC remap (new Date(0).setYear(50) is 1950). Use setUTCFullYear / getUTCFullYear, or utcMillisFromParts (B2).',
+        },
+        {
+          // `globalThis.Date.UTC(...)`: the outer MemberExpression's `object` is itself a
+          // MemberExpression, so `object.name` is undefined and the first selector misses it.
+          selector: "MemberExpression[property.name='Date']",
+          message:
+            'Reach Date directly rather than through a namespace object — it routes around the Date.UTC ban (B2).',
+        },
+        {
+          // `let D; D = Date;` is an AssignmentExpression, not a VariableDeclarator.
+          selector: "AssignmentExpression[right.name='Date']",
+          message:
+            'Aliasing Date by assignment defeats the Date.UTC ban (B2). Use utcMillisFromParts.',
+        },
+        // ⚠️ Third pass (Minor 11). `nestjs-reviewer` planted nine more forms and all nine
+        // passed clean. The internal inconsistency it named is the reason these are here: the
+        // config already treats bracket spelling as in scope for `Date['UTC']`, so defending
+        // that while leaving `d['setYear']` open was not a judgement, it was an oversight.
+        { selector: "MemberExpression[property.value='Date']", message: 'Reaching Date through a bracket-spelled property routes around the ban (B2).' },
+        { selector: "MemberExpression[property.value=/^(setYear|getYear)$/]", message: 'Bracket-spelled setYear/getYear carry the same 1900 base (B2).' },
+        { selector: "MemberExpression[computed=true][object.name='Date']", message: 'Computed access on Date routes around the ban (B2).' },
+        { selector: "CallExpression > Identifier[name='Date']", message: 'Passing Date as a value routes around the ban (B2) — inject a clock returning a number instead.' },
+        { selector: "ArrayExpression > Identifier[name='Date']", message: 'Smuggling Date through an array routes around the ban (B2).' },
+        { selector: "ReturnStatement > Identifier[name='Date']", message: 'Returning Date routes around the ban (B2).' },
+        { selector: "Property[shorthand=true][value.name='Date']", message: 'Shorthand-property capture of Date routes around the ban (B2).' },
+        { selector: "NewExpression[callee.name='Date'] > SpreadElement", message: 'new Date(...args) hides the argument count; the multi-argument form carries the MakeFullYear remap (B2).' },
+        // Major 10 (re-check #5). Enumerating escape sites one spelling at a time is why each pass
+        // found more; this bans them by negation instead. Allowed positions: `new Date(...)`,
+        // `Date.x`, type positions, and `instanceof Date`.
+        {
+          selector:
+            "Identifier[name='Date']:not(NewExpression > Identifier.callee):not(MemberExpression > Identifier.object):not(TSTypeReference > Identifier):not(TSTypeQuery > Identifier):not(TSQualifiedName > Identifier):not(BinaryExpression[operator='instanceof'] > Identifier.right)",
+          message: 'Date used as a value escapes the Date.UTC ban (B2). Inject a clock returning a number, or use utcMillisFromParts.',
+        },
+        {
+          // Re-check #6: with `Date` exempted whenever it is a member-expression object, `Date.bind`,
+          // `Date.call`, `Date.apply` and `Date.prototype` hand the constructor out lint-clean. The
+          // members production code uses are allow-listed instead; repo lint measures the list.
+          selector: "MemberExpression[object.name='Date']:not([property.name='now'])",
+          message: 'Only Date.now may be read off Date in production code; other members (bind, call, apply, prototype, UTC) hand out or run the MakeFullYear remap (B2).',
+        },
+        {
+          // `new (Date satisfies DateConstructor)(1950, 0, 1)` produced no lint error of any kind.
+          selector:
+            "NewExpression[arguments.length>=2] > :matches(TSAsExpression, TSNonNullExpression, TSSatisfiesExpression) Identifier[name='Date']",
+          message: 'A wrapped Date constructor with multiple arguments still runs the MakeFullYear remap (B2). Use utcMillisFromParts.',
+        },
+      ],
+    },
+  },
+);
